@@ -3,16 +3,21 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>Subjects</title>
+  <title>Physics Topics</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <div class="subject-container">
-    <h2>Select a Topic</h2>
-    <button onclick="alert('Kinematics Clicked')">Kinematics</button>
-    <button onclick="alert('Dynamics Clicked')">Dynamics</button>
-    <button onclick="alert('Light Clicked')">Light</button>
-    <button onclick="alert('Sound Clicked')">Sound</button>
+  <h2>Select a Topic</h2>
+  <div id="buttons">
+    <button onclick="loadQuestions('kinematics')">Kinematics</button>
+    <button onclick="loadQuestions('dynamics')">Dynamics</button>
+    <button onclick="loadQuestions('light')">Light</button>
+    <button onclick="loadQuestions('sound')">Sound</button>
   </div>
+  <div id="quiz-container"></div>
+  <button id="submit-btn" onclick="submitQuiz()" style="display:none;">Submit</button>
+  <div id="result"></div>
+
+  <script src="script.js"></script>
 </body>
 </html>
