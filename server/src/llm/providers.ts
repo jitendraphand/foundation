@@ -26,6 +26,17 @@ export interface ProviderDef {
 }
 
 export const PROVIDERS: Record<string, ProviderDef> = {
+  openai: {
+    id: 'openai',
+    label: 'OpenAI',
+    defaultBaseUrl: 'https://api.openai.com/v1',
+    docsUrl: 'https://platform.openai.com/docs/api-reference/chat',
+    keyUrl: 'https://platform.openai.com/api-keys',
+    modelHint: 'e.g. gpt-4.1 for the best questions, gpt-4.1-mini to keep costs down.',
+    suggestedModels: ['gpt-4.1', 'gpt-4.1-mini', 'gpt-4o', 'gpt-4o-mini', 'o4-mini'],
+    supportsJsonMode: true,
+  },
+
   openrouter: {
     id: 'openrouter',
     label: 'OpenRouter',
@@ -124,16 +135,34 @@ export class LlmError extends Error {
   }
 }
 
+/**
+ * OpenAI's reasoning models (o1, o3, o4, and the gpt-5 reasoning line) reject
+ * `max_tokens` in favour of `max_completion_tokens`, and reject any
+ * temperature other than the default. Sending the usual parameters gets a 400
+ * that reads like a bad API key, so detect them and adjust.
+ */
+function isReasoningModel(model: string): boolean {
+  const name = model.toLowerCase().split('/').pop() ?? '';
+  return /^(o\d|gpt-5)/.test(name);
+}
+
 export async function chatComplete(req: ChatRequest): Promise<ChatResponse> {
   const url = `${req.baseUrl.replace(/\/+$/, '')}/chat/completions`;
   const started = Date.now();
+  const reasoning = isReasoningModel(req.model);
 
   const body: Record<string, unknown> = {
     model: req.model,
     messages: req.messages,
-    temperature: req.temperature ?? 0.4,
-    max_tokens: req.maxTokens ?? 8000,
   };
+
+  if (reasoning) {
+    body.max_completion_tokens = req.maxTokens ?? 8000;
+  } else {
+    body.temperature = req.temperature ?? 0.4;
+    body.max_tokens = req.maxTokens ?? 8000;
+  }
+
   if (req.jsonMode) body.response_format = { type: 'json_object' };
 
   const controller = new AbortController();

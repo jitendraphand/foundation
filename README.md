@@ -33,8 +33,8 @@ ARM)** instance with `docker compose up -d`.
   correct answers with worked explanations.
 
 ### For administrators
-- **Set test** — generate questions from OpenRouter, NVIDIA NIM, Hugging Face
-  Inference Providers, or any other OpenAI-compatible endpoint. Full control of
+- **Set test** — generate questions from OpenAI, OpenRouter, NVIDIA NIM,
+  Hugging Face Inference Providers, or any other OpenAI-compatible endpoint. Full control of
   the system prompt, the model, the difficulty and cognitive mix, and the exact
   user message (with a preview of precisely what will be sent).
 - **Review** — every draft renders exactly as a student will see it, maths,

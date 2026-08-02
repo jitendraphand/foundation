@@ -145,10 +145,15 @@ mixed-content block.
 
 | Provider | Base URL | Where to get a key | Model id format |
 |---|---|---|---|
+| OpenAI | `https://api.openai.com/v1` | <https://platform.openai.com/api-keys> | `gpt-4.1`, `gpt-4.1-mini` |
 | OpenRouter | `https://openrouter.ai/api/v1` | <https://openrouter.ai/keys> | `anthropic/claude-sonnet-4.5` |
 | NVIDIA NIM | `https://integrate.api.nvidia.com/v1` | <https://build.nvidia.com/> | `meta/llama-3.3-70b-instruct` |
 | Hugging Face | `https://router.huggingface.co/v1` | <https://huggingface.co/settings/tokens> | `meta-llama/Llama-3.3-70B-Instruct` |
 | Other | anything OpenAI-compatible | Groq, Together, a local Ollama, … | whatever it expects |
+
+OpenAI's reasoning models (`o1`/`o3`/`o4`/`gpt-5` lines) are detected
+automatically and sent `max_completion_tokens` with no `temperature`, which is
+what they require; everything else gets the usual parameters.
 
 Hugging Face routes to whichever backend provider is fastest by default. To pin
 one, append a suffix to the model id — `openai/gpt-oss-120b:groq` — or use
