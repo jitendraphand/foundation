@@ -34,6 +34,7 @@ export default async function adminUserRoutes(app: FastifyInstance) {
               { lastName: { contains: q.search, mode: 'insensitive' } },
               { username: { contains: q.search, mode: 'insensitive' } },
               { rollNo: { contains: q.search, mode: 'insensitive' } },
+              { publicId: { contains: q.search, mode: 'insensitive' } },
             ],
           }
         : {}),
@@ -54,7 +55,7 @@ export default async function adminUserRoutes(app: FastifyInstance) {
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
         select: {
-          id: true, username: true, firstName: true, lastName: true, grade: true, division: true,
+          id: true, publicId: true, username: true, firstName: true, lastName: true, grade: true, division: true,
           rollNo: true, dateOfBirth: true, isActive: true, lastLoginAt: true, createdAt: true,
           _count: { select: { attempts: true } },
         },
@@ -71,7 +72,7 @@ export default async function adminUserRoutes(app: FastifyInstance) {
     const user = await prisma.user.findFirst({
       where: { id, deletedAt: null },
       select: {
-        id: true, username: true, firstName: true, lastName: true, grade: true, division: true,
+        id: true, publicId: true, username: true, firstName: true, lastName: true, grade: true, division: true,
         rollNo: true, dateOfBirth: true, isActive: true, role: true, lastLoginAt: true,
         createdAt: true, mustChangePassword: true,
       },
@@ -99,7 +100,19 @@ export default async function adminUserRoutes(app: FastifyInstance) {
     rollNo: z.string().trim().min(1).max(20).optional(),
     dateOfBirth: z.string().optional(),
     isActive: z.boolean().optional(),
-    /** Re-derive the username from the (possibly new) name. */
+    /**
+     * Set the username directly. Lowercase letters and digits only, so it
+     * stays easy for a child to type and safe to put in a URL.
+     */
+    username: z
+      .string()
+      .trim()
+      .toLowerCase()
+      .min(3)
+      .max(40)
+      .regex(/^[a-z][a-z0-9]*$/, 'A username must start with a letter and contain only lowercase letters and numbers.')
+      .optional(),
+    /** Re-derive the username from the (possibly new) name instead. */
     regenerateUsername: z.boolean().optional(),
   });
 
@@ -134,16 +147,31 @@ export default async function adminUserRoutes(app: FastifyInstance) {
       data.dateOfBirth = dob;
     }
 
+    // An explicit username wins over "re-derive it from the name".
+    if (body.username && body.regenerateUsername) {
+      return reply.code(400).send({
+        error: 'Choose either a specific username or re-generate it from the name, not both.',
+      });
+    }
+
     try {
       const updated = await prisma.$transaction(async (tx) => {
-        if (body.regenerateUsername) {
+        if (body.username) {
+          data.username = body.username;
+        } else if (body.regenerateUsername) {
           data.username = await allocateUsername(
             tx,
             body.firstName ?? before.firstName,
             body.lastName ?? before.lastName,
           );
         }
-        return tx.user.update({ where: { id }, data, select: { id: true, username: true } });
+        // publicId is deliberately never touched: it is the stable identity
+        // that survives every spelling correction made here.
+        return tx.user.update({
+          where: { id },
+          data,
+          select: { id: true, publicId: true, username: true },
+        });
       });
 
       await audit(request.user!.sub, 'user.update', {
@@ -151,20 +179,57 @@ export default async function adminUserRoutes(app: FastifyInstance) {
         entityId: id,
         ip: request.ip,
         detail: {
-          before: { firstName: before.firstName, lastName: before.lastName, grade: before.grade, division: before.division, rollNo: before.rollNo, isActive: before.isActive },
+          publicId: before.publicId,
+          before: {
+            username: before.username,
+            firstName: before.firstName,
+            lastName: before.lastName,
+            grade: before.grade,
+            division: before.division,
+            rollNo: before.rollNo,
+            isActive: before.isActive,
+          },
           after: body,
         },
       });
 
-      return { ok: true, user: updated };
+      return {
+        ok: true,
+        user: updated,
+        ...(updated.username !== before.username
+          ? { message: `Username changed from ${before.username} to ${updated.username}. Tell the student their new username.` }
+          : {}),
+      };
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        const target = (err.meta?.target as string[] | string | undefined) ?? '';
+        const fields = Array.isArray(target) ? target.join(',') : String(target);
+        if (fields.includes('username')) {
+          return reply.code(409).send({ error: `The username "${body.username}" is already taken.` });
+        }
         return reply.code(409).send({
           error: 'Another student already has that roll number in that grade and division.',
         });
       }
       throw err;
     }
+  });
+
+  /** Checks a username before the admin commits to it. */
+  app.get('/api/admin/users/username-available', async (request) => {
+    const q = z
+      .object({ username: z.string().trim().toLowerCase().min(1).max(40), excludeUserId: z.string().uuid().optional() })
+      .parse(request.query);
+
+    if (!/^[a-z][a-z0-9]*$/.test(q.username) || q.username.length < 3) {
+      return { available: false, reason: 'Use at least 3 characters: lowercase letters and numbers, starting with a letter.' };
+    }
+
+    const existing = await prisma.user.findUnique({ where: { username: q.username }, select: { id: true } });
+    if (existing && existing.id !== q.excludeUserId) {
+      return { available: false, reason: 'That username is already taken.' };
+    }
+    return { available: true };
   });
 
   app.post('/api/admin/users/:id/activate', async (request, reply) => {
@@ -291,7 +356,7 @@ export default async function adminUserRoutes(app: FastifyInstance) {
             grade: body.grade, division: body.division, rollNo: body.rollNo,
             dateOfBirth: dob, passwordHash, role: body.role, mustChangePassword: true,
           },
-          select: { id: true, username: true, role: true },
+          select: { id: true, publicId: true, username: true, role: true },
         });
       });
 

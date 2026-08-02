@@ -9,7 +9,7 @@ import { prisma } from '../db.js';
 /**
  * Backup strategy.
  *
- * Each archive contains BOTH:
+ * One plain .tar.gz archive containing:
  *
  *   db.dump    - pg_dump custom format. Exact, fast, restores in one command.
  *                Tied to the PostgreSQL major version it came from.
@@ -20,14 +20,16 @@ import { prisma } from '../db.js';
  *                schema or even a different database engine.
  *
  *   uploads/   - admin-uploaded images and cached rendered diagrams.
+ *
  *   manifest.json - counts, checksums, versions, so a restore can be verified.
  *
- * The whole thing is a .tar.gz, then encrypted with AES-256-CBC using
- * BACKUP_PASSPHRASE, so it is safe to put on Google Drive.
+ * The archive is NOT encrypted, so it can be opened with any unzip tool. It
+ * does contain password hashes and encrypted LLM API keys, so keep it in a
+ * private folder rather than a shared or public one.
  */
 
-export const SCHEMA_VERSION = 1;
-export const APP_VERSION = '1.0.0';
+export const SCHEMA_VERSION = 2;
+export const APP_VERSION = '1.1.0';
 
 function run(cmd: string, args: string[], opts: { env?: NodeJS.ProcessEnv; cwd?: string } = {}): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -69,8 +71,7 @@ async function exportJson(): Promise<Record<string, unknown>> {
 
   return {
     // Password hashes and encrypted API keys are included on purpose: a
-    // restore must reproduce a working system. This is exactly why the
-    // archive is encrypted.
+    // restore must reproduce a working system.
     schemaVersion: SCHEMA_VERSION,
     appVersion: APP_VERSION,
     exportedAt: new Date().toISOString(),
@@ -95,7 +96,7 @@ export async function createBackup(opts: { createdById?: string; includeAssets?:
   const includeAssets = opts.includeAssets ?? true;
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const workDir = path.join(env.BACKUP_DIR, `.work-${stamp}`);
-  const filename = `foundation-backup-${stamp}.tar.gz.enc`;
+  const filename = `foundation-backup-${stamp}.tar.gz`;
   const filePath = path.join(env.BACKUP_DIR, filename);
 
   await fs.mkdir(workDir, { recursive: true });
@@ -118,18 +119,14 @@ export async function createBackup(opts: { createdById?: string; includeAssets?:
     const tables = json.tables as Record<string, unknown[]>;
     const tableCounts = Object.fromEntries(Object.entries(tables).map(([k, v]) => [k, v.length]));
 
-    // 3. Uploaded images and cached diagrams.
+    // 3. Uploaded images and cached diagrams. Copied recursively because
+    //    assets are stored in sharded subdirectories by hash prefix.
     let assetCount = 0;
     if (includeAssets) {
       const uploadsTarget = path.join(workDir, 'uploads');
       await fs.mkdir(uploadsTarget, { recursive: true });
       try {
-        const entries = await fs.readdir(env.UPLOAD_DIR, { withFileTypes: true });
-        for (const entry of entries) {
-          if (!entry.isFile()) continue;
-          await fs.copyFile(path.join(env.UPLOAD_DIR, entry.name), path.join(uploadsTarget, entry.name));
-          assetCount++;
-        }
+        assetCount = await copyTree(env.UPLOAD_DIR, uploadsTarget);
       } catch {
         // No uploads directory yet - nothing to include.
       }
@@ -142,24 +139,15 @@ export async function createBackup(opts: { createdById?: string; includeAssets?:
       createdAtUtc: new Date().toISOString(),
       postgresDump: 'db.dump',
       jsonExport: 'data.json',
+      encrypted: false,
       includesAssets: includeAssets,
       assetFiles: assetCount,
       tableCounts,
     };
     await fs.writeFile(path.join(workDir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
 
-    // 5. Tar, gzip, encrypt. Streaming through openssl keeps memory flat, which
-    //    matters on a 12 GB box that is also serving an exam.
-    const tarPath = path.join(env.BACKUP_DIR, `.${stamp}.tar.gz`);
-    await run('tar', ['-czf', tarPath, '-C', workDir, '.']);
-
-    await run('openssl', [
-      'enc', '-aes-256-cbc', '-pbkdf2', '-iter', '100000', '-salt',
-      '-in', tarPath, '-out', filePath,
-      '-pass', 'env:BACKUP_PASSPHRASE',
-    ], { env: { BACKUP_PASSPHRASE: env.BACKUP_PASSPHRASE } });
-
-    await fs.rm(tarPath, { force: true });
+    // 5. Tar and gzip.
+    await run('tar', ['-czf', filePath, '-C', workDir, '.']);
 
     // 6. Checksum and record.
     const stat = await fs.stat(filePath);
@@ -170,7 +158,7 @@ export async function createBackup(opts: { createdById?: string; includeAssets?:
         filename,
         byteSize: stat.size,
         sha256,
-        isEncrypted: true,
+        isEncrypted: false,
         includesAssets: includeAssets,
         manifest: manifest as object,
         createdById: opts.createdById ?? null,
@@ -181,6 +169,25 @@ export async function createBackup(opts: { createdById?: string; includeAssets?:
   } finally {
     await fs.rm(workDir, { recursive: true, force: true }).catch(() => undefined);
   }
+}
+
+/** Recursively copies a directory, returning the number of files copied. */
+async function copyTree(from: string, to: string): Promise<number> {
+  let count = 0;
+  const entries = await fs.readdir(from, { withFileTypes: true });
+
+  for (const entry of entries) {
+    const src = path.join(from, entry.name);
+    const dst = path.join(to, entry.name);
+    if (entry.isDirectory()) {
+      await fs.mkdir(dst, { recursive: true });
+      count += await copyTree(src, dst);
+    } else if (entry.isFile()) {
+      await fs.copyFile(src, dst);
+      count++;
+    }
+  }
+  return count;
 }
 
 function hashFile(filePath: string): Promise<string> {

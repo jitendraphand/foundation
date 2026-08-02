@@ -2,12 +2,9 @@
 #
 # Restores the system from an encrypted backup archive.
 #
-#   ./deploy/restore.sh ~/foundation-backup-2026-08-02T10-15-00.tar.gz.enc
+#   ./deploy/restore.sh ~/foundation-backup-2026-08-02T10-15-00.tar.gz
 #
 # THIS REPLACES THE LIVE DATABASE. It asks for confirmation first.
-#
-# The BACKUP_PASSPHRASE in .env must match the value in force when the archive
-# was created, or it cannot be decrypted.
 
 set -euo pipefail
 
@@ -18,7 +15,7 @@ warn() { echo -e "${YELLOW} !!${NC} $*"; }
 fail() { echo -e "${RED}ERR${NC} $*" >&2; exit 1; }
 
 ARCHIVE="${1:-}"
-[[ -z "$ARCHIVE" ]] && fail "Usage: ./deploy/restore.sh <archive.tar.gz.enc>"
+[[ -z "$ARCHIVE" ]] && fail "Usage: ./deploy/restore.sh <archive.tar.gz>"
 [[ -f "$ARCHIVE" ]] || fail "No such file: $ARCHIVE"
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -28,7 +25,6 @@ cd "$REPO_DIR"
 # shellcheck disable=SC1091
 set -a; source .env; set +a
 
-: "${BACKUP_PASSPHRASE:?BACKUP_PASSPHRASE is not set in .env}"
 : "${POSTGRES_USER:?POSTGRES_USER is not set in .env}"
 : "${POSTGRES_DB:?POSTGRES_DB is not set in .env}"
 
@@ -36,17 +32,11 @@ WORK="$(mktemp -d)"
 cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT
 
-# --- 1. Decrypt and unpack --------------------------------------------------
-info "Decrypting the archive"
-BACKUP_PASSPHRASE="$BACKUP_PASSPHRASE" openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 \
-  -in "$ARCHIVE" -out "$WORK/backup.tar.gz" -pass env:BACKUP_PASSPHRASE \
-  || fail "Decryption failed. The BACKUP_PASSPHRASE in .env does not match the one used to create this archive."
-ok "decrypted"
-
-info "Unpacking"
+# --- 1. Unpack --------------------------------------------------------------
+info "Unpacking the archive"
 mkdir -p "$WORK/extract"
-tar -xzf "$WORK/backup.tar.gz" -C "$WORK/extract"
-[[ -f "$WORK/extract/db.dump" ]] || fail "This archive does not contain db.dump - it may be corrupt."
+tar -xzf "$ARCHIVE" -C "$WORK/extract" || fail "Could not read that archive. Is it a complete .tar.gz file?"
+[[ -f "$WORK/extract/db.dump" ]] || fail "This archive does not contain db.dump - it may be truncated or not a Foundation backup."
 ok "unpacked"
 
 # --- 2. Show what is about to be restored -----------------------------------
@@ -83,6 +73,7 @@ ok "database restored"
 
 # --- 5. Uploaded images -----------------------------------------------------
 if [[ -d "$WORK/extract/uploads" ]] && [[ -n "$(ls -A "$WORK/extract/uploads" 2>/dev/null)" ]]; then
+  # Copied recursively: assets live in subdirectories sharded by hash prefix.
   info "Restoring uploaded images"
   docker compose cp "$WORK/extract/uploads/." api:/app/uploads/ || warn "Could not copy uploads."
   ok "images restored"

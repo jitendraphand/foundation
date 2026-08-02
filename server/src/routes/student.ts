@@ -21,7 +21,7 @@ export default async function studentRoutes(app: FastifyInstance) {
 
     const me = await prisma.user.findUniqueOrThrow({
       where: { id: userId },
-      select: { id: true, firstName: true, lastName: true, username: true, grade: true, division: true, rollNo: true },
+      select: { id: true, publicId: true, firstName: true, lastName: true, username: true, grade: true, division: true, rollNo: true },
     });
 
     const now = new Date();
@@ -51,7 +51,7 @@ export default async function studentRoutes(app: FastifyInstance) {
       },
       orderBy: [{ startsAt: 'asc' }, { createdAt: 'desc' }],
       select: {
-        id: true, title: true, description: true, kind: true, subject: true,
+        id: true, publicId: true, title: true, description: true, kind: true, subject: true,
         durationMinutes: true, marksPerQuestion: true, negativeMarks: true,
         maxAttempts: true, startsAt: true, endsAt: true, passPercentage: true,
         _count: { select: { questions: true } },
@@ -68,6 +68,7 @@ export default async function studentRoutes(app: FastifyInstance) {
       const inProgress = t.attempts.find((a) => a.status === 'IN_PROGRESS') ?? null;
       return {
         id: t.id,
+        publicId: t.publicId,
         title: t.title,
         description: t.description,
         kind: t.kind,

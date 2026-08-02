@@ -2,8 +2,14 @@ import { z } from 'zod';
 import type { QuestionFormat } from '@prisma/client';
 
 /**
- * Answer keys and student responses. Both are JSON so a new question format is
- * a new branch here plus a new renderer, never a migration.
+ * Answer keys and student responses.
+ *
+ * Two question formats, both multiple choice and both auto-graded:
+ *   MCQ_SINGLE - exactly one correct option
+ *   MCQ_MULTI  - several correct options, with optional partial credit
+ *
+ * Both are JSON, so a future format is a new branch here plus a new input
+ * component - never a migration.
  */
 
 export const answerKeySchemas = {
@@ -12,20 +18,11 @@ export const answerKeySchemas = {
     correctOptionIds: z.array(z.string().min(1)).min(1),
     partialCredit: z.boolean().default(false),
   }),
-  TRUE_FALSE: z.object({ value: z.boolean() }),
-  NUMERIC: z.object({
-    value: z.number(),
-    tolerance: z.number().min(0).default(0),
-    toleranceKind: z.enum(['ABSOLUTE', 'RELATIVE']).default('ABSOLUTE'),
-    unit: z.string().max(24).optional(),
-  }),
 } as const;
 
 export const responseSchemas = {
   MCQ_SINGLE: z.object({ optionId: z.string().min(1) }),
   MCQ_MULTI: z.object({ optionIds: z.array(z.string().min(1)) }),
-  TRUE_FALSE: z.object({ value: z.boolean() }),
-  NUMERIC: z.object({ value: z.number() }),
 } as const;
 
 export function validateAnswerKey(format: QuestionFormat, key: unknown) {
@@ -43,7 +40,7 @@ export interface GradeResult {
 }
 
 /**
- * Grades one answer. Pure function, no database access — which is what makes
+ * Grades one answer. Pure function, no database access - which is what makes
  * it straightforward to re-grade an entire test after fixing a bad answer key.
  */
 export function gradeAnswer(format: QuestionFormat, answerKey: unknown, response: unknown): GradeResult {
@@ -58,21 +55,16 @@ export function gradeAnswer(format: QuestionFormat, answerKey: unknown, response
       return { isCorrect: ok, fraction: ok ? 1 : 0 };
     }
 
-    case 'TRUE_FALSE': {
-      const key = answerKeySchemas.TRUE_FALSE.parse(answerKey);
-      const res = responseSchemas.TRUE_FALSE.safeParse(response);
-      if (!res.success) return { isCorrect: false, fraction: 0 };
-      const ok = res.data.value === key.value;
-      return { isCorrect: ok, fraction: ok ? 1 : 0 };
-    }
-
     case 'MCQ_MULTI': {
       const key = answerKeySchemas.MCQ_MULTI.parse(answerKey);
       const res = responseSchemas.MCQ_MULTI.safeParse(response);
       if (!res.success) return { isCorrect: false, fraction: 0 };
 
       const correct = new Set(key.correctOptionIds);
+      // De-duplicate: a repeated id must not count twice.
       const chosen = new Set(res.data.optionIds);
+      if (chosen.size === 0) return { isCorrect: false, fraction: 0 };
+
       const hits = [...chosen].filter((id) => correct.has(id)).length;
       const misses = [...chosen].filter((id) => !correct.has(id)).length;
       const exact = hits === correct.size && misses === 0;
@@ -85,24 +77,6 @@ export function gradeAnswer(format: QuestionFormat, answerKey: unknown, response
       return { isCorrect: false, fraction };
     }
 
-    case 'NUMERIC': {
-      const key = answerKeySchemas.NUMERIC.parse(answerKey);
-      const res = responseSchemas.NUMERIC.safeParse(response);
-      if (!res.success) return { isCorrect: false, fraction: 0 };
-      if (!Number.isFinite(res.data.value)) return { isCorrect: false, fraction: 0 };
-
-      const allowed =
-        key.toleranceKind === 'RELATIVE'
-          ? Math.abs(key.value) * key.tolerance
-          : key.tolerance;
-
-      // A tolerance of exactly 0 still needs a floating-point epsilon, or
-      // 0.1 + 0.2 typed as 0.3 would be marked wrong.
-      const slack = Math.max(allowed, Math.abs(key.value) * 1e-9, 1e-9);
-      const ok = Math.abs(res.data.value - key.value) <= slack;
-      return { isCorrect: ok, fraction: ok ? 1 : 0 };
-    }
-
     default: {
       const _exhaustive: never = format;
       return { isCorrect: false, fraction: 0 };
@@ -113,7 +87,7 @@ export function gradeAnswer(format: QuestionFormat, answerKey: unknown, response
 /**
  * Marks for one answer, including negative marking.
  * Negative marks apply only to a fully wrong attempt at an *answered*
- * question — never to a blank, and never to a partially correct multi-select.
+ * question - never to a blank, and never to a partially correct multi-select.
  */
 export function marksFor(
   grade: GradeResult,

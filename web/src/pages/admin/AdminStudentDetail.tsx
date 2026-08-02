@@ -13,6 +13,7 @@ import type { Breakdown, ResultRow, WeakArea } from '../../lib/types';
 interface StudentProfile {
   student: {
     id: string;
+    publicId: string;
     username: string;
     firstName: string;
     lastName: string;
@@ -76,8 +77,9 @@ export default function AdminStudentDetail() {
             {!student.isActive && <Badge>deactivated</Badge>}
           </h1>
           <p className="text-xs text-ink-muted mt-0.5">
-            <span className="font-mono">{student.username}</span> · Grade {student.grade} · Division {student.division} ·
-            Roll no. {student.rollNo}
+            <span className="font-mono">{student.publicId}</span> · username{' '}
+            <span className="font-mono">{student.username}</span> · Grade {student.grade} · Division{' '}
+            {student.division} · Roll no. {student.rollNo}
           </p>
         </div>
 

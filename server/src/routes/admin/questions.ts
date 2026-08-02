@@ -29,8 +29,9 @@ const generateSchema = z.object({
     difficultyMix: z.record(z.number().int().min(0)).optional(),
     cognitiveMix: z.record(z.number().int().min(0)).optional(),
     skillFocus: z.array(z.string()).max(8).optional(),
-    formats: z.array(z.enum(['MCQ_SINGLE', 'MCQ_MULTI', 'TRUE_FALSE', 'NUMERIC'])).max(4).optional(),
+    formats: z.array(z.enum(['MCQ_SINGLE', 'MCQ_MULTI'])).max(2).optional(),
     extraInstructions: z.string().max(4000).optional(),
+    avoidImages: z.boolean().optional(),
   }),
 });
 
@@ -67,7 +68,10 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
       curriculum,
       providers: Object.values(PROVIDERS),
       defaults: { systemPrompt: DEFAULT_SYSTEM_PROMPT, userTemplate: DEFAULT_USER_TEMPLATE },
-      formats: ['MCQ_SINGLE', 'MCQ_MULTI', 'TRUE_FALSE', 'NUMERIC'],
+      formats: [
+        { code: 'MCQ_SINGLE', label: 'Multiple choice - one correct answer' },
+        { code: 'MCQ_MULTI', label: 'Multiple choice - more than one correct answer' },
+      ],
     };
   });
 
@@ -122,6 +126,9 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
       spec = {
         ...spec,
         extraInstructions: `${spec.extraInstructions ?? ''}\n\n${weakAreasToPromptHint(weak)}`.trim(),
+        // Practice should be attemptable straight away, never blocked waiting
+        // for someone to generate and attach a picture.
+        avoidImages: true,
       };
     }
 
@@ -141,7 +148,7 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
 
       await audit(request.user!.sub, 'generation.run', {
         entity: 'GenerationRun', entityId: outcome.runId, ip: request.ip,
-        detail: { accepted: outcome.accepted, parsed: outcome.parsed, kind: body.kind },
+        detail: { accepted: outcome.accepted, parsed: outcome.parsed, kind: body.kind, needingImages: outcome.needingImages },
       });
 
       return outcome;
@@ -251,16 +258,117 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
       })
       .parse(request.body);
 
-    const result = await prisma.question.updateMany({
-      where: { id: { in: body.ids }, deletedAt: null },
-      data: { status: body.status, ...(body.reviewNote ? { reviewNote: body.reviewNote } : {}) },
-    });
+    // A question that needs a picture cannot be approved until one is
+    // attached, otherwise a student would sit a question they cannot answer.
+    let blocked: string[] = [];
+    let ids = body.ids;
+
+    if (body.status === 'APPROVED') {
+      const unfulfilled = await prisma.question.findMany({
+        where: { id: { in: body.ids }, deletedAt: null, imageRequired: true, imageFulfilled: false },
+        select: { id: true },
+      });
+      blocked = unfulfilled.map((q) => q.id);
+      ids = body.ids.filter((id) => !blocked.includes(id));
+    }
+
+    const result = ids.length
+      ? await prisma.question.updateMany({
+          where: { id: { in: ids }, deletedAt: null },
+          data: { status: body.status, ...(body.reviewNote ? { reviewNote: body.reviewNote } : {}) },
+        })
+      : { count: 0 };
 
     await audit(request.user!.sub, 'question.bulk_status', {
-      entity: 'Question', ip: request.ip, detail: { count: result.count, status: body.status },
+      entity: 'Question', ip: request.ip, detail: { count: result.count, status: body.status, blocked: blocked.length },
     });
 
-    return { ok: true, updated: result.count };
+    return {
+      ok: true,
+      updated: result.count,
+      blocked: blocked.length,
+      blockedIds: blocked,
+      ...(blocked.length
+        ? {
+            message: `${blocked.length} question${blocked.length === 1 ? '' : 's'} still need${blocked.length === 1 ? 's' : ''} an image before they can be approved. Attach the image first.`,
+          }
+        : {}),
+    };
+  });
+
+  /**
+   * Attaches a generated image to a question that was flagged as needing one.
+   * The asset must already be uploaded via POST /api/admin/assets.
+   */
+  app.post('/api/admin/questions/:id/image', async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const body = z
+      .object({
+        assetId: z.string().uuid(),
+        altText: z.string().max(500).optional(),
+        caption: z.string().max(500).optional(),
+      })
+      .parse(request.body);
+
+    const question = await prisma.question.findFirst({ where: { id, deletedAt: null } });
+    if (!question) return reply.code(404).send({ error: 'Question not found.' });
+
+    const asset = await prisma.asset.findUnique({ where: { id: body.assetId } });
+    if (!asset) return reply.code(400).send({ error: 'That image has not been uploaded yet.' });
+
+    const spec = (question.imagePrompt ?? {}) as { placement?: string; optionId?: string; altText?: string };
+    const alt = body.altText ?? spec.altText ?? '';
+    const imageBlock = { type: 'image' as const, assetId: body.assetId, alt, ...(body.caption ? { caption: body.caption } : {}) };
+
+    let content = question.content as { version: number; blocks: unknown[] };
+    let options = question.options as Array<{ id: string; blocks: unknown[] }>;
+
+    if (spec.placement === 'OPTION' && spec.optionId) {
+      const target = options.find((o) => o.id === spec.optionId);
+      if (!target) return reply.code(400).send({ error: `Option "${spec.optionId}" no longer exists on this question.` });
+      options = options.map((o) => (o.id === spec.optionId ? { ...o, blocks: [imageBlock, ...o.blocks] } : o));
+    } else {
+      // Pictures belong above the question text they illustrate.
+      content = { ...content, blocks: [imageBlock, ...content.blocks] };
+    }
+
+    const updated = await prisma.$transaction(async (tx) => {
+      await tx.asset.update({ where: { id: body.assetId }, data: { questionId: id, altText: alt } });
+      return tx.question.update({
+        where: { id },
+        data: {
+          content: content as object,
+          options: options as object,
+          imageFulfilled: true,
+          isAdminEdited: true,
+        },
+      });
+    });
+
+    await audit(request.user!.sub, 'question.image_attached', {
+      entity: 'Question', entityId: id, ip: request.ip, detail: { assetId: body.assetId },
+    });
+
+    return { ok: true, question: updated, message: 'Image attached. This question can now be approved.' };
+  });
+
+  /** The queue of questions still waiting for a picture. */
+  app.get('/api/admin/questions/awaiting-images', async (request) => {
+    const q = z.object({ generationRunId: z.string().uuid().optional() }).parse(request.query);
+
+    const questions = await prisma.question.findMany({
+      where: {
+        deletedAt: null,
+        imageRequired: true,
+        imageFulfilled: false,
+        status: { not: 'REJECTED' },
+        ...(q.generationRunId ? { generationRunId: q.generationRunId } : {}),
+      },
+      orderBy: { createdAt: 'desc' },
+      take: 100,
+    });
+
+    return { total: questions.length, questions };
   });
 
   /** Full edit of a draft question, including its diagram blocks. */
@@ -268,7 +376,7 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = z
       .object({
-        format: z.enum(['MCQ_SINGLE', 'MCQ_MULTI', 'TRUE_FALSE', 'NUMERIC']).optional(),
+        format: z.enum(['MCQ_SINGLE', 'MCQ_MULTI']).optional(),
         content: z.any().optional(),
         options: z.array(z.object({ id: z.string().min(1).max(8), blocks: z.array(z.any()) })).optional(),
         answerKey: z.any().optional(),
@@ -283,6 +391,8 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
         estimatedSeconds: z.number().int().min(5).max(1800).optional(),
         status: z.enum(['DRAFT', 'APPROVED', 'REJECTED']).optional(),
         reviewNote: z.string().max(1000).nullable().optional(),
+        /** Let an admin clear the flag when they have drawn the figure by hand. */
+        imageRequired: z.boolean().optional(),
       })
       .parse(request.body);
 
@@ -317,8 +427,20 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
       if (missing.length) return reply.code(400).send({ error: `The answer key points at option(s) ${missing.join(', ')}, which do not exist.` });
     }
 
-    for (const field of ['format', 'difficultyTag', 'cognitiveTag', 'skillTags', 'subject', 'topic', 'subtopic', 'grade', 'estimatedSeconds', 'status', 'reviewNote'] as const) {
+    for (const field of ['format', 'difficultyTag', 'cognitiveTag', 'skillTags', 'subject', 'topic', 'subtopic', 'grade', 'estimatedSeconds', 'reviewNote', 'imageRequired'] as const) {
       if (body[field] !== undefined) data[field] = body[field];
+    }
+
+    // Same guard as the bulk route: never approve a question that is still
+    // waiting for its picture.
+    if (body.status !== undefined) {
+      const needsImage = (body.imageRequired ?? existing.imageRequired) && !existing.imageFulfilled;
+      if (body.status === 'APPROVED' && needsImage) {
+        return reply.code(409).send({
+          error: 'This question needs an image before it can be approved. Attach one, or clear the "image required" flag if you have drawn the figure yourself.',
+        });
+      }
+      data.status = body.status;
     }
 
     const updated = await prisma.question.update({ where: { id }, data });

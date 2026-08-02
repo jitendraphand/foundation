@@ -15,8 +15,29 @@ import { blockSchema } from '../lib/content.js';
  * to the admin, never silently half-imported.
  */
 
+/**
+ * The image-generation prompt a model must supply whenever it flags a question
+ * as needing a real picture. Kept strict so the admin never receives a
+ * half-written prompt they have to guess their way through.
+ */
+export const imagePromptSchema = z.object({
+  version: z.number().int().default(1),
+  prompt: z.string().min(20).max(2000),
+  description: z.string().min(10).max(1000),
+  details: z.array(z.string().max(300)).max(20).default([]),
+  style: z.string().max(300).default('clean flat vector illustration, white background'),
+  widthPx: z.number().int().min(128).max(4096).default(800),
+  heightPx: z.number().int().min(128).max(4096).default(600),
+  aspectRatio: z.string().max(16).optional(),
+  altText: z.string().max(500).default(''),
+  placement: z.enum(['STEM', 'OPTION']).default('STEM'),
+  optionId: z.string().max(8).nullable().optional(),
+});
+
+export type LlmImagePrompt = z.infer<typeof imagePromptSchema>;
+
 export const llmQuestionSchema = z.object({
-  format: z.enum(['MCQ_SINGLE', 'MCQ_MULTI', 'TRUE_FALSE', 'NUMERIC']),
+  format: z.enum(['MCQ_SINGLE', 'MCQ_MULTI']),
   content: z.object({
     version: z.number().int().optional(),
     blocks: z.array(blockSchema).min(1).max(40),
@@ -26,6 +47,9 @@ export const llmQuestionSchema = z.object({
     .max(8)
     .default([]),
   answerKey: z.record(z.any()),
+  /// Models emit false / null / absent in the overwhelmingly common case.
+  imageRequired: z.boolean().default(false),
+  imagePrompt: imagePromptSchema.nullable().optional(),
   explanation: z
     .object({ version: z.number().int().optional(), blocks: z.array(blockSchema).max(40) })
     .default({ blocks: [] }),

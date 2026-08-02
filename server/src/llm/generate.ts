@@ -20,6 +20,8 @@ export interface GenerateSpec {
   skillFocus?: string[];
   formats?: string[];
   extraInstructions?: string;
+  /** When true, tell the model not to produce questions needing a photograph. */
+  avoidImages?: boolean;
 }
 
 export interface GenerateOptions {
@@ -40,6 +42,8 @@ export interface GenerateOutcome {
   runId: string;
   accepted: number;
   parsed: number;
+  /** How many of the accepted questions still need a picture attaching. */
+  needingImages: number;
   rejected: Array<{ index: number; reason: string }>;
   warnings: string[];
 }
@@ -53,6 +57,15 @@ function describeMix(mix: Record<string, number> | undefined, fallback: string):
 }
 
 export function buildUserPrompt(spec: GenerateSpec, template = DEFAULT_USER_TEMPLATE): string {
+  const extra = [
+    spec.extraInstructions ?? '',
+    spec.avoidImages
+      ? 'Do NOT produce any question that needs a real photograph. Every visual must be drawn as SVG, Mermaid or a chart spec. Set "imageRequired": false on every question.'
+      : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+
   return renderTemplate(template, {
     count: spec.count,
     subject: spec.subject,
@@ -64,7 +77,7 @@ export function buildUserPrompt(spec: GenerateSpec, template = DEFAULT_USER_TEMP
     cognitiveMix: describeMix(spec.cognitiveMix, 'a balanced spread across the cognitive levels'),
     formats: spec.formats?.length ? spec.formats.join(', ') : 'MCQ_SINGLE',
     skillFocus: spec.skillFocus?.length ? spec.skillFocus.join(', ') : 'any relevant skills',
-    extraInstructions: spec.extraInstructions ?? '',
+    extraInstructions: extra,
   });
 }
 
@@ -92,13 +105,9 @@ function toQuestionRow(q: LlmQuestion, ctx: { runId: string; model: string; vali
 
   const options = q.options.map((o) => ({ id: o.id, blocks: normalizeBlocks(o.blocks) }));
 
-  if (q.format === 'MCQ_SINGLE' || q.format === 'MCQ_MULTI') {
-    if (options.length < 2) throw new Error('multiple-choice question has fewer than 2 options');
-    const ids = new Set(options.map((o) => o.id));
-    if (ids.size !== options.length) throw new Error('duplicate option ids');
-  } else if (options.length > 0) {
-    throw new Error(`${q.format} question must have no options`);
-  }
+  if (options.length < 2) throw new Error('multiple-choice question has fewer than 2 options');
+  const ids = new Set(options.map((o) => o.id));
+  if (ids.size !== options.length) throw new Error('duplicate option ids');
 
   // Throws if the key does not match the declared format.
   const answerKey = validateAnswerKey(q.format, q.answerKey);
@@ -109,10 +118,32 @@ function toQuestionRow(q: LlmQuestion, ctx: { runId: string; model: string; vali
     if (!options.some((o) => o.id === id)) throw new Error(`answer key names option "${id}" which does not exist`);
   }
   if (q.format === 'MCQ_MULTI') {
-    const ids = (answerKey as { correctOptionIds: string[] }).correctOptionIds;
-    for (const id of ids) {
+    const correctIds = (answerKey as { correctOptionIds: string[] }).correctOptionIds;
+    for (const id of correctIds) {
       if (!options.some((o) => o.id === id)) throw new Error(`answer key names option "${id}" which does not exist`);
     }
+    if (correctIds.length < 2) {
+      throw new Error('multi-select question has only one correct option - it should be MCQ_SINGLE');
+    }
+    if (correctIds.length >= options.length) {
+      throw new Error('every option is marked correct, which makes the question meaningless');
+    }
+  }
+
+  // A question flagged as needing a picture is useless without the prompt to
+  // generate one, so reject it rather than let it into the review queue.
+  let imagePrompt: object | null = null;
+  if (q.imageRequired) {
+    if (!q.imagePrompt) {
+      throw new Error('imageRequired is true but no imagePrompt was supplied');
+    }
+    if (q.imagePrompt.placement === 'OPTION') {
+      const target = q.imagePrompt.optionId;
+      if (!target || !options.some((o) => o.id === target)) {
+        throw new Error(`imagePrompt targets option "${target ?? '(none)'}" which does not exist`);
+      }
+    }
+    imagePrompt = q.imagePrompt as object;
   }
 
   const explanation = q.explanation?.blocks?.length
@@ -133,6 +164,9 @@ function toQuestionRow(q: LlmQuestion, ctx: { runId: string; model: string; vali
     topic: q.topic ?? null,
     subtopic: q.subtopic ?? null,
     estimatedSeconds: q.estimatedSeconds,
+    imageRequired: q.imageRequired,
+    imagePrompt,
+    imageFulfilled: false,
     generationRunId: ctx.runId,
     sourceModel: ctx.model,
   };
@@ -303,7 +337,16 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
       );
     }
 
-    return { runId: run.id, accepted: rows.length, parsed: parsedResponse.questions.length, rejected, warnings };
+    const needingImages = rows.filter((r) => r.imageRequired).length;
+
+    return {
+      runId: run.id,
+      accepted: rows.length,
+      parsed: parsedResponse.questions.length,
+      needingImages,
+      rejected,
+      warnings,
+    };
   } catch (err) {
     if (!(err instanceof LlmError)) {
       await prisma.generationRun.update({

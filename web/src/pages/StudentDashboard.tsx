@@ -13,7 +13,7 @@ interface Summary {
 }
 
 interface DashboardData {
-  me: { firstName: string; lastName: string; username: string; grade: string; division: string; rollNo: string };
+  me: { publicId: string; firstName: string; lastName: string; username: string; grade: string; division: string; rollNo: string };
   liveTests: LiveTest[];
   results: { regular: ResultRow[]; practice: ResultRow[] };
   summary: { regular: Summary; practice: Summary };
@@ -48,7 +48,8 @@ export default function StudentDashboard() {
         <div>
           <h1 className="text-lg font-semibold">Hello, {data.me.firstName}</h1>
           <p className="text-xs text-ink-muted mt-0.5">
-            Grade {data.me.grade} · Division {data.me.division} · Roll no. {data.me.rollNo}
+            Grade {data.me.grade} · Division {data.me.division} · Roll no. {data.me.rollNo} ·{' '}
+            <span className="font-mono">{data.me.publicId}</span>
           </p>
         </div>
       </div>

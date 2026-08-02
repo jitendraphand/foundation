@@ -45,13 +45,14 @@ interface Context {
   templates: Template[];
   providers: Provider[];
   defaults: { systemPrompt: string; userTemplate: string };
-  formats: string[];
+  formats: Array<{ code: string; label: string }>;
 }
 
 interface Outcome {
   runId: string;
   accepted: number;
   parsed: number;
+  needingImages: number;
   rejected: Array<{ index: number; reason: string }>;
   warnings: string[];
 }
@@ -83,6 +84,7 @@ export default function AdminGenerate() {
     temperature: 0.4,
     formats: ['MCQ_SINGLE'] as string[],
     extraInstructions: '',
+    avoidImages: false,
   });
 
   const [difficultyMix, setDifficultyMix] = useState<Record<string, number>>({ easy: 4, moderate: 4, difficult: 2 });
@@ -127,6 +129,7 @@ export default function AdminGenerate() {
     skillFocus: skillFocus.length ? skillFocus : undefined,
     formats: form.formats,
     extraInstructions: form.extraInstructions.trim() || undefined,
+    avoidImages: form.avoidImages,
   });
 
   const showPreview = async () => {
@@ -200,6 +203,16 @@ export default function AdminGenerate() {
             <Alert tone={outcome.rejected.length ? 'warn' : 'success'}>
               {outcome.accepted} of {outcome.parsed} questions were accepted and saved as drafts.
             </Alert>
+
+            {outcome.needingImages > 0 && (
+              <Alert tone="warn">
+                {outcome.needingImages} question{outcome.needingImages === 1 ? '' : 's'} need
+                {outcome.needingImages === 1 ? 's' : ''} a picture. The model could not draw
+                {outcome.needingImages === 1 ? ' it' : ' them'}, so it wrote an image-generation prompt for each one.
+                Open the review screen, copy the prompt into any image generator, and upload the result — they cannot
+                be approved until you do.
+              </Alert>
+            )}
 
             {outcome.rejected.length > 0 && (
               <details className="text-xs">
@@ -306,20 +319,25 @@ export default function AdminGenerate() {
           <Field label="Question formats">
             <div className="flex flex-wrap gap-2">
               {ctx.formats.map((format) => {
-                const on = form.formats.includes(format);
+                const on = form.formats.includes(format.code);
                 return (
                   <button
-                    key={format}
+                    key={format.code}
                     type="button"
                     onClick={() =>
                       setForm((f) => ({
                         ...f,
-                        formats: on ? f.formats.filter((x) => x !== format) : [...f.formats, format],
+                        // Never let the last format be switched off.
+                        formats: on
+                          ? f.formats.length > 1
+                            ? f.formats.filter((x) => x !== format.code)
+                            : f.formats
+                          : [...f.formats, format.code],
                       }))
                     }
                     className={`badge ${on ? 'border-series-1/40 bg-series-1/[0.08] text-series-1' : ''}`}
                   >
-                    {format.replace('_', ' ').toLowerCase()}
+                    {format.label}
                   </button>
                 );
               })}
@@ -394,6 +412,22 @@ export default function AdminGenerate() {
               })}
             </div>
           </div>
+
+          <label className="flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              className="accent-series-1 mt-0.5"
+              checked={form.avoidImages}
+              onChange={(e) => setForm((f) => ({ ...f, avoidImages: e.target.checked }))}
+            />
+            <span className="text-ink-muted">
+              Text and drawn diagrams only
+              <span className="block text-[11px] text-ink-faint">
+                No question will need a photograph, so every draft is ready to approve immediately. Figures are still
+                drawn as SVG, flow charts and graphs.
+              </span>
+            </span>
+          </label>
 
           <Field label="Extra instructions to the model (optional)">
             <textarea

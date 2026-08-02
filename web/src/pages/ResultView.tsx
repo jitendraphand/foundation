@@ -211,39 +211,6 @@ function QuestionReview({ question, index, showAnswers }: { question: PaperQuest
             </ul>
           )}
 
-          {question.format === 'NUMERIC' && (
-            <div className="mt-3 flex flex-wrap gap-4 text-sm">
-              <span>
-                <span className="text-xs text-ink-muted">Your answer: </span>
-                <span className="font-mono">{(question.yourResponse as { value?: number } | null)?.value ?? '—'}</span>
-              </span>
-              {showAnswers && (
-                <span>
-                  <span className="text-xs text-ink-muted">Correct answer: </span>
-                  <span className="font-mono text-good">
-                    {String(question.answerKey?.value ?? '—')}
-                    {question.answerKey?.unit ? ` ${question.answerKey.unit}` : ''}
-                  </span>
-                </span>
-              )}
-            </div>
-          )}
-
-          {question.format === 'TRUE_FALSE' && (
-            <div className="mt-3 flex flex-wrap gap-4 text-sm">
-              <span>
-                <span className="text-xs text-ink-muted">Your answer: </span>
-                {formatBool((question.yourResponse as { value?: boolean } | null)?.value)}
-              </span>
-              {showAnswers && (
-                <span>
-                  <span className="text-xs text-ink-muted">Correct answer: </span>
-                  <span className="text-good">{formatBool(question.answerKey?.value as boolean | undefined)}</span>
-                </span>
-              )}
-            </div>
-          )}
-
           {showAnswers && question.explanation?.blocks?.length ? (
             <div className="mt-4 rounded-lg bg-surface-sunken border border-line p-3">
               <h4 className="text-xs font-medium text-ink-muted mb-1">Explanation</h4>
@@ -287,6 +254,3 @@ function isCorrectOption(question: PaperQuestion, optionId: string): boolean {
   return false;
 }
 
-function formatBool(v: boolean | undefined): string {
-  return v === true ? 'True' : v === false ? 'False' : '—';
-}

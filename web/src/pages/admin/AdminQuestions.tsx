@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { api, ApiError } from '../../lib/api';
 import { Alert, Badge, Card, EmptyState, Modal, PageLoader, Spinner, humanizeTag } from '../../components/ui';
@@ -60,8 +60,13 @@ export default function AdminQuestions() {
   const setStatus = async (ids: string[], next: 'APPROVED' | 'REJECTED' | 'DRAFT') => {
     if (ids.length === 0) return;
     try {
-      const res = await api.post<{ updated: number }>('/api/admin/questions/bulk-status', { ids, status: next });
+      const res = await api.post<{ updated: number; blocked: number; message?: string }>(
+        '/api/admin/questions/bulk-status',
+        { ids, status: next },
+      );
       setNotice(`${res.updated} question${res.updated === 1 ? '' : 's'} marked ${next.toLowerCase()}.`);
+      // Questions still waiting for a picture are skipped rather than approved.
+      if (res.blocked > 0 && res.message) setError(res.message);
       await load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not update those questions.');
@@ -164,6 +169,7 @@ export default function AdminQuestions() {
                 onToggle={() => toggle(question.id)}
                 onEdit={() => setEditing(question)}
                 onStatus={(next) => setStatus([question.id], next)}
+                onChanged={load}
               />
             ))}
           </ul>
@@ -188,7 +194,7 @@ export default function AdminQuestions() {
 // --- One question ----------------------------------------------------------
 
 function QuestionCard({
-  question, index, selected, onToggle, onEdit, onStatus,
+  question, index, selected, onToggle, onEdit, onStatus, onChanged,
 }: {
   question: BankQuestion;
   index: number;
@@ -196,8 +202,10 @@ function QuestionCard({
   onToggle: () => void;
   onEdit: () => void;
   onStatus: (status: 'APPROVED' | 'REJECTED' | 'DRAFT') => void;
+  onChanged: () => void;
 }) {
   const [showAnswer, setShowAnswer] = useState(false);
+  const needsImage = question.imageRequired && !question.imageFulfilled;
 
   return (
     <li className={`card p-4 ${selected ? 'ring-2 ring-series-1/40' : ''}`}>
@@ -215,6 +223,8 @@ function QuestionCard({
             <Badge>{humanizeTag(question.cognitiveTag)}</Badge>
             {question.skillTags.map((t) => <Badge key={t}>{humanizeTag(t)}</Badge>)}
             {question.isAdminEdited && <Badge tone="info">edited</Badge>}
+            {needsImage && <Badge tone="warn">image needed</Badge>}
+            {question.imageRequired && question.imageFulfilled && <Badge tone="good">image attached</Badge>}
             {question.timesServed > 0 && (
               <span className="text-[11px] text-ink-faint">
                 {Math.round(question.observedP * 100)}% correct over {question.timesServed} attempts
@@ -249,22 +259,8 @@ function QuestionCard({
             </ul>
           )}
 
-          {showAnswer && question.format === 'NUMERIC' && (
-            <p className="mt-2 text-sm">
-              <span className="text-xs text-ink-muted">Answer: </span>
-              <span className="font-mono text-good">
-                {String(question.answerKey?.value)}
-                {question.answerKey?.tolerance ? ` ± ${question.answerKey.tolerance}` : ''}
-                {question.answerKey?.unit ? ` ${question.answerKey.unit}` : ''}
-              </span>
-            </p>
-          )}
-
-          {showAnswer && question.format === 'TRUE_FALSE' && (
-            <p className="mt-2 text-sm">
-              <span className="text-xs text-ink-muted">Answer: </span>
-              <span className="text-good">{question.answerKey?.value ? 'True' : 'False'}</span>
-            </p>
+          {question.imageRequired && !question.imageFulfilled && (
+            <ImageNeededPanel question={question} onAttached={onChanged} />
           )}
 
           {showAnswer && question.explanation?.blocks?.length ? (
@@ -282,7 +278,13 @@ function QuestionCard({
               Edit
             </button>
             {question.status !== 'APPROVED' && (
-              <button type="button" className="btn-primary btn-sm" onClick={() => onStatus('APPROVED')}>
+              <button
+                type="button"
+                className="btn-primary btn-sm"
+                onClick={() => onStatus('APPROVED')}
+                disabled={needsImage}
+                title={needsImage ? 'Attach the image first — a student cannot answer this without it.' : undefined}
+              >
                 Approve
               </button>
             )}
@@ -300,6 +302,138 @@ function QuestionCard({
         </div>
       </div>
     </li>
+  );
+}
+
+// --- Questions that need a picture -----------------------------------------
+
+/**
+ * None of the supported providers generate images, so the model supplies a
+ * ready-made prompt instead. This panel puts that prompt one click from the
+ * clipboard, then accepts the finished picture.
+ */
+function ImageNeededPanel({ question, onAttached }: { question: BankQuestion; onAttached: () => void }) {
+  const spec = question.imagePrompt;
+  const [copied, setCopied] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  if (!spec) {
+    return (
+      <div className="mt-3 rounded-lg border border-warn/30 bg-warn/[0.06] p-3 text-xs text-warn">
+        This question is flagged as needing an image, but no image prompt was supplied. Edit the question to add one,
+        or clear the flag if you have drawn the figure yourself.
+      </div>
+    );
+  }
+
+  const copy = async (text: string, what: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(what);
+      setTimeout(() => setCopied(null), 1500);
+    } catch {
+      setError('Could not copy automatically. Select the text and copy it by hand.');
+    }
+  };
+
+  // Everything a picture generator needs, in one paste.
+  const fullPrompt = [
+    spec.prompt,
+    spec.details.length ? `Must show: ${spec.details.join('; ')}.` : '',
+    spec.style ? `Style: ${spec.style}.` : '',
+    `Size: ${spec.widthPx}x${spec.heightPx} pixels${spec.aspectRatio ? ` (${spec.aspectRatio})` : ''}.`,
+  ]
+    .filter(Boolean)
+    .join(' ');
+
+  const upload = async (file: File) => {
+    setUploading(true);
+    setError(null);
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      form.append('altText', spec.altText || '');
+      form.append('questionId', question.id);
+
+      const res = await api.upload<{ asset: { id: string } }>('/api/admin/assets', form);
+      await api.post(`/api/admin/questions/${question.id}/image`, {
+        assetId: res.asset.id,
+        altText: spec.altText || undefined,
+      });
+      onAttached();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not attach that image.');
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  return (
+    <div className="mt-3 rounded-lg border border-warn/30 bg-warn/[0.05] p-3 space-y-3">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h4 className="text-xs font-semibold text-warn">This question needs a picture</h4>
+          <p className="text-xs text-ink-muted mt-0.5">{spec.description}</p>
+        </div>
+        <span className="badge shrink-0">
+          {spec.placement === 'OPTION' ? `option ${String(spec.optionId ?? '').toUpperCase()}` : 'question'}
+        </span>
+      </div>
+
+      {error && <Alert tone="error" onDismiss={() => setError(null)}>{error}</Alert>}
+
+      <div>
+        <div className="flex items-center justify-between gap-2 mb-1">
+          <span className="text-[11px] font-medium text-ink-muted">
+            Prompt — paste this into any image generator
+          </span>
+          <button type="button" className="btn-secondary btn-sm" onClick={() => copy(fullPrompt, 'prompt')}>
+            {copied === 'prompt' ? 'Copied' : 'Copy prompt'}
+          </button>
+        </div>
+        <p className="rounded-lg border border-line bg-white p-2 text-xs font-mono whitespace-pre-wrap break-words">
+          {fullPrompt}
+        </p>
+      </div>
+
+      {spec.details.length > 0 && (
+        <div>
+          <span className="text-[11px] font-medium text-ink-muted">The picture must show</span>
+          <ul className="mt-1 list-disc pl-5 text-xs text-ink-muted space-y-0.5">
+            {spec.details.map((d, i) => <li key={i}>{d}</li>)}
+          </ul>
+        </div>
+      )}
+
+      <dl className="flex flex-wrap gap-x-5 gap-y-1 text-[11px] text-ink-muted">
+        <div><dt className="inline font-medium">Size: </dt><dd className="inline tabular-nums">{spec.widthPx} × {spec.heightPx} px</dd></div>
+        {spec.aspectRatio && <div><dt className="inline font-medium">Ratio: </dt><dd className="inline">{spec.aspectRatio}</dd></div>}
+        {spec.style && <div><dt className="inline font-medium">Style: </dt><dd className="inline">{spec.style}</dd></div>}
+        {spec.altText && <div><dt className="inline font-medium">Alt text: </dt><dd className="inline">{spec.altText}</dd></div>}
+      </dl>
+
+      <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-warn/20">
+        <input
+          ref={fileRef}
+          type="file"
+          accept="image/png,image/jpeg,image/webp,image/gif"
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) void upload(file);
+            e.target.value = '';
+          }}
+        />
+        <button type="button" className="btn-primary btn-sm" onClick={() => fileRef.current?.click()} disabled={uploading}>
+          {uploading ? <Spinner label="Uploading" /> : 'Upload the finished image'}
+        </button>
+        <span className="text-[11px] text-ink-faint">
+          PNG, JPEG, WebP or GIF, up to 4 MB. It is placed above the {spec.placement === 'OPTION' ? 'option' : 'question'} text.
+        </span>
+      </div>
+    </div>
   );
 }
 

@@ -6,7 +6,6 @@ const schema = z.object({
   DATABASE_URL: z.string().min(1),
   JWT_SECRET: z.string().min(16, 'JWT_SECRET must be at least 16 characters'),
   ENCRYPTION_KEY: z.string().min(16, 'ENCRYPTION_KEY must be at least 16 characters'),
-  BACKUP_PASSPHRASE: z.string().min(8).default('foundation-backup'),
   ADMIN_USERNAME: z.string().default('admin'),
   ADMIN_PASSWORD: z.string().default('foundation_123'),
   SESSION_TTL_MINUTES: z.coerce.number().default(720),

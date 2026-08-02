@@ -5,6 +5,7 @@ import { Alert, Badge, Card, EmptyState, Field, Modal, PageLoader, formatDate } 
 
 interface TestRow {
   id: string;
+  publicId: string;
   title: string;
   kind: 'REGULAR' | 'PRACTICE';
   status: 'DRAFT' | 'PUBLISHED' | 'CLOSED';
@@ -90,6 +91,7 @@ export default function AdminTests() {
             <table className="table-base">
               <thead>
                 <tr>
+                  <th>Test ID</th>
                   <th>Title</th>
                   <th>Subject</th>
                   <th>Audience</th>
@@ -103,6 +105,8 @@ export default function AdminTests() {
               <tbody>
                 {tests.map((test) => (
                   <tr key={test.id}>
+                    {/* Stable identifier; unaffected by later title edits. */}
+                    <td className="font-mono text-xs text-ink-muted whitespace-nowrap">{test.publicId}</td>
                     <td>
                       <Link to={`/admin/tests/${test.id}`} className="font-medium hover:text-series-1">
                         {test.title}

@@ -7,6 +7,7 @@ import type { WeakArea } from '../../lib/types';
 
 interface StudentRow {
   id: string;
+  publicId: string;
   username: string;
   name: string;
   grade: string;
@@ -24,6 +25,7 @@ interface StudentRow {
 
 interface UserRow {
   id: string;
+  publicId: string;
   username: string;
   firstName: string;
   lastName: string;
@@ -116,7 +118,7 @@ function ManageStudents() {
       <div className="flex flex-wrap gap-2">
         <input
           className="input max-w-xs"
-          placeholder="Search by name, username or roll no."
+          placeholder="Search by name, username, roll no. or user ID"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
         />
@@ -137,6 +139,7 @@ function ManageStudents() {
             <table className="table-base">
               <thead>
                 <tr>
+                  <th>User ID</th>
                   <th>Name</th>
                   <th>Username</th>
                   <th>Class</th>
@@ -151,6 +154,8 @@ function ManageStudents() {
               <tbody>
                 {users.map((user) => (
                   <tr key={user.id} className={user.isActive ? '' : 'opacity-60'}>
+                    {/* Never changes, no matter how the name or username is edited. */}
+                    <td className="font-mono text-xs text-ink-muted whitespace-nowrap">{user.publicId}</td>
                     <td>
                       <Link to={`/admin/students/${user.id}`} className="font-medium hover:text-series-1">
                         {user.firstName} {user.lastName}
@@ -184,14 +189,14 @@ function ManageStudents() {
         </Card>
       )}
 
-      {editing && <EditUserModal user={editing} onClose={() => setEditing(null)} onSaved={async () => { setEditing(null); await load(); }} />}
+      {editing && <EditUserModal user={editing} onClose={() => setEditing(null)} onSaved={async (msg) => { setEditing(null); if (msg) setNotice(msg); await load(); }} />}
       {resetting && <ResetPasswordModal user={resetting} onClose={() => setResetting(null)} onDone={(msg) => { setResetting(null); setNotice(msg); }} />}
       {deleting && <DeleteUserModal user={deleting} onClose={() => setDeleting(null)} onDone={async (msg) => { setDeleting(null); setNotice(msg); await load(); }} />}
     </div>
   );
 }
 
-function EditUserModal({ user, onClose, onSaved }: { user: UserRow; onClose: () => void; onSaved: () => void }) {
+function EditUserModal({ user, onClose, onSaved }: { user: UserRow; onClose: () => void; onSaved: (message?: string) => void }) {
   const [form, setForm] = useState({
     firstName: user.firstName,
     lastName: user.lastName,
@@ -199,8 +204,10 @@ function EditUserModal({ user, onClose, onSaved }: { user: UserRow; onClose: () 
     division: user.division,
     rollNo: user.rollNo,
     dateOfBirth: user.dateOfBirth.slice(0, 10),
-    regenerateUsername: false,
   });
+  const [usernameMode, setUsernameMode] = useState<'keep' | 'set' | 'regenerate'>('keep');
+  const [username, setUsername] = useState(user.username);
+  const [availability, setAvailability] = useState<{ available: boolean; reason?: string } | null>(null);
   const [classes, setClasses] = useState<{ grades: { code: string; label: string }[]; divisions: { code: string; label: string }[] }>({ grades: [], divisions: [] });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -209,13 +216,34 @@ function EditUserModal({ user, onClose, onSaved }: { user: UserRow; onClose: () 
     api.get<typeof classes>('/api/auth/classes').then(setClasses).catch(() => undefined);
   }, []);
 
+  // Check the new username as it is typed, so the admin is never surprised by
+  // a conflict only after pressing Save.
+  useEffect(() => {
+    if (usernameMode !== 'set' || username === user.username) {
+      setAvailability(null);
+      return;
+    }
+    const timer = setTimeout(() => {
+      const query = new URLSearchParams({ username, excludeUserId: user.id });
+      api
+        .get<{ available: boolean; reason?: string }>(`/api/admin/users/username-available?${query}`)
+        .then(setAvailability)
+        .catch(() => setAvailability(null));
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [username, usernameMode, user.id, user.username]);
+
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     setBusy(true);
     setError(null);
     try {
-      await api.patch(`/api/admin/users/${user.id}`, form);
-      onSaved();
+      const res = await api.patch<{ message?: string }>(`/api/admin/users/${user.id}`, {
+        ...form,
+        ...(usernameMode === 'set' && username !== user.username ? { username } : {}),
+        ...(usernameMode === 'regenerate' ? { regenerateUsername: true } : {}),
+      });
+      onSaved(res.message);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not save.');
     } finally {
@@ -251,22 +279,64 @@ function EditUserModal({ user, onClose, onSaved }: { user: UserRow; onClose: () 
           <input type="date" className="input" value={form.dateOfBirth} onChange={(e) => setForm((f) => ({ ...f, dateOfBirth: e.target.value }))} />
         </Field>
 
-        <label className="flex items-center gap-2 text-sm">
-          <input
-            type="checkbox"
-            className="accent-series-1"
-            checked={form.regenerateUsername}
-            onChange={(e) => setForm((f) => ({ ...f, regenerateUsername: e.target.checked }))}
-          />
-          <span className="text-ink-muted">Re-generate the username from the new name</span>
-        </label>
-        {form.regenerateUsername && (
-          <Alert tone="warn">The student will need to use the new username to sign in. Tell them what it is.</Alert>
-        )}
+        <fieldset className="rounded-lg border border-line p-3 space-y-2">
+          <legend className="px-1 text-xs font-medium text-ink-muted">Username</legend>
+
+          <p className="text-[11px] text-ink-faint">
+            User ID <span className="font-mono text-ink-muted">{user.publicId}</span> never changes, so results stay
+            attached to this student however the username is edited.
+          </p>
+
+          {([
+            ['keep', `Keep ${user.username}`],
+            ['set', 'Set it myself'],
+            ['regenerate', 'Re-generate it from the name'],
+          ] as const).map(([mode, label]) => (
+            <label key={mode} className="flex items-center gap-2 text-sm">
+              <input
+                type="radio"
+                name="username-mode"
+                className="accent-series-1"
+                checked={usernameMode === mode}
+                onChange={() => setUsernameMode(mode)}
+              />
+              <span className="text-ink-muted">{label}</span>
+            </label>
+          ))}
+
+          {usernameMode === 'set' && (
+            <div>
+              <input
+                className="input font-mono"
+                value={username}
+                onChange={(e) => setUsername(e.target.value.toLowerCase().replace(/[^a-z0-9]/g, ''))}
+                autoCapitalize="none"
+                spellCheck={false}
+              />
+              {availability && (
+                <p className={`mt-1 text-[11px] ${availability.available ? 'text-good' : 'text-bad'}`}>
+                  {availability.available ? `${username} is available.` : availability.reason}
+                </p>
+              )}
+            </div>
+          )}
+
+          {usernameMode !== 'keep' && (
+            <Alert tone="warn">
+              The student signs in with their username, so tell them the new one in person.
+            </Alert>
+          )}
+        </fieldset>
 
         <div className="flex justify-end gap-2">
           <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
-          <button type="submit" className="btn-primary" disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
+          <button
+            type="submit"
+            className="btn-primary"
+            disabled={busy || (usernameMode === 'set' && availability !== null && !availability.available)}
+          >
+            {busy ? 'Saving…' : 'Save'}
+          </button>
         </div>
       </form>
     </Modal>

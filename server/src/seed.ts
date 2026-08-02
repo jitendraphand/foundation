@@ -53,10 +53,12 @@ async function seedTags() {
 }
 
 async function seedClasses() {
-  const grades = Array.from({ length: 12 }, (_, i) => ({
+  // Grades 6 to 10 only. An admin can add more from Settings without a
+  // migration, because classes are rows rather than an enum.
+  const grades = [6, 7, 8, 9, 10].map((n, i) => ({
     kind: 'GRADE',
-    code: String(i + 1),
-    label: `Grade ${i + 1}`,
+    code: String(n),
+    label: `Grade ${n}`,
     sortOrder: i + 1,
   }));
 

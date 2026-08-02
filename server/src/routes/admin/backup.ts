@@ -118,12 +118,12 @@ export default async function adminBackupRoutes(app: FastifyInstance) {
   app.get('/api/admin/backups/restore-instructions', async () => ({
     summary: 'Restoring is done over SSH, not from this screen, because it overwrites the live database.',
     steps: [
-      'Copy the .tar.gz.enc archive onto the server, e.g. scp backup.tar.gz.enc ubuntu@<ip>:~/',
+      'Copy the archive onto the server, e.g. scp foundation-backup-*.tar.gz ubuntu@<ip>:~/',
       'SSH into the server: ssh ubuntu@<ip>',
       'cd ~/foundation',
-      './deploy/restore.sh ~/foundation-backup-<timestamp>.tar.gz.enc',
+      './deploy/restore.sh ~/foundation-backup-<timestamp>.tar.gz',
       'The script stops the API, restores the database and uploads, then restarts everything.',
     ],
-    note: 'The BACKUP_PASSPHRASE in .env must be the same value that was set when the archive was created, or it cannot be decrypted.',
+    note: 'The archive is a plain .tar.gz, so you can open it with any unzip tool to check what is inside before restoring. ENCRYPTION_KEY in .env must be unchanged for the stored LLM API keys to still decrypt.',
   }));
 }

@@ -14,9 +14,13 @@ ARM)** instance with `docker compose up -d`.
 ## What it does
 
 ### For students
-- Sign up with name, grade, division, roll number and date of birth; the
-  username is generated as `firstnamelastname`, with `1`, `2`, … appended only
-  when that name is already taken.
+- Sign up with name, grade (6–10), division, roll number and date of birth. The
+  username is generated as `firstnamelastname` — Ajay Sharma becomes
+  `ajaysharma`, and a second Ajay Sharma becomes `ajaysharma1`, then
+  `ajaysharma2`.
+- Every account also gets a permanent user ID (`USR-00001`). Names, spellings
+  and even usernames can be corrected later; the user ID never changes, so
+  results stay attached to the right person.
 - Dashboard showing live tests, past scores, a percentage trend chart, a
   per-subject breakdown, and the areas they are weakest in.
 - Timed test runner with a server-authoritative clock, continuous autosave,
@@ -26,10 +30,10 @@ ARM)** instance with `docker compose up -d`.
   correct answers with worked explanations.
 
 ### For administrators
-- **Set test** — generate questions from OpenRouter, NVIDIA NIM, or any
-  OpenAI-compatible endpoint. Full control of the system prompt, the model, the
-  difficulty and cognitive mix, and the exact user message (with a preview of
-  precisely what will be sent).
+- **Set test** — generate questions from OpenRouter, NVIDIA NIM, Hugging Face
+  Inference Providers, or any other OpenAI-compatible endpoint. Full control of
+  the system prompt, the model, the difficulty and cognitive mix, and the exact
+  user message (with a preview of precisely what will be sent).
 - **Review** — every draft renders exactly as a student will see it, maths,
   diagrams and all. Edit anything, then approve. Only approved questions can go
   on a test.
@@ -40,10 +44,12 @@ ARM)** instance with `docker compose up -d`.
 - **Per-student analysis** — mastery grid across all four tag axes, and one
   button to generate a practice test aimed at exactly the cells they are
   failing. Practice data stays segregated from class-test data everywhere.
-- **User management** — activate, deactivate, edit, reset password, delete
-  (soft by default so historical results survive).
-- **Backups** — one click produces an encrypted archive containing everything,
-  ready to store on Google Drive.
+- **User management** — activate, deactivate, edit any detail, change the
+  username, set a new password to hand over in person, and delete (soft by
+  default so historical results survive).
+- Every test carries a permanent test ID (`TST-0001`) alongside its title.
+- **Backups** — one click produces a `.tar.gz` containing everything, ready to
+  store on Google Drive.
 
 ---
 
@@ -88,6 +94,19 @@ supporting a new kind of content means adding one renderer component and one
 entry in the block schema. **Every question already in the database is
 untouched.**
 
+### Question types
+
+Multiple choice only, and both variants are graded automatically:
+
+| Format | Meaning |
+|---|---|
+| `MCQ_SINGLE` | Exactly one of the four options is correct |
+| `MCQ_MULTI` | Two or three options are correct, with optional partial credit |
+
+Partial credit gives marks for correct ticks minus wrong ticks, floored at
+zero. Negative marking (configurable per test) applies only to an answered
+question that scored nothing — never to a blank.
+
 ### Diagrams
 
 The LLM is instructed to express every figure as *code that generates it*, in
@@ -100,17 +119,52 @@ one of three forms, all rendered directly in the browser:
 | Flow charts, trees, processes | `mermaid` | Mermaid (lazy-loaded) |
 | Plots, graphs, number lines | `chart` (JSON spec) | Hand-rolled SVG charts |
 | Data | `table` | HTML table |
-| A photo, or a figure needing a numerical library | `image` | Admin uploads it |
+| A photo or realistic illustration | `image` | Admin uploads it — see below |
 
 Nothing is executed anywhere. `chart` specs with `kind: "function"` are plotted
 by a small hand-written expression parser (`web/src/lib/expr.ts`) — never
 `eval`. SVG is filtered against an allow-list of elements and attributes
 **before it is stored**, and again in the browser before rendering.
 
-When a figure genuinely cannot be drawn any of those ways, the model is told to
-emit a matplotlib script plus a `FIGURE NEEDED:` note. The admin sees both in
-the review screen and attaches a rendered image. Server-side code execution is
-deliberately not part of the system.
+### Images
+
+None of the supported providers generate pictures, so the system does not
+pretend otherwise. Every question is tagged **image required: yes or no**.
+
+When a question genuinely needs a photograph or realistic illustration that line
+art cannot convey, the model must set `imageRequired: true` and supply a
+complete image-generation prompt with it:
+
+```jsonc
+{
+  "imageRequired": true,
+  "imagePrompt": {
+    "prompt":      "A colour photograph of a laboratory beaker on a bench, side view…",
+    "description": "Shows a beaker containing blue liquid at the 250 ml mark.",
+    "details":     ["label the 250 ml graduation", "liquid must be clearly blue"],
+    "style":       "realistic colour photograph, neutral background",
+    "widthPx": 800, "heightPx": 600, "aspectRatio": "4:3",
+    "altText":     "Beaker of blue liquid",
+    "placement":   "STEM"          // or "OPTION" + optionId
+  }
+}
+```
+
+The review screen shows that prompt with a **Copy prompt** button — one paste
+into any image generator — and an **Upload** button for the result. The picture
+is inserted above the question (or the named option) automatically.
+
+Two guardrails make this safe:
+
+- A question flagged `imageRequired` **cannot be approved** until an image is
+  attached, so an unanswerable question can never reach a student. Bulk-approve
+  skips them and says how many it skipped.
+- The generator is told to aim for at most one in ten questions needing a real
+  picture, and a **Text and drawn diagrams only** switch on the generation
+  screen forbids them outright. Practice tests always use that switch, so
+  remedial work is never blocked waiting for artwork.
+
+Server-side code execution is deliberately not part of the system.
 
 ---
 
@@ -151,7 +205,13 @@ The schema follows six rules, documented at the top of
 
 Backups contain **two** copies of the data: a native `pg_dump` for a fast exact
 restore, and a plain-JSON export that stays readable across a PostgreSQL major
-upgrade or a schema change.
+upgrade or a schema change. The archive is an ordinary `.tar.gz`, so it can be
+opened and inspected with any unzip tool.
+
+Stable identifiers reinforce this: `User.publicId` (`USR-00001`) and
+`Test.publicId` (`TST-0001`) are assigned by a database sequence at insert time
+and never updated, so external records and printed papers keep pointing at the
+right row no matter what is edited later.
 
 ---
 
@@ -208,9 +268,13 @@ deploy/          bootstrap.sh, backup.sh, restore.sh, DEPLOYMENT.md
 - Argon2id password hashing (64 MB, 3 passes)
 - httpOnly + SameSite=Lax session cookies, Secure in production
 - LLM API keys AES-256-GCM encrypted at rest, never returned to any client
+- Backup archives are unencrypted by choice — keep them in a private folder,
+  they contain password hashes
 - SVG allow-list sanitisation on write and on render
 - KaTeX macro expansion capped, so a crafted formula cannot hang a browser
   mid-exam
+- Uploaded SVG is served as a download, never inline, so it cannot script our
+  own origin
 - Rate limiting on login, signup and generation; account lockout after 8 failed
   logins
 - Server-authoritative exam timer — the client clock is never trusted

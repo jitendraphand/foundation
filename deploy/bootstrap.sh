@@ -99,7 +99,7 @@ else
 
   gen() { openssl rand -base64 48 | tr -d '\n/+=' | head -c 48; }
 
-  DB_PASS="$(gen)"; JWT="$(gen)"; ENC="$(gen)"; BACKUP="$(gen)"
+  DB_PASS="$(gen)"; JWT="$(gen)"; ENC="$(gen)"
 
   # Detect the public IP so PUBLIC_HOST can be pre-filled with a working
   # sslip.io hostname. Oracle's metadata service is authoritative; ifconfig.me
@@ -120,15 +120,8 @@ else
   sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=${DB_PASS}|" .env
   sed -i "s|^JWT_SECRET=.*|JWT_SECRET=${JWT}|" .env
   sed -i "s|^ENCRYPTION_KEY=.*|ENCRYPTION_KEY=${ENC}|" .env
-  sed -i "s|^BACKUP_PASSPHRASE=.*|BACKUP_PASSPHRASE=${BACKUP}|" .env
   chmod 600 .env
   ok ".env created"
-
-  echo
-  warn "WRITE THIS DOWN AND KEEP IT SOMEWHERE SAFE, NOT ONLY ON THIS SERVER:"
-  echo "    BACKUP_PASSPHRASE=${BACKUP}"
-  warn "Without it, your backup archives cannot be restored."
-  echo
 fi
 
 # --- 6. Build and start -----------------------------------------------------

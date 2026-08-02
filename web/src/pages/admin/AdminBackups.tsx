@@ -104,8 +104,9 @@ export default function AdminBackups() {
           </li>
         </ul>
         <p className="mt-3 text-sm text-ink-muted">
-          The archive is encrypted with your <code className="font-mono text-xs">BACKUP_PASSPHRASE</code>, so it is safe
-          to upload to Google Drive. Keep that passphrase somewhere separate — without it the archive cannot be restored.
+          The archive is a plain <code className="font-mono text-xs">.tar.gz</code>, so you can open it with any unzip
+          tool to check what is inside. It does contain password hashes and stored API keys, so keep it in a private
+          folder on Google Drive rather than a shared or public one.
         </p>
         <p className="mt-2 text-xs text-ink-faint">
           Archives older than {retentionDays} days are removed from the server automatically. Copies you have already
@@ -173,15 +174,16 @@ export default function AdminBackups() {
           </Alert>
 
           <ol className="list-decimal pl-5 space-y-2 text-ink-muted">
-            <li>Copy the archive to the server:<br /><code className="font-mono text-xs">scp foundation-backup-*.tar.gz.enc ubuntu@YOUR_IP:~/</code></li>
+            <li>Copy the archive to the server:<br /><code className="font-mono text-xs">scp foundation-backup-*.tar.gz ubuntu@YOUR_IP:~/</code></li>
             <li>Connect:<br /><code className="font-mono text-xs">ssh ubuntu@YOUR_IP</code></li>
-            <li>Run the restore script:<br /><code className="font-mono text-xs">cd ~/foundation &amp;&amp; ./deploy/restore.sh ~/foundation-backup-TIMESTAMP.tar.gz.enc</code></li>
+            <li>Run the restore script:<br /><code className="font-mono text-xs">cd ~/foundation &amp;&amp; ./deploy/restore.sh ~/foundation-backup-TIMESTAMP.tar.gz</code></li>
             <li>The script stops the API, restores the database and images, then brings everything back up.</li>
           </ol>
 
           <p className="text-ink-muted">
-            The <code className="font-mono text-xs">BACKUP_PASSPHRASE</code> in your <code className="font-mono text-xs">.env</code>{' '}
-            must match the value in force when the archive was created.
+            Stored LLM API keys only decrypt if <code className="font-mono text-xs">ENCRYPTION_KEY</code> in your{' '}
+            <code className="font-mono text-xs">.env</code> is unchanged. If it changed, re-enter the keys under
+            Admin → Settings after restoring.
           </p>
         </div>
       </Modal>

@@ -82,7 +82,7 @@ export default async function authRoutes(app: FastifyInstance) {
               passwordHash,
               role: 'STUDENT',
             },
-            select: { id: true, username: true, firstName: true, lastName: true, role: true },
+            select: { id: true, publicId: true, username: true, firstName: true, lastName: true, role: true },
           });
         });
 
@@ -92,8 +92,8 @@ export default async function authRoutes(app: FastifyInstance) {
         setSessionCookie(reply, token);
 
         return reply.code(201).send({
-          user: { id: user.id, username: user.username, firstName: user.firstName, lastName: user.lastName, role: user.role },
-          message: `Welcome. Your username is ${user.username} - please remember it, you will use it to sign in.`,
+          user: { id: user.id, publicId: user.publicId, username: user.username, firstName: user.firstName, lastName: user.lastName, role: user.role },
+          message: `Welcome. Your username is ${user.username} - please remember it, you will use it to sign in. Your user ID is ${user.publicId}.`,
         });
       } catch (err) {
         if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
@@ -165,6 +165,7 @@ export default async function authRoutes(app: FastifyInstance) {
     return {
       user: {
         id: user.id,
+        publicId: user.publicId,
         username: user.username,
         firstName: user.firstName,
         lastName: user.lastName,
@@ -183,7 +184,7 @@ export default async function authRoutes(app: FastifyInstance) {
     const user = await prisma.user.findUniqueOrThrow({
       where: { id: request.user!.sub },
       select: {
-        id: true, username: true, firstName: true, lastName: true, grade: true, division: true,
+        id: true, publicId: true, username: true, firstName: true, lastName: true, grade: true, division: true,
         rollNo: true, dateOfBirth: true, role: true, mustChangePassword: true, lastLoginAt: true, createdAt: true,
       },
     });

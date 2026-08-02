@@ -8,7 +8,7 @@
 # Archives land in the `backups` Docker volume and are listed in the admin UI,
 # where they can be downloaded. To copy one straight to your laptop:
 #
-#   scp ubuntu@YOUR_IP:/tmp/foundation-backup-*.tar.gz.enc .
+#   scp ubuntu@YOUR_IP:~/foundation/backups-export/foundation-backup-*.tar.gz .
 #
 # To run nightly at 02:30, add this to `crontab -e`:
 #

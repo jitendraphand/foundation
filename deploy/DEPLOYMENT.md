@@ -103,9 +103,6 @@ and take under a minute.
 
 When it finishes it prints your URL and admin credentials.
 
-> **Write down the `BACKUP_PASSPHRASE` it prints.** Without that exact value,
-> your backup archives cannot be decrypted — not by you, not by anyone.
-
 ### First visit
 
 Open `https://<your-ip-with-dashes>.sslip.io`.
@@ -146,11 +143,21 @@ mixed-content block.
 
 **Admin → Settings → LLM providers → Add credential.**
 
-| Provider | Base URL | Where to get a key |
-|---|---|---|
-| OpenRouter | `https://openrouter.ai/api/v1` | <https://openrouter.ai/keys> |
-| NVIDIA NIM | `https://integrate.api.nvidia.com/v1` | <https://build.nvidia.com/> |
-| Custom | anything OpenAI-compatible | Groq, Together, a local Ollama, … |
+| Provider | Base URL | Where to get a key | Model id format |
+|---|---|---|---|
+| OpenRouter | `https://openrouter.ai/api/v1` | <https://openrouter.ai/keys> | `anthropic/claude-sonnet-4.5` |
+| NVIDIA NIM | `https://integrate.api.nvidia.com/v1` | <https://build.nvidia.com/> | `meta/llama-3.3-70b-instruct` |
+| Hugging Face | `https://router.huggingface.co/v1` | <https://huggingface.co/settings/tokens> | `meta-llama/Llama-3.3-70B-Instruct` |
+| Other | anything OpenAI-compatible | Groq, Together, a local Ollama, … | whatever it expects |
+
+Hugging Face routes to whichever backend provider is fastest by default. To pin
+one, append a suffix to the model id — `openai/gpt-oss-120b:groq` — or use
+`:cheapest` / `:fastest`.
+
+**None of these generate images.** When a question needs a real photograph, the
+model flags it and writes an image-generation prompt instead. You copy that
+prompt into any image tool and upload the result from the review screen. See
+[Images](../README.md#images) in the README.
 
 Keys are encrypted with AES-256-GCM before they touch the database and are
 never displayed again. Use **Test connection** to confirm one works before
@@ -185,7 +192,9 @@ Database migrations run automatically on startup. Existing data is preserved.
 ### Backups
 
 From the UI: **Admin → Backups → Generate backup**, then download the archive
-and put it on Google Drive.
+and put it on Google Drive. It is a plain `.tar.gz` — you can open it with any
+unzip tool to check what is inside. It does contain password hashes and stored
+API keys, so keep it in a private folder rather than a shared one.
 
 From the command line, or from cron:
 
@@ -202,10 +211,10 @@ Nightly at 02:30 — `crontab -e`:
 ### Restoring
 
 ```bash
-scp foundation-backup-*.tar.gz.enc ubuntu@YOUR_IP:~/
+scp foundation-backup-*.tar.gz ubuntu@YOUR_IP:~/
 ssh ubuntu@YOUR_IP
 cd ~/foundation
-./deploy/restore.sh ~/foundation-backup-TIMESTAMP.tar.gz.enc
+./deploy/restore.sh ~/foundation-backup-TIMESTAMP.tar.gz
 ```
 
 The script takes a safety dump of the current database before overwriting
@@ -295,5 +304,6 @@ shows 0 B, re-run `./deploy/bootstrap.sh`.
 **Do this after your first sign-in:**
 
 1. Change the admin password.
-2. Store `BACKUP_PASSPHRASE` somewhere other than the server.
-3. Consider restricting SSH to your own IP in the Oracle security list.
+2. Consider restricting SSH to your own IP in the Oracle security list.
+3. Keep downloaded backup archives in a private folder — they are not encrypted
+   and contain password hashes.

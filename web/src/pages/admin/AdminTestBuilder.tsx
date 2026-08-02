@@ -13,6 +13,7 @@ import type { BankQuestion } from '../../lib/types';
 
 interface TestDetail {
   id: string;
+  publicId: string;
   title: string;
   subject: string;
   kind: 'REGULAR' | 'PRACTICE';
@@ -58,6 +59,7 @@ export default function AdminTestBuilder() {
           <Link to="/admin/tests" className="text-xs text-ink-muted hover:text-ink">← All tests</Link>
           <h1 className="text-lg font-semibold mt-1">{test.title}</h1>
           <p className="text-xs text-ink-muted mt-0.5">
+            <span className="font-mono">{test.publicId}</span> · 
             {test.subject} · {test.durationMinutes} min · {test.marksPerQuestion} mark/question
             {test.negativeMarks > 0 && ` · −${test.negativeMarks} negative`}
             {test.targetUser && ` · practice for ${test.targetUser.firstName} ${test.targetUser.lastName}`}

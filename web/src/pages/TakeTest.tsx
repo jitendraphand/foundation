@@ -421,49 +421,6 @@ function AnswerInput({
       );
     }
 
-    case 'TRUE_FALSE': {
-      const current = (value as { value?: boolean } | null)?.value;
-      return (
-        <div className="flex gap-2">
-          {[true, false].map((option) => (
-            <button
-              key={String(option)}
-              type="button"
-              onClick={() => onChange({ value: option })}
-              className={`flex-1 py-2.5 rounded-lg border text-sm font-medium transition-colors ${
-                current === option ? 'border-series-1 bg-series-1/[0.05] text-ink' : 'border-line text-ink-muted hover:bg-surface-sunken'
-              }`}
-            >
-              {option ? 'True' : 'False'}
-            </button>
-          ))}
-        </div>
-      );
-    }
-
-    case 'NUMERIC': {
-      const current = (value as { value?: number } | null)?.value;
-      return (
-        <div className="max-w-xs">
-          <label className="label">Your answer</label>
-          <input
-            type="number"
-            step="any"
-            className="input font-mono"
-            value={current ?? ''}
-            onChange={(e) => {
-              const raw = e.target.value;
-              if (raw === '') return onChange(null);
-              const parsed = Number(raw);
-              if (Number.isFinite(parsed)) onChange({ value: parsed });
-            }}
-            placeholder="Enter a number"
-          />
-          <p className="mt-1 text-[11px] text-ink-faint">Enter digits only, for example 3.14 or -12.</p>
-        </div>
-      );
-    }
-
     default:
       return <p className="text-sm text-bad">This question type cannot be displayed.</p>;
   }

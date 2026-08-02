@@ -172,7 +172,7 @@ export default async function adminAnalyticsRoutes(app: FastifyInstance) {
         ...(q.division ? { division: q.division } : {}),
       },
       select: {
-        id: true, username: true, firstName: true, lastName: true, grade: true, division: true,
+        id: true, publicId: true, username: true, firstName: true, lastName: true, grade: true, division: true,
         rollNo: true, isActive: true, lastLoginAt: true,
         attempts: {
           where: { status: { in: ['SUBMITTED', 'AUTO_SUBMITTED'] }, test: { ...kindFilter, deletedAt: null } },
@@ -201,6 +201,7 @@ export default async function adminAnalyticsRoutes(app: FastifyInstance) {
 
         return {
           id: s.id,
+          publicId: s.publicId,
           username: s.username,
           name: `${s.firstName} ${s.lastName}`,
           grade: s.grade,
@@ -227,7 +228,7 @@ export default async function adminAnalyticsRoutes(app: FastifyInstance) {
 
     const student = await prisma.user.findFirst({
       where: { id, deletedAt: null },
-      select: { id: true, username: true, firstName: true, lastName: true, grade: true, division: true, rollNo: true, isActive: true },
+      select: { id: true, publicId: true, username: true, firstName: true, lastName: true, grade: true, division: true, rollNo: true, isActive: true },
     });
     if (!student) return reply.code(404).send({ error: 'Student not found.' });
 

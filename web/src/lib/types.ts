@@ -1,11 +1,13 @@
 export type Role = 'STUDENT' | 'ADMIN';
 export type TestKind = 'REGULAR' | 'PRACTICE';
-export type QuestionFormat = 'MCQ_SINGLE' | 'MCQ_MULTI' | 'TRUE_FALSE' | 'NUMERIC';
+export type QuestionFormat = 'MCQ_SINGLE' | 'MCQ_MULTI';
 export type QuestionStatus = 'DRAFT' | 'APPROVED' | 'REJECTED';
 export type TestStatus = 'DRAFT' | 'PUBLISHED' | 'CLOSED';
 
 export interface Me {
   id: string;
+  /** Stable USR-00001 identity; never changes, even after a rename. */
+  publicId: string;
   username: string;
   firstName: string;
   lastName: string;
@@ -59,18 +61,31 @@ export interface QuestionOption {
 export type AnswerResponse =
   | { optionId: string }
   | { optionIds: string[] }
-  | { value: boolean }
-  | { value: number }
   | null;
 
 export interface AnswerKey {
   correctOptionId?: string;
   correctOptionIds?: string[];
   partialCredit?: boolean;
-  value?: boolean | number;
-  tolerance?: number;
-  toleranceKind?: 'ABSOLUTE' | 'RELATIVE';
-  unit?: string;
+}
+
+/**
+ * Supplied by the generator whenever a question needs a real picture that no
+ * text model can draw. The admin pastes `prompt` into any image generator,
+ * then uploads the result against the question.
+ */
+export interface ImagePrompt {
+  version?: number;
+  prompt: string;
+  description: string;
+  details: string[];
+  style: string;
+  widthPx: number;
+  heightPx: number;
+  aspectRatio?: string;
+  altText: string;
+  placement: 'STEM' | 'OPTION';
+  optionId?: string | null;
 }
 
 export interface PaperQuestion {
@@ -93,12 +108,18 @@ export interface PaperQuestion {
   timeSpentMs?: number;
   answerKey?: AnswerKey;
   explanation?: Content;
+  imageRequired?: boolean;
+  imagePrompt?: ImagePrompt | null;
+  imageFulfilled?: boolean;
 }
 
 export interface BankQuestion extends Omit<PaperQuestion, 'marks'> {
   status: QuestionStatus;
   answerKey: AnswerKey;
   explanation: Content;
+  imageRequired: boolean;
+  imagePrompt: ImagePrompt | null;
+  imageFulfilled: boolean;
   sourceModel?: string | null;
   isAdminEdited: boolean;
   reviewNote?: string | null;
@@ -156,6 +177,8 @@ export interface ResultRow {
 
 export interface LiveTest {
   id: string;
+  /** Stable TST-0001 identity, shown on the paper and in every report. */
+  publicId: string;
   title: string;
   description: string | null;
   kind: TestKind;

@@ -64,11 +64,11 @@ enum QuestionStatus {
   REJECTED // admin discarded it; kept for prompt-quality analysis
 }
 
+/// Multiple choice only: exactly one correct option, or several correct
+/// options. Both are graded automatically with no human marking.
 enum QuestionFormat {
   MCQ_SINGLE
   MCQ_MULTI
-  TRUE_FALSE
-  NUMERIC
 }
 
 enum AttemptStatus {
@@ -94,8 +94,16 @@ enum TagAxis {
 // --- People ----------------------------------------------------------------
 
 model User {
-  id       String @id @default(uuid())
-  username String @unique // firstname+lastname, then +1, +2 on collision
+  id String @id @default(uuid())
+
+  /// Stable, human-readable identity: USR-00001, USR-00002, ...
+  /// Assigned once at signup and NEVER changed. The username can be corrected
+  /// for spelling and the name can be edited, but this stays fixed, so results
+  /// and reports always point at the same person.
+  publicId String @unique @default(dbgenerated("('USR-'::text || lpad((nextval('user_public_id_seq'::regclass))::text, 5, '0'::text))"))
+
+  /// firstname+lastname, then +1, +2 on collision. Editable by an admin.
+  username String @unique
 
   firstName String
   lastName  String
@@ -227,16 +235,40 @@ model Question {
   /// A future "simulation" block type needs only a new renderer component.
   content Json
 
-  /// [{ id: "a", blocks: [...] }, ...] - empty for NUMERIC questions.
+  /// [{ id: "a", blocks: [...] }, ...] - always four options, ids a/b/c/d.
   options Json @default("[]")
 
   /// Shape depends on `format`:
   ///   MCQ_SINGLE  { correctOptionId: "b" }
   ///   MCQ_MULTI   { correctOptionIds: ["a","c"], partialCredit: true }
-  ///   TRUE_FALSE  { value: true }
-  ///   NUMERIC     { value: 3.14, tolerance: 0.01, toleranceKind: "ABSOLUTE"|"RELATIVE", unit: "cm" }
   /// Never sent to a student before their attempt is submitted.
   answerKey Json
+
+  // --- Images -------------------------------------------------------------
+  // None of the supported text providers can produce a picture, so a question
+  // that needs one is flagged here and carries a ready-to-use generation
+  // prompt. The admin takes that prompt to any image tool, then uploads the
+  // result. A flagged question cannot be approved until an image is attached,
+  // so an incomplete question can never reach a student.
+
+  /// True when the question cannot be understood without a picture.
+  imageRequired Boolean @default(false)
+
+  /// Present only when imageRequired is true:
+  ///   { version: 1,
+  ///     prompt: "A right-angled triangle ABC with the right angle at B...",
+  ///     description: "what the picture must show, in plain words",
+  ///     details: ["label the vertices A, B, C", "mark AB = 3 cm"],
+  ///     style: "clean black-and-white line diagram, white background",
+  ///     widthPx: 800, heightPx: 600, aspectRatio: "4:3",
+  ///     altText: "Right-angled triangle ABC",
+  ///     placement: "STEM" | "OPTION",
+  ///     optionId: "b" }
+  imagePrompt Json?
+
+  /// Set once an admin has attached the picture, so the review queue can show
+  /// "3 questions still waiting for an image".
+  imageFulfilled Boolean @default(false)
 
   /// Worked solution, same block format as `content`.
   explanation Json @default("{\"version\":1,\"blocks\":[]}")
@@ -283,6 +315,7 @@ model Question {
   assets        Asset[]
 
   @@index([status, subject])
+  @@index([status, imageRequired, imageFulfilled])
   @@index([difficultyTag, cognitiveTag])
   @@index([subject, topic, subtopic])
   @@index([generationRunId])
@@ -409,7 +442,13 @@ model ApiCredential {
 // --- Tests -----------------------------------------------------------------
 
 model Test {
-  id          String     @id @default(uuid())
+  id String @id @default(uuid())
+
+  /// Stable, human-readable test identifier: TST-0001, TST-0002, ...
+  /// Printed on the paper and shown in every report, so a test can be referred
+  /// to unambiguously even if its title is later edited.
+  publicId String @unique @default(dbgenerated("('TST-'::text || lpad((nextval('test_public_id_seq'::regclass))::text, 4, '0'::text))"))
+
   title       String
   description String?    @db.Text
   kind        TestKind   @default(REGULAR)
@@ -552,11 +591,13 @@ model Answer {
 // --- Operations ------------------------------------------------------------
 
 model BackupArchive {
-  id          String   @id @default(uuid())
-  filename    String
-  byteSize    Int
-  sha256      String
-  isEncrypted Boolean  @default(true)
+  id       String @id @default(uuid())
+  filename String
+  byteSize Int
+  sha256   String
+  /// Archives are plain .tar.gz. Keep them somewhere private - they contain
+  /// password hashes and LLM API keys.
+  isEncrypted    Boolean @default(false)
   includesAssets Boolean @default(true)
   /// { schemaVersion, appVersion, tableCounts: {...}, createdAtUtc }
   manifest    Json     @default("{}")

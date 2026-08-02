@@ -1,3 +1,14 @@
+-- Sequences backing the stable, human-readable identifiers.
+--
+--   User.publicId -> USR-00001, USR-00002, ...
+--   Test.publicId -> TST-0001,  TST-0002,  ...
+--
+-- These are assigned by the database at INSERT time and are never updated, so
+-- a student keeps the same identity through any number of spelling
+-- corrections, username changes or class moves.
+CREATE SEQUENCE IF NOT EXISTS "user_public_id_seq" START WITH 1 INCREMENT BY 1;
+CREATE SEQUENCE IF NOT EXISTS "test_public_id_seq" START WITH 1 INCREMENT BY 1;
+
 -- CreateEnum
 CREATE TYPE "Role" AS ENUM ('STUDENT', 'ADMIN');
 
@@ -11,7 +22,7 @@ CREATE TYPE "TestStatus" AS ENUM ('DRAFT', 'PUBLISHED', 'CLOSED');
 CREATE TYPE "QuestionStatus" AS ENUM ('DRAFT', 'APPROVED', 'REJECTED');
 
 -- CreateEnum
-CREATE TYPE "QuestionFormat" AS ENUM ('MCQ_SINGLE', 'MCQ_MULTI', 'TRUE_FALSE', 'NUMERIC');
+CREATE TYPE "QuestionFormat" AS ENUM ('MCQ_SINGLE', 'MCQ_MULTI');
 
 -- CreateEnum
 CREATE TYPE "AttemptStatus" AS ENUM ('IN_PROGRESS', 'SUBMITTED', 'AUTO_SUBMITTED', 'ABANDONED');
@@ -25,6 +36,7 @@ CREATE TYPE "TagAxis" AS ENUM ('DIFFICULTY', 'COGNITIVE', 'SKILL');
 -- CreateTable
 CREATE TABLE "User" (
     "id" TEXT NOT NULL,
+    "publicId" TEXT NOT NULL DEFAULT ('USR-'::text || lpad((nextval('user_public_id_seq'::regclass))::text, 5, '0'::text)),
     "username" TEXT NOT NULL,
     "firstName" TEXT NOT NULL,
     "lastName" TEXT NOT NULL,
@@ -103,6 +115,9 @@ CREATE TABLE "Question" (
     "content" JSONB NOT NULL,
     "options" JSONB NOT NULL DEFAULT '[]',
     "answerKey" JSONB NOT NULL,
+    "imageRequired" BOOLEAN NOT NULL DEFAULT false,
+    "imagePrompt" JSONB,
+    "imageFulfilled" BOOLEAN NOT NULL DEFAULT false,
     "explanation" JSONB NOT NULL DEFAULT '{"version":1,"blocks":[]}',
     "difficultyTag" TEXT NOT NULL,
     "cognitiveTag" TEXT NOT NULL,
@@ -214,6 +229,7 @@ CREATE TABLE "ApiCredential" (
 -- CreateTable
 CREATE TABLE "Test" (
     "id" TEXT NOT NULL,
+    "publicId" TEXT NOT NULL DEFAULT ('TST-'::text || lpad((nextval('test_public_id_seq'::regclass))::text, 4, '0'::text)),
     "title" TEXT NOT NULL,
     "description" TEXT,
     "kind" "TestKind" NOT NULL DEFAULT 'REGULAR',
@@ -305,7 +321,7 @@ CREATE TABLE "BackupArchive" (
     "filename" TEXT NOT NULL,
     "byteSize" INTEGER NOT NULL,
     "sha256" TEXT NOT NULL,
-    "isEncrypted" BOOLEAN NOT NULL DEFAULT true,
+    "isEncrypted" BOOLEAN NOT NULL DEFAULT false,
     "includesAssets" BOOLEAN NOT NULL DEFAULT true,
     "manifest" JSONB NOT NULL DEFAULT '{}',
     "createdById" TEXT,
@@ -338,6 +354,9 @@ CREATE TABLE "Setting" (
 
     CONSTRAINT "Setting_pkey" PRIMARY KEY ("key")
 );
+
+-- CreateIndex
+CREATE UNIQUE INDEX "User_publicId_key" ON "User"("publicId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "User_username_key" ON "User"("username");
@@ -379,6 +398,9 @@ CREATE UNIQUE INDEX "Tag_axis_code_key" ON "Tag"("axis", "code");
 CREATE INDEX "Question_status_subject_idx" ON "Question"("status", "subject");
 
 -- CreateIndex
+CREATE INDEX "Question_status_imageRequired_imageFulfilled_idx" ON "Question"("status", "imageRequired", "imageFulfilled");
+
+-- CreateIndex
 CREATE INDEX "Question_difficultyTag_cognitiveTag_idx" ON "Question"("difficultyTag", "cognitiveTag");
 
 -- CreateIndex
@@ -410,6 +432,9 @@ CREATE INDEX "GenerationRun_targetUserId_idx" ON "GenerationRun"("targetUserId")
 
 -- CreateIndex
 CREATE INDEX "ApiCredential_provider_isActive_idx" ON "ApiCredential"("provider", "isActive");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "Test_publicId_key" ON "Test"("publicId");
 
 -- CreateIndex
 CREATE INDEX "Test_status_kind_startsAt_idx" ON "Test"("status", "kind", "startsAt");
