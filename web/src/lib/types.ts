@@ -16,8 +16,38 @@ export interface Me {
   rollNo?: string;
   dateOfBirth?: string;
   role: Role;
+  /** Which admin areas this account may use. Empty for a student. */
+  permissions: string[];
   mustChangePassword?: boolean;
   lastLoginAt?: string | null;
+}
+
+export interface PermissionDef {
+  code: string;
+  label: string;
+  group: string;
+  description: string;
+  sensitive?: boolean;
+}
+
+export interface PermissionPreset {
+  code: string;
+  label: string;
+  description: string;
+  permissions: string[];
+}
+
+export interface Administrator {
+  id: string;
+  publicId: string;
+  username: string;
+  firstName: string;
+  lastName: string;
+  isActive: boolean;
+  permissions: string[];
+  lastLoginAt: string | null;
+  createdAt: string;
+  mustChangePassword: boolean;
 }
 
 // --- Question content blocks (mirrors server/src/lib/content.ts) -----------

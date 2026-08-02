@@ -50,9 +50,13 @@ ARM)** instance with `docker compose up -d`.
 - **Per-student analysis** — mastery grid across all four tag axes, and one
   button to generate a practice test aimed at exactly the cells they are
   failing. Practice data stays segregated from class-test data everywhere.
-- **User management** — activate, deactivate, edit any detail, change the
-  username, set a new password to hand over in person, and delete (soft by
-  default so historical results survive).
+- **User management** — add students by hand, activate, deactivate, edit any
+  detail, change the username, set a new password to hand over in person, and
+  delete (soft by default so historical results survive).
+- **Administrators with granular privileges** — create colleagues with exactly
+  the nine privileges you tick, or start from a preset (Teacher, Question
+  setter, Invigilator, Office). Someone who writes papers never has to hold the
+  API keys or the backups.
 - Every test carries a permanent test ID (`TST-0001`) alongside its title.
 - **Backups** — one click produces a `.tar.gz` containing everything, ready to
   store on Google Drive.
@@ -189,6 +193,40 @@ Two guardrails make this safe:
 Server-side code execution is deliberately not part of the system.
 
 ---
+
+## Administrator privileges
+
+"Admin" is not one thing. Each privilege is granted separately with a checkbox,
+and `server/src/lib/permissions.ts` is the single source of truth:
+
+| Privilege | Reaches |
+|---|---|
+| `users.manage` | Students: add, edit, rename, reset password, deactivate, delete |
+| `admins.manage` | Create administrators and set anyone's privileges |
+| `questions.generate` | Run the LLM generator — **spends money** |
+| `questions.review` | Edit, approve, reject questions; attach images |
+| `tests.manage` | Create tests, choose questions, publish |
+| `results.release` | Reveal or withhold a test's results |
+| `analytics.view` | Class and per-student performance, CSV export |
+| `backups.manage` | Generate and download full backups |
+| `settings.manage` | API keys, prompts, tags, grades and divisions |
+
+Enforcement is server-side: every admin area is registered inside a scope
+carrying its privilege (`index.ts`), and routes that span two — generate vs
+review, manage vs release — re-check the specific one. The UI hides what a user
+cannot reach, but that is only a courtesy; the API refuses regardless.
+
+Three safeguards stop the system being bricked:
+
+- Nobody can revoke their own `admins.manage`.
+- The last active holder of `admins.manage` cannot be deactivated or deleted —
+  including by someone who only holds `users.manage`.
+- Unrecognised privilege codes are dropped on write, so a retired or invented
+  code can never grant access.
+
+Upgrading from a version without this model grants the existing administrator
+every privilege, because `ADMIN` used to mean exactly that. Anything less would
+lock the only account out of the very screen used to grant privileges back.
 
 ## The tag taxonomy
 

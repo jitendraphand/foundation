@@ -48,6 +48,7 @@ CREATE TABLE "User" (
     "mustChangePassword" BOOLEAN NOT NULL DEFAULT false,
     "role" "Role" NOT NULL DEFAULT 'STUDENT',
     "isActive" BOOLEAN NOT NULL DEFAULT true,
+    "permissions" TEXT[] DEFAULT ARRAY[]::TEXT[],
     "lastLoginAt" TIMESTAMP(3),
     "failedLogins" INTEGER NOT NULL DEFAULT 0,
     "lockedUntil" TIMESTAMP(3),

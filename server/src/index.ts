@@ -8,7 +8,8 @@ import fs from 'node:fs/promises';
 
 import { env, isProd } from './env.js';
 import { prisma } from './db.js';
-import { requireAdmin } from './middleware/auth.js';
+import { requireAdmin, requirePermission } from './middleware/auth.js';
+import type { Permission } from './lib/permissions.js';
 
 import authRoutes from './routes/auth.js';
 import studentRoutes from './routes/student.js';
@@ -77,18 +78,33 @@ await app.register(authRoutes);
 await app.register(studentRoutes);
 await app.register(assetReadRoutes);
 
-// Every admin route is gated in one place, so a new admin route cannot be
-// added without the check.
-await app.register(async (scope) => {
-  scope.addHook('preHandler', requireAdmin);
-  await scope.register(adminUserRoutes);
-  await scope.register(adminQuestionRoutes);
-  await scope.register(adminTestRoutes);
-  await scope.register(adminAnalyticsRoutes);
-  await scope.register(adminSettingsRoutes);
-  await scope.register(adminBackupRoutes);
-  await scope.register(adminAssetRoutes);
-});
+/**
+ * Every admin area is gated in one place, so a new route cannot be added
+ * without a privilege check.
+ *
+ * Each module is registered in its own scope carrying the privilege that area
+ * needs. Where a module spans two privileges the scope requires either, and
+ * the individual sensitive routes re-check the specific one - see
+ * questions.ts (generate vs review) and tests.ts (manage vs release).
+ */
+type AdminRoutes = (instance: typeof app) => Promise<void>;
+
+const adminArea = (required: Permission | Permission[], routes: AdminRoutes) =>
+  app.register(async (scope) => {
+    scope.addHook('preHandler', requireAdmin);
+    scope.addHook('preHandler', requirePermission(required));
+    await routes(scope as typeof app);
+  });
+
+// Student management and administrator management live in the same module;
+// each route inside re-checks the specific privilege it needs.
+await adminArea(['users.manage', 'admins.manage'], adminUserRoutes);
+await adminArea(['questions.generate', 'questions.review'], adminQuestionRoutes);
+await adminArea(['tests.manage', 'results.release'], adminTestRoutes);
+await adminArea('analytics.view', adminAnalyticsRoutes);
+await adminArea('settings.manage', adminSettingsRoutes);
+await adminArea('backups.manage', adminBackupRoutes);
+await adminArea('questions.review', adminAssetRoutes);
 
 await fs.mkdir(env.UPLOAD_DIR, { recursive: true }).catch(() => undefined);
 await fs.mkdir(env.BACKUP_DIR, { recursive: true }).catch(() => undefined);

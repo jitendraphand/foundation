@@ -6,6 +6,10 @@ interface AuthState {
   user: Me | null;
   loading: boolean;
   error: string | null;
+  /** True when the signed-in user holds every listed privilege. */
+  can: (...required: string[]) => boolean;
+  /** True when they hold at least one of them. */
+  canAny: (...required: string[]) => boolean;
   login: (username: string, password: string) => Promise<Me>;
   logout: () => Promise<void>;
   refresh: () => Promise<void>;
@@ -48,10 +52,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(null);
   }, []);
 
-  const value = useMemo<AuthState>(
-    () => ({ user, loading, error, login, logout, refresh, setUser }),
-    [user, loading, error, login, logout, refresh],
-  );
+  const value = useMemo<AuthState>(() => {
+    const granted = user?.permissions ?? [];
+    return {
+      user,
+      loading,
+      error,
+      // The server enforces all of this; hiding what a user cannot use is a
+      // courtesy so they are not shown buttons that will only refuse them.
+      can: (...required: string[]) => required.every((r) => granted.includes(r)),
+      canAny: (...required: string[]) => required.some((r) => granted.includes(r)),
+      login,
+      logout,
+      refresh,
+      setUser,
+    };
+  }, [user, loading, error, login, logout, refresh]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

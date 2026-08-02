@@ -3,6 +3,7 @@ import type { FastifyReply, FastifyRequest } from 'fastify';
 import { env, isProd } from '../env.js';
 import { prisma } from '../db.js';
 import type { Role } from '@prisma/client';
+import { hasAnyPermission, sanitizePermissions, type Permission } from '../lib/permissions.js';
 
 export const COOKIE_NAME = 'foundation_session';
 
@@ -14,7 +15,7 @@ export interface SessionClaims {
 
 declare module 'fastify' {
   interface FastifyRequest {
-    user?: SessionClaims & { mustChangePassword: boolean };
+    user?: SessionClaims & { mustChangePassword: boolean; permissions: Permission[] };
   }
 }
 
@@ -54,9 +55,14 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
     return reply.code(401).send({ error: 'Your session has expired. Please sign in again.' });
   }
 
+  // Privileges are read from the row on every request, never from the token,
+  // so revoking one takes effect immediately rather than when it expires.
   const user = await prisma.user.findUnique({
     where: { id: claims.sub },
-    select: { id: true, username: true, role: true, isActive: true, deletedAt: true, mustChangePassword: true },
+    select: {
+      id: true, username: true, role: true, isActive: true,
+      deletedAt: true, mustChangePassword: true, permissions: true,
+    },
   });
 
   if (!user || user.deletedAt) {
@@ -73,6 +79,7 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
     username: user.username,
     role: user.role,
     mustChangePassword: user.mustChangePassword,
+    permissions: sanitizePermissions(user.permissions),
   };
 }
 
@@ -82,6 +89,28 @@ export async function requireAdmin(request: FastifyRequest, reply: FastifyReply)
   if (request.user?.role !== 'ADMIN') {
     return reply.code(403).send({ error: 'Administrator access is required.' });
   }
+}
+
+/**
+ * Gates a route on one or more privileges. Pass several to mean "any of
+ * these"; use it twice to mean "all of these".
+ *
+ * Runs after requireAdmin, so by this point the caller is known to be an
+ * administrator - this only decides which parts of the admin area they reach.
+ */
+export function requirePermission(required: Permission | Permission[]) {
+  const needed = Array.isArray(required) ? required : [required];
+
+  return async function check(request: FastifyRequest, reply: FastifyReply) {
+    const granted = request.user?.permissions ?? [];
+    if (hasAnyPermission(granted, needed)) return;
+
+    return reply.code(403).send({
+      error: 'You do not have permission to do that. Ask an administrator to grant it to you.',
+      code: 'PERMISSION_DENIED',
+      required: needed,
+    });
+  };
 }
 
 /**

@@ -170,6 +170,7 @@ export default async function authRoutes(app: FastifyInstance) {
         firstName: user.firstName,
         lastName: user.lastName,
         role: user.role,
+        permissions: user.permissions,
         mustChangePassword: user.mustChangePassword,
       },
     };
@@ -185,7 +186,7 @@ export default async function authRoutes(app: FastifyInstance) {
       where: { id: request.user!.sub },
       select: {
         id: true, publicId: true, username: true, firstName: true, lastName: true, grade: true, division: true,
-        rollNo: true, dateOfBirth: true, role: true, mustChangePassword: true, lastLoginAt: true, createdAt: true,
+        rollNo: true, dateOfBirth: true, role: true, permissions: true, mustChangePassword: true, lastLoginAt: true, createdAt: true,
       },
     });
     return { user };

@@ -122,6 +122,16 @@ model User {
   role     Role    @default(STUDENT)
   isActive Boolean @default(true)
 
+  /// Which parts of the admin area this user may use, e.g.
+  /// ["users.manage", "tests.manage"]. Always empty for a student.
+  ///
+  /// Stored as codes rather than a join table because the list is short, read
+  /// on every request, and needs to survive a restore without foreign keys to
+  /// reconcile. lib/permissions.ts is the source of truth for valid codes and
+  /// drops anything it does not recognise, so a retired code cannot linger and
+  /// grant access.
+  permissions String[] @default([])
+
   lastLoginAt   DateTime?
   failedLogins  Int       @default(0)
   lockedUntil   DateTime?

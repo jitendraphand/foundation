@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../../db.js';
-import { audit } from '../../middleware/auth.js';
+import { audit, requirePermission } from '../../middleware/auth.js';
 import { normalizeContent, normalizeBlocks, blocksToText } from '../../lib/content.js';
 import { validateAnswerKey } from '../../lib/grading.js';
 import { runGeneration, buildUserPrompt } from '../../llm/generate.js';
@@ -97,7 +97,10 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
   });
 
   /** Generate draft questions from the LLM. */
-  app.post('/api/admin/generation/run', { config: { rateLimit: { max: 30, timeWindow: '10 minutes' } } }, async (request, reply) => {
+  app.post('/api/admin/generation/run', {
+    preHandler: requirePermission('questions.generate'),
+    config: { rateLimit: { max: 30, timeWindow: '10 minutes' } },
+  }, async (request, reply) => {
     const body = generateSchema.parse(request.body);
 
     let systemPrompt = body.systemPrompt;
@@ -249,7 +252,7 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
   });
 
   /** Approve or reject drafts in bulk - the main review action. */
-  app.post('/api/admin/questions/bulk-status', async (request) => {
+  app.post('/api/admin/questions/bulk-status', { preHandler: requirePermission('questions.review') }, async (request) => {
     const body = z
       .object({
         ids: z.array(z.string().uuid()).min(1).max(200),
@@ -303,7 +306,7 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
    * Attaches a generated image to a question that was flagged as needing one.
    * The asset must already be uploaded via POST /api/admin/assets.
    */
-  app.post('/api/admin/questions/:id/image', async (request, reply) => {
+  app.post('/api/admin/questions/:id/image', { preHandler: requirePermission('questions.review') }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = z
       .object({
@@ -375,7 +378,7 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
   });
 
   /** Full edit of a draft question, including its diagram blocks. */
-  app.patch('/api/admin/questions/:id', async (request, reply) => {
+  app.patch('/api/admin/questions/:id', { preHandler: requirePermission('questions.review') }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = z
       .object({
@@ -452,7 +455,7 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
     return { ok: true, question: updated };
   });
 
-  app.delete('/api/admin/questions/:id', async (request, reply) => {
+  app.delete('/api/admin/questions/:id', { preHandler: requirePermission('questions.review') }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
 
     const used = await prisma.testQuestion.count({ where: { questionId: id } });

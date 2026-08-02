@@ -194,6 +194,15 @@ docker compose up -d
 
 Database migrations run automatically on startup. Existing data is preserved.
 
+### Adding colleagues
+
+**Admin → Administrators → New administrator.** Tick the privileges they need,
+or start from a preset and adjust. Give them the temporary password in person;
+they must change it at first sign-in.
+
+Grant **Manage administrators** sparingly — a holder can change anybody's
+privileges, including yours. The system will not let you remove the last one.
+
 ### Releasing results after a test
 
 Students never see a score at submit time. Once the class has finished, open

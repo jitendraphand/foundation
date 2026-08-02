@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { api, ApiError } from '../../lib/api';
 import { Alert, Badge, Card, EmptyState, Field, Modal, PageLoader, formatDate, humanizeTag } from '../../components/ui';
 import { AccuracyMeter } from '../../components/charts';
+import { useAuth } from '../../lib/auth';
 import type { WeakArea } from '../../lib/types';
 
 interface StudentRow {
@@ -78,6 +79,7 @@ function ManageStudents() {
   const [editing, setEditing] = useState<UserRow | null>(null);
   const [resetting, setResetting] = useState<UserRow | null>(null);
   const [deleting, setDeleting] = useState<UserRow | null>(null);
+  const [creating, setCreating] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -127,6 +129,9 @@ function ManageStudents() {
           <option value="active">Active only</option>
           <option value="inactive">Deactivated only</option>
         </select>
+        <button type="button" className="btn-primary btn-sm ml-auto" onClick={() => setCreating(true)}>
+          New student
+        </button>
       </div>
 
       {loading ? (
@@ -189,10 +194,104 @@ function ManageStudents() {
         </Card>
       )}
 
+      {creating && (
+        <CreateStudentModal
+          onClose={() => setCreating(false)}
+          onCreated={async (msg) => { setCreating(false); setNotice(msg); await load(); }}
+        />
+      )}
+
       {editing && <EditUserModal user={editing} onClose={() => setEditing(null)} onSaved={async (msg) => { setEditing(null); if (msg) setNotice(msg); await load(); }} />}
       {resetting && <ResetPasswordModal user={resetting} onClose={() => setResetting(null)} onDone={(msg) => { setResetting(null); setNotice(msg); }} />}
       {deleting && <DeleteUserModal user={deleting} onClose={() => setDeleting(null)} onDone={async (msg) => { setDeleting(null); setNotice(msg); await load(); }} />}
     </div>
+  );
+}
+
+/** Enrols a student by hand, for anyone who cannot sign themselves up. */
+function CreateStudentModal({ onClose, onCreated }: { onClose: () => void; onCreated: (message: string) => void }) {
+  const [form, setForm] = useState({ firstName: '', lastName: '', grade: '', division: '', rollNo: '', dateOfBirth: '', password: '' });
+  const [classes, setClasses] = useState<{ grades: { code: string; label: string }[]; divisions: { code: string; label: string }[] }>({ grades: [], divisions: [] });
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api.get<typeof classes>('/api/auth/classes').then(setClasses).catch(() => undefined);
+  }, []);
+
+  const suggest = () => {
+    const words = ['blue', 'star', 'moon', 'lion', 'tree', 'wave', 'gold', 'rain'];
+    const pick = () => words[Math.floor(Math.random() * words.length)];
+    setForm((f) => ({ ...f, password: `${pick()}${pick()}${Math.floor(100 + Math.random() * 900)}` }));
+  };
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api.post<{ message: string }>('/api/admin/users', {
+        ...form,
+        firstName: form.firstName.trim(),
+        lastName: form.lastName.trim(),
+        role: 'STUDENT',
+        permissions: [],
+        mustChangePassword: true,
+      });
+      onCreated(`${res.message} Password: ${form.password}`);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not create that student.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const set = (k: keyof typeof form) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
+    setForm((f) => ({ ...f, [k]: e.target.value }));
+
+  return (
+    <Modal open onClose={onClose} title="New student">
+      <form onSubmit={submit} className="space-y-4">
+        {error && <Alert tone="error">{error}</Alert>}
+
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="First name" required><input className="input" value={form.firstName} onChange={set('firstName')} required autoFocus /></Field>
+          <Field label="Last name" required><input className="input" value={form.lastName} onChange={set('lastName')} required /></Field>
+        </div>
+
+        <div className="grid grid-cols-3 gap-3">
+          <Field label="Grade" required>
+            <select className="input" value={form.grade} onChange={set('grade')} required>
+              <option value="">—</option>
+              {classes.grades.map((g) => <option key={g.code} value={g.code}>{g.label}</option>)}
+            </select>
+          </Field>
+          <Field label="Division" required>
+            <select className="input" value={form.division} onChange={set('division')} required>
+              <option value="">—</option>
+              {classes.divisions.map((d) => <option key={d.code} value={d.code}>{d.label}</option>)}
+            </select>
+          </Field>
+          <Field label="Roll no." required><input className="input" value={form.rollNo} onChange={set('rollNo')} required /></Field>
+        </div>
+
+        <Field label="Date of birth" required>
+          <input type="date" className="input" value={form.dateOfBirth} onChange={set('dateOfBirth')} required max={new Date().toISOString().slice(0, 10)} />
+        </Field>
+
+        <Field label="Temporary password" required hint="Give this to the student in person; they must change it at first sign-in.">
+          <div className="flex gap-2">
+            <input className="input font-mono" value={form.password} onChange={set('password')} required minLength={8} />
+            <button type="button" className="btn-secondary btn-sm shrink-0" onClick={suggest}>Suggest</button>
+          </div>
+        </Field>
+
+        <div className="flex justify-end gap-2">
+          <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
+          <button type="submit" className="btn-primary" disabled={busy}>{busy ? 'Creating…' : 'Create student'}</button>
+        </div>
+      </form>
+    </Modal>
   );
 }
 

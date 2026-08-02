@@ -4,11 +4,12 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../../db.js';
 import { checkPassword, hashPassword } from '../../lib/password.js';
 import { allocateUsername } from '../../lib/username.js';
-import { audit } from '../../middleware/auth.js';
+import { audit, requirePermission } from '../../middleware/auth.js';
+import { ALL_PERMISSIONS, PERMISSIONS, PRESETS, sanitizePermissions, type Permission } from '../../lib/permissions.js';
 
 export default async function adminUserRoutes(app: FastifyInstance) {
   /** Paginated, searchable user list. */
-  app.get('/api/admin/users', async (request) => {
+  app.get('/api/admin/users', { preHandler: requirePermission('users.manage') }, async (request) => {
     const q = z
       .object({
         search: z.string().optional(),
@@ -66,7 +67,7 @@ export default async function adminUserRoutes(app: FastifyInstance) {
   });
 
   /** One student, with their full performance profile. */
-  app.get('/api/admin/users/:id', async (request, reply) => {
+  app.get('/api/admin/users/:id', { preHandler: requirePermission('users.manage') }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
 
     const user = await prisma.user.findFirst({
@@ -116,7 +117,7 @@ export default async function adminUserRoutes(app: FastifyInstance) {
     regenerateUsername: z.boolean().optional(),
   });
 
-  app.patch('/api/admin/users/:id', async (request, reply) => {
+  app.patch('/api/admin/users/:id', { preHandler: requirePermission('users.manage') }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = editSchema.parse(request.body);
 
@@ -216,7 +217,7 @@ export default async function adminUserRoutes(app: FastifyInstance) {
   });
 
   /** Checks a username before the admin commits to it. */
-  app.get('/api/admin/users/username-available', async (request) => {
+  app.get('/api/admin/users/username-available', { preHandler: requirePermission('users.manage') }, async (request) => {
     const q = z
       .object({ username: z.string().trim().toLowerCase().min(1).max(40), excludeUserId: z.string().uuid().optional() })
       .parse(request.query);
@@ -232,7 +233,7 @@ export default async function adminUserRoutes(app: FastifyInstance) {
     return { available: true };
   });
 
-  app.post('/api/admin/users/:id/activate', async (request, reply) => {
+  app.post('/api/admin/users/:id/activate', { preHandler: requirePermission('users.manage') }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const { isActive } = z.object({ isActive: z.boolean() }).parse(request.body);
 
@@ -243,6 +244,17 @@ export default async function adminUserRoutes(app: FastifyInstance) {
     const user = await prisma.user.findFirst({ where: { id, deletedAt: null } });
     if (!user) return reply.code(404).send({ error: 'Student not found.' });
 
+    if (!isActive && user.permissions.includes('admins.manage')) {
+      const holders = await prisma.user.count({
+        where: { role: 'ADMIN', deletedAt: null, isActive: true, permissions: { has: 'admins.manage' } },
+      });
+      if (holders <= 1) {
+        return reply.code(400).send({
+          error: 'This is the only active account that can manage administrators, so it cannot be deactivated.',
+        });
+      }
+    }
+
     await prisma.user.update({ where: { id }, data: { isActive } });
     await audit(request.user!.sub, isActive ? 'user.activate' : 'user.deactivate', {
       entity: 'User', entityId: id, ip: request.ip,
@@ -251,7 +263,7 @@ export default async function adminUserRoutes(app: FastifyInstance) {
     return { ok: true, isActive };
   });
 
-  app.post('/api/admin/users/:id/reset-password', async (request, reply) => {
+  app.post('/api/admin/users/:id/reset-password', { preHandler: requirePermission('users.manage') }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = z.object({ newPassword: z.string().min(1).max(200) }).parse(request.body);
 
@@ -286,7 +298,7 @@ export default async function adminUserRoutes(app: FastifyInstance) {
    * Delete. Soft by default so historical results survive; hard delete is
    * available but removes every attempt and answer with it.
    */
-  app.delete('/api/admin/users/:id', async (request, reply) => {
+  app.delete('/api/admin/users/:id', { preHandler: requirePermission('users.manage') }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const { hard } = z.object({ hard: z.coerce.boolean().default(false) }).parse(request.query);
 
@@ -294,9 +306,17 @@ export default async function adminUserRoutes(app: FastifyInstance) {
 
     const user = await prisma.user.findFirst({ where: { id, deletedAt: null } });
     if (!user) return reply.code(404).send({ error: 'Student not found.' });
-    if (user.role === 'ADMIN') {
-      const admins = await prisma.user.count({ where: { role: 'ADMIN', deletedAt: null } });
-      if (admins <= 1) return reply.code(400).send({ error: 'Cannot delete the only administrator account.' });
+
+    // Never leave the system with nobody able to grant privileges again.
+    if (user.permissions.includes('admins.manage')) {
+      const holders = await prisma.user.count({
+        where: { role: 'ADMIN', deletedAt: null, isActive: true, permissions: { has: 'admins.manage' } },
+      });
+      if (holders <= 1) {
+        return reply.code(400).send({
+          error: 'This is the only account that can manage administrators. Grant that privilege to someone else first.',
+        });
+      }
     }
 
     if (hard) {
@@ -324,20 +344,80 @@ export default async function adminUserRoutes(app: FastifyInstance) {
     return { ok: true, mode: 'soft', message: `${user.username} has been removed. Their past results are retained for reporting.` };
   });
 
-  /** Admin-created account, e.g. a second administrator. */
+  // --- Administrators ------------------------------------------------------
+
+  /** The privilege catalogue and presets, for the checkbox UI. */
+  app.get('/api/admin/permissions', async () => ({
+    permissions: PERMISSIONS,
+    presets: PRESETS,
+  }));
+
+  /** Everyone who can reach the admin area, and what each of them may do. */
+  app.get('/api/admin/administrators', { preHandler: requirePermission('admins.manage') }, async () => {
+    const admins = await prisma.user.findMany({
+      where: { role: 'ADMIN', deletedAt: null },
+      orderBy: { createdAt: 'asc' },
+      select: {
+        id: true, publicId: true, username: true, firstName: true, lastName: true,
+        isActive: true, permissions: true, lastLoginAt: true, createdAt: true,
+        mustChangePassword: true,
+      },
+    });
+    return { administrators: admins };
+  });
+
+  /**
+   * Creates a student, or an administrator with exactly the privileges ticked.
+   *
+   * Creating an administrator additionally requires `admins.manage`, so
+   * somebody with only `users.manage` can enrol students but cannot promote
+   * themselves or anyone else.
+   */
   app.post('/api/admin/users', async (request, reply) => {
     const body = z
       .object({
         firstName: z.string().trim().min(1).max(60),
         lastName: z.string().trim().min(1).max(60),
-        grade: z.string().trim().min(1).max(20),
-        division: z.string().trim().min(1).max(20),
-        rollNo: z.string().trim().min(1).max(20),
+        grade: z.string().trim().min(1).max(20).optional(),
+        division: z.string().trim().min(1).max(20).optional(),
+        rollNo: z.string().trim().min(1).max(20).optional(),
         dateOfBirth: z.string(),
         password: z.string().min(1).max(200),
         role: z.enum(['STUDENT', 'ADMIN']).default('STUDENT'),
+        permissions: z.array(z.string()).max(50).default([]),
+        /** Force a password change at first sign-in. */
+        mustChangePassword: z.boolean().default(true),
+        /** Set the username explicitly instead of deriving it from the name. */
+        username: z
+          .string().trim().toLowerCase().min(3).max(40)
+          .regex(/^[a-z][a-z0-9]*$/, 'A username must start with a letter and contain only lowercase letters and numbers.')
+          .optional(),
       })
       .parse(request.body);
+
+    const isAdmin = body.role === 'ADMIN';
+    const permissions: Permission[] = isAdmin ? sanitizePermissions(body.permissions) : [];
+
+    if (!isAdmin && !request.user!.permissions.includes('users.manage')) {
+      return reply.code(403).send({
+        error: 'Adding a student requires the "Manage students" privilege.',
+        code: 'PERMISSION_DENIED',
+      });
+    }
+
+    if (isAdmin) {
+      if (!request.user!.permissions.includes('admins.manage')) {
+        return reply.code(403).send({
+          error: 'Creating an administrator requires the "Manage administrators" privilege.',
+          code: 'PERMISSION_DENIED',
+        });
+      }
+      if (permissions.length === 0) {
+        return reply.code(400).send({
+          error: 'Choose at least one privilege, otherwise this administrator would be able to sign in but do nothing.',
+        });
+      }
+    }
 
     const policy = checkPassword(body.password, { firstName: body.firstName, lastName: body.lastName });
     if (!policy.ok) return reply.code(400).send({ error: policy.errors.join(' ') });
@@ -345,28 +425,122 @@ export default async function adminUserRoutes(app: FastifyInstance) {
     const dob = new Date(body.dateOfBirth);
     if (Number.isNaN(dob.getTime())) return reply.code(400).send({ error: 'Invalid date of birth.' });
 
+    // An administrator has no class; students must have one, and it must exist.
+    const grade = isAdmin ? 'STAFF' : body.grade;
+    const division = isAdmin ? 'STAFF' : body.division;
+    const rollNo = isAdmin ? `ADM-${Date.now().toString(36)}` : body.rollNo;
+
+    if (!isAdmin) {
+      if (!grade || !division || !rollNo) {
+        return reply.code(400).send({ error: 'A student needs a grade, a division and a roll number.' });
+      }
+      const [g, d] = await Promise.all([
+        prisma.schoolClass.findUnique({ where: { kind_code: { kind: 'GRADE', code: grade } } }),
+        prisma.schoolClass.findUnique({ where: { kind_code: { kind: 'DIVISION', code: division } } }),
+      ]);
+      if (!g) return reply.code(400).send({ error: 'That grade does not exist.' });
+      if (!d) return reply.code(400).send({ error: 'That division does not exist.' });
+    }
+
     const passwordHash = await hashPassword(body.password);
 
     try {
       const user = await prisma.$transaction(async (tx) => {
-        const username = await allocateUsername(tx, body.firstName, body.lastName);
+        const username = body.username ?? (await allocateUsername(tx, body.firstName, body.lastName));
         return tx.user.create({
           data: {
-            username, firstName: body.firstName, lastName: body.lastName,
-            grade: body.grade, division: body.division, rollNo: body.rollNo,
-            dateOfBirth: dob, passwordHash, role: body.role, mustChangePassword: true,
+            username,
+            firstName: body.firstName,
+            lastName: body.lastName,
+            grade: grade!,
+            division: division!,
+            rollNo: rollNo!,
+            dateOfBirth: dob,
+            passwordHash,
+            role: body.role,
+            permissions,
+            mustChangePassword: body.mustChangePassword,
           },
-          select: { id: true, publicId: true, username: true, role: true },
+          select: { id: true, publicId: true, username: true, role: true, permissions: true },
         });
       });
 
-      await audit(request.user!.sub, 'user.create', { entity: 'User', entityId: user.id, ip: request.ip });
-      return reply.code(201).send({ ok: true, user });
+      await audit(request.user!.sub, isAdmin ? 'admin.create' : 'user.create', {
+        entity: 'User', entityId: user.id, ip: request.ip,
+        detail: { role: body.role, permissions },
+      });
+
+      return reply.code(201).send({
+        ok: true,
+        user,
+        message: isAdmin
+          ? `Administrator ${user.username} created (${user.publicId}). Give them the password in person - they will be asked to change it at first sign-in.`
+          : `Student ${user.username} created (${user.publicId}).`,
+      });
     } catch (err) {
       if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        const target = (err.meta?.target as string[] | string | undefined) ?? '';
+        const fields = Array.isArray(target) ? target.join(',') : String(target);
+        if (fields.includes('username')) {
+          return reply.code(409).send({ error: `The username "${body.username}" is already taken.` });
+        }
         return reply.code(409).send({ error: 'That roll number already exists in that grade and division.' });
       }
       throw err;
     }
+  });
+
+  /** Changes what an administrator may do, or promotes/demotes them. */
+  app.patch('/api/admin/users/:id/permissions', { preHandler: requirePermission('admins.manage') }, async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const body = z
+      .object({
+        role: z.enum(['STUDENT', 'ADMIN']).optional(),
+        permissions: z.array(z.string()).max(50),
+      })
+      .parse(request.body);
+
+    const target = await prisma.user.findFirst({ where: { id, deletedAt: null } });
+    if (!target) return reply.code(404).send({ error: 'User not found.' });
+
+    const role = body.role ?? target.role;
+    const permissions: Permission[] = role === 'ADMIN' ? sanitizePermissions(body.permissions) : [];
+
+    if (role === 'ADMIN' && permissions.length === 0) {
+      return reply.code(400).send({ error: 'An administrator needs at least one privilege.' });
+    }
+
+    // Nobody may remove their own ability to manage administrators - that is
+    // how a system ends up with no one able to grant privileges again.
+    if (id === request.user!.sub && !permissions.includes('admins.manage')) {
+      return reply.code(400).send({
+        error: 'You cannot remove your own "Manage administrators" privilege. Ask another administrator to do it.',
+      });
+    }
+
+    // Nor may the last holder be demoted away.
+    if (target.permissions.includes('admins.manage') && !permissions.includes('admins.manage')) {
+      const holders = await prisma.user.count({
+        where: { role: 'ADMIN', deletedAt: null, isActive: true, permissions: { has: 'admins.manage' } },
+      });
+      if (holders <= 1) {
+        return reply.code(400).send({
+          error: 'This is the only account that can manage administrators. Grant that privilege to someone else first.',
+        });
+      }
+    }
+
+    const updated = await prisma.user.update({
+      where: { id },
+      data: { role, permissions },
+      select: { id: true, publicId: true, username: true, role: true, permissions: true },
+    });
+
+    await audit(request.user!.sub, 'admin.permissions_changed', {
+      entity: 'User', entityId: id, ip: request.ip,
+      detail: { before: { role: target.role, permissions: target.permissions }, after: { role, permissions } },
+    });
+
+    return { ok: true, user: updated, message: `Privileges updated for ${updated.username}.` };
   });
 }

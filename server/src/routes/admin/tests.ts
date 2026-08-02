@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../../db.js';
-import { audit } from '../../middleware/auth.js';
+import { audit, requirePermission } from '../../middleware/auth.js';
 
 const testSchema = z.object({
   title: z.string().trim().min(1).max(200),
@@ -75,7 +75,7 @@ export default async function adminTestRoutes(app: FastifyInstance) {
     return { test };
   });
 
-  app.post('/api/admin/tests', async (request, reply) => {
+  app.post('/api/admin/tests', { preHandler: requirePermission('tests.manage') }, async (request, reply) => {
     const body = testSchema.parse(request.body);
 
     if (body.kind === 'PRACTICE' && !body.targetUserId) {
@@ -98,7 +98,7 @@ export default async function adminTestRoutes(app: FastifyInstance) {
     return reply.code(201).send({ ok: true, test });
   });
 
-  app.patch('/api/admin/tests/:id', async (request, reply) => {
+  app.patch('/api/admin/tests/:id', { preHandler: requirePermission('tests.manage') }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = testSchema.partial().parse(request.body);
 
@@ -131,7 +131,7 @@ export default async function adminTestRoutes(app: FastifyInstance) {
   });
 
   /** Sets the final question list — the "these drafts become the test" step. */
-  app.put('/api/admin/tests/:id/questions', async (request, reply) => {
+  app.put('/api/admin/tests/:id/questions', { preHandler: requirePermission('tests.manage') }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = z
       .object({
@@ -181,7 +181,7 @@ export default async function adminTestRoutes(app: FastifyInstance) {
     return { ok: true, count: body.questionIds.length };
   });
 
-  app.post('/api/admin/tests/:id/publish', async (request, reply) => {
+  app.post('/api/admin/tests/:id/publish', { preHandler: requirePermission('tests.manage') }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const { status } = z.object({ status: z.enum(['DRAFT', 'PUBLISHED', 'CLOSED']) }).parse(request.body);
 
@@ -221,7 +221,7 @@ export default async function adminTestRoutes(app: FastifyInstance) {
    * does. Practice tests are excluded - they are for the student to learn
    * from, so their results are always immediate.
    */
-  app.post('/api/admin/tests/:id/release', async (request, reply) => {
+  app.post('/api/admin/tests/:id/release', { preHandler: requirePermission('results.release') }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const { released } = z.object({ released: z.boolean() }).parse(request.body);
 
@@ -268,7 +268,7 @@ export default async function adminTestRoutes(app: FastifyInstance) {
     };
   });
 
-  app.delete('/api/admin/tests/:id', async (request, reply) => {
+  app.delete('/api/admin/tests/:id', { preHandler: requirePermission('tests.manage') }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
 
     const test = await prisma.test.findFirst({ where: { id, deletedAt: null }, include: { _count: { select: { attempts: true } } } });

@@ -2,6 +2,7 @@ import { prisma } from './db.js';
 import { env } from './env.js';
 import { hashPassword } from './lib/password.js';
 import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_TEMPLATE, PRACTICE_SYSTEM_SUFFIX } from './llm/prompts.js';
+import { ALL_PERMISSIONS } from './lib/permissions.js';
 
 /**
  * Idempotent seed. Runs on every container start, so a new deployment and an
@@ -114,7 +115,24 @@ async function seedPrompts() {
 async function seedAdmin() {
   const existing = await prisma.user.findFirst({ where: { role: 'ADMIN', deletedAt: null } });
   if (existing) {
-    console.log(`[seed] administrator already exists (${existing.username})`);
+    const missing = ALL_PERMISSIONS.filter((p) => !existing.permissions.includes(p));
+
+    if (existing.permissions.length === 0) {
+      // Upgrading from a version that had no per-privilege model, where being
+      // an ADMIN simply meant full access. Preserve exactly that, otherwise
+      // the upgrade would silently lock the only administrator out of
+      // everything - including the screen used to grant privileges back.
+      await prisma.user.update({ where: { id: existing.id }, data: { permissions: ALL_PERMISSIONS } });
+      console.log(`[seed] ${existing.username} predates per-privilege access; granted all ${ALL_PERMISSIONS.length} privileges`);
+    } else if (existing.permissions.includes('admins.manage') && missing.length > 0) {
+      // A later upgrade added privileges that did not exist before. Top up
+      // whoever holds the keys so no area is left unreachable; everyone else
+      // keeps exactly what they were given.
+      await prisma.user.update({ where: { id: existing.id }, data: { permissions: ALL_PERMISSIONS } });
+      console.log(`[seed] granted ${missing.length} new privilege(s) to ${existing.username}: ${missing.join(', ')}`);
+    } else {
+      console.log(`[seed] administrator already exists (${existing.username})`);
+    }
     return;
   }
 
@@ -129,6 +147,9 @@ async function seedAdmin() {
       dateOfBirth: new Date('2000-01-01'),
       passwordHash: await hashPassword(env.ADMIN_PASSWORD),
       role: 'ADMIN',
+      // The founding account holds every privilege, including the ability to
+      // create further administrators with narrower ones.
+      permissions: ALL_PERMISSIONS,
       isActive: true,
       // Not forced, because the specified default credentials must work as-is.
       mustChangePassword: false,
