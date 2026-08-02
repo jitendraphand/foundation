@@ -1,0 +1,487 @@
+import { useEffect, useMemo, useState } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { api, ApiError } from '../../lib/api';
+import { Alert, Card, Field, Modal, PageLoader, Spinner, humanizeTag } from '../../components/ui';
+import type { Tag } from '../../lib/types';
+
+/**
+ * "Set test" - the generation screen.
+ *
+ * The admin controls the provider, the model, the full system prompt, the
+ * difficulty/cognitive mix and the exact user prompt. Nothing is hidden: the
+ * prompt preview shows byte-for-byte what will be sent.
+ */
+
+interface Credential {
+  id: string;
+  provider: string;
+  label: string;
+  baseUrl: string;
+  keyHint: string;
+  defaultModel: string | null;
+}
+
+interface Template {
+  id: string;
+  name: string;
+  description: string | null;
+  kind: 'REGULAR' | 'PRACTICE';
+  isDefault: boolean;
+  systemPrompt: string;
+  userTemplate: string;
+}
+
+interface Provider {
+  id: string;
+  label: string;
+  defaultBaseUrl: string;
+  suggestedModels: string[];
+  supportsJsonMode: boolean;
+}
+
+interface Context {
+  tags: { difficulty: Tag[]; cognitive: Tag[]; skill: Tag[] };
+  credentials: Credential[];
+  templates: Template[];
+  providers: Provider[];
+  defaults: { systemPrompt: string; userTemplate: string };
+  formats: string[];
+}
+
+interface Outcome {
+  runId: string;
+  accepted: number;
+  parsed: number;
+  rejected: Array<{ index: number; reason: string }>;
+  warnings: string[];
+}
+
+export default function AdminGenerate() {
+  const navigate = useNavigate();
+  const [params] = useSearchParams();
+
+  const practiceFor = params.get('practiceFor');
+  const seedSubject = params.get('subject') ?? '';
+  const seedTopics = params.get('topics') ?? '';
+
+  const [ctx, setCtx] = useState<Context | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [outcome, setOutcome] = useState<Outcome | null>(null);
+  const [preview, setPreview] = useState<{ systemPrompt: string; userPrompt: string } | null>(null);
+
+  const [form, setForm] = useState({
+    credentialId: '',
+    model: '',
+    templateId: '',
+    subject: seedSubject,
+    topic: seedTopics,
+    subtopic: '',
+    grade: '',
+    count: 10,
+    marksPerQuestion: 1,
+    temperature: 0.4,
+    formats: ['MCQ_SINGLE'] as string[],
+    extraInstructions: '',
+  });
+
+  const [difficultyMix, setDifficultyMix] = useState<Record<string, number>>({ easy: 4, moderate: 4, difficult: 2 });
+  const [cognitiveMix, setCognitiveMix] = useState<Record<string, number>>({});
+  const [skillFocus, setSkillFocus] = useState<string[]>([]);
+  const [systemPrompt, setSystemPrompt] = useState('');
+  const [editingPrompt, setEditingPrompt] = useState(false);
+
+  useEffect(() => {
+    api
+      .get<Context>('/api/admin/generation/context')
+      .then((data) => {
+        setCtx(data);
+        const kind = practiceFor ? 'PRACTICE' : 'REGULAR';
+        const template = data.templates.find((t) => t.isDefault && t.kind === kind) ?? data.templates[0];
+        const credential = data.credentials[0];
+        setForm((f) => ({
+          ...f,
+          credentialId: credential?.id ?? '',
+          model: credential?.defaultModel ?? '',
+          templateId: template?.id ?? '',
+        }));
+        setSystemPrompt(template?.systemPrompt ?? data.defaults.systemPrompt);
+      })
+      .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load the generation settings.'));
+  }, [practiceFor]);
+
+  const credential = ctx?.credentials.find((c) => c.id === form.credentialId);
+  const provider = ctx?.providers.find((p) => p.id === credential?.provider);
+
+  const mixTotal = useMemo(() => Object.values(difficultyMix).reduce((s, n) => s + n, 0), [difficultyMix]);
+
+  const spec = () => ({
+    subject: form.subject.trim(),
+    topic: form.topic.trim() || undefined,
+    subtopic: form.subtopic.trim() || undefined,
+    grade: form.grade || undefined,
+    count: form.count,
+    marksPerQuestion: form.marksPerQuestion,
+    difficultyMix,
+    cognitiveMix: Object.keys(cognitiveMix).length ? cognitiveMix : undefined,
+    skillFocus: skillFocus.length ? skillFocus : undefined,
+    formats: form.formats,
+    extraInstructions: form.extraInstructions.trim() || undefined,
+  });
+
+  const showPreview = async () => {
+    try {
+      const res = await api.post<{ systemPrompt: string; userPrompt: string }>('/api/admin/generation/preview-prompt', {
+        spec: spec(),
+        systemPrompt,
+        promptTemplateId: form.templateId || undefined,
+      });
+      setPreview(res);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not build the prompt preview.');
+    }
+  };
+
+  const generate = async () => {
+    setBusy(true);
+    setError(null);
+    setOutcome(null);
+    try {
+      const res = await api.post<Outcome>('/api/admin/generation/run', {
+        credentialId: form.credentialId,
+        model: form.model,
+        promptTemplateId: form.templateId || undefined,
+        systemPrompt,
+        temperature: form.temperature,
+        kind: practiceFor ? 'PRACTICE' : 'REGULAR',
+        targetUserId: practiceFor ?? undefined,
+        spec: spec(),
+      });
+      setOutcome(res);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Generation failed.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (error && !ctx) return <Alert tone="error">{error}</Alert>;
+  if (!ctx) return <PageLoader label="Loading" />;
+
+  if (ctx.credentials.length === 0) {
+    return (
+      <Card title="Set test">
+        <Alert tone="warn">
+          No LLM provider is configured yet. Add an API key in <strong>Settings</strong> before generating questions.
+        </Alert>
+        <button type="button" className="btn-primary btn-sm mt-3" onClick={() => navigate('/admin/settings')}>
+          Go to settings
+        </button>
+      </Card>
+    );
+  }
+
+  return (
+    <div className="space-y-5 max-w-4xl">
+      <div>
+        <h1 className="text-lg font-semibold">{practiceFor ? 'Generate a practice test' : 'Set a test'}</h1>
+        <p className="text-xs text-ink-muted mt-1">
+          {practiceFor
+            ? 'Questions target this student’s weak areas. Practice results stay separate from class test results.'
+            : 'Generate draft questions, review them, then choose which ones make the final paper.'}
+        </p>
+      </div>
+
+      {error && <Alert tone="error" onDismiss={() => setError(null)}>{error}</Alert>}
+
+      {outcome && (
+        <Card title="Generation complete">
+          <div className="space-y-3">
+            <Alert tone={outcome.rejected.length ? 'warn' : 'success'}>
+              {outcome.accepted} of {outcome.parsed} questions were accepted and saved as drafts.
+            </Alert>
+
+            {outcome.rejected.length > 0 && (
+              <details className="text-xs">
+                <summary className="cursor-pointer text-ink-muted">{outcome.rejected.length} rejected — why?</summary>
+                <ul className="mt-2 space-y-1 text-ink-muted">
+                  {outcome.rejected.map((r) => (
+                    <li key={r.index}>Question {r.index + 1}: {r.reason}</li>
+                  ))}
+                </ul>
+              </details>
+            )}
+
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className="btn-primary btn-sm"
+                onClick={() => navigate(`/admin/questions?generationRunId=${outcome.runId}&status=DRAFT`)}
+              >
+                Review the {outcome.accepted} draft{outcome.accepted === 1 ? '' : 's'}
+              </button>
+              <button type="button" className="btn-secondary btn-sm" onClick={() => setOutcome(null)}>
+                Generate more
+              </button>
+            </div>
+          </div>
+        </Card>
+      )}
+
+      <Card title="Provider">
+        <div className="grid sm:grid-cols-2 gap-4">
+          <Field label="API credential">
+            <select
+              className="input"
+              value={form.credentialId}
+              onChange={(e) => {
+                const next = ctx.credentials.find((c) => c.id === e.target.value);
+                setForm((f) => ({ ...f, credentialId: e.target.value, model: next?.defaultModel ?? '' }));
+              }}
+            >
+              {ctx.credentials.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.label} ({c.provider} · {c.keyHint})
+                </option>
+              ))}
+            </select>
+          </Field>
+
+          <Field label="Model" hint={provider?.supportsJsonMode ? 'This provider supports strict JSON mode.' : 'Strict JSON is enforced by validation and retry.'}>
+            <input
+              className="input font-mono text-xs"
+              value={form.model}
+              onChange={(e) => setForm((f) => ({ ...f, model: e.target.value }))}
+              list="model-suggestions"
+              placeholder="provider/model-name"
+            />
+            <datalist id="model-suggestions">
+              {provider?.suggestedModels.map((m) => <option key={m} value={m} />)}
+            </datalist>
+          </Field>
+        </div>
+      </Card>
+
+      <Card title="Test content">
+        <div className="space-y-4">
+          <div className="grid sm:grid-cols-3 gap-4">
+            <Field label="Subject" required>
+              <input className="input" value={form.subject} onChange={(e) => setForm((f) => ({ ...f, subject: e.target.value }))} placeholder="Mathematics" />
+            </Field>
+            <Field label="Topic">
+              <input className="input" value={form.topic} onChange={(e) => setForm((f) => ({ ...f, topic: e.target.value }))} placeholder="Quadratic equations" />
+            </Field>
+            <Field label="Subtopic">
+              <input className="input" value={form.subtopic} onChange={(e) => setForm((f) => ({ ...f, subtopic: e.target.value }))} placeholder="Discriminant" />
+            </Field>
+          </div>
+
+          <div className="grid sm:grid-cols-4 gap-4">
+            <Field label="Grade">
+              <input className="input" value={form.grade} onChange={(e) => setForm((f) => ({ ...f, grade: e.target.value }))} placeholder="8" />
+            </Field>
+            <Field label="Number of questions" required>
+              <input
+                type="number" min={1} max={30} className="input"
+                value={form.count}
+                onChange={(e) => setForm((f) => ({ ...f, count: Number(e.target.value) }))}
+              />
+            </Field>
+            <Field label="Marks per question" required>
+              <input
+                type="number" min={0.25} step={0.25} className="input"
+                value={form.marksPerQuestion}
+                onChange={(e) => setForm((f) => ({ ...f, marksPerQuestion: Number(e.target.value) }))}
+              />
+            </Field>
+            <Field label="Temperature" hint="Lower is more predictable.">
+              <input
+                type="number" min={0} max={2} step={0.1} className="input"
+                value={form.temperature}
+                onChange={(e) => setForm((f) => ({ ...f, temperature: Number(e.target.value) }))}
+              />
+            </Field>
+          </div>
+
+          <Field label="Question formats">
+            <div className="flex flex-wrap gap-2">
+              {ctx.formats.map((format) => {
+                const on = form.formats.includes(format);
+                return (
+                  <button
+                    key={format}
+                    type="button"
+                    onClick={() =>
+                      setForm((f) => ({
+                        ...f,
+                        formats: on ? f.formats.filter((x) => x !== format) : [...f.formats, format],
+                      }))
+                    }
+                    className={`badge ${on ? 'border-series-1/40 bg-series-1/[0.08] text-series-1' : ''}`}
+                  >
+                    {format.replace('_', ' ').toLowerCase()}
+                  </button>
+                );
+              })}
+            </div>
+          </Field>
+        </div>
+      </Card>
+
+      <Card title="Difficulty and tags">
+        <div className="space-y-4">
+          <div>
+            <span className="label">
+              Difficulty mix
+              {mixTotal !== form.count && (
+                <span className="ml-2 text-warn">({mixTotal} allocated, {form.count} requested)</span>
+              )}
+            </span>
+            <div className="grid grid-cols-3 gap-3">
+              {ctx.tags.difficulty.map((tag) => (
+                <label key={tag.code} className="flex items-center gap-2">
+                  <span className="text-xs text-ink-muted w-20 shrink-0">{tag.label}</span>
+                  <input
+                    type="number" min={0} className="input py-1.5"
+                    value={difficultyMix[tag.code] ?? 0}
+                    onChange={(e) => setDifficultyMix((m) => ({ ...m, [tag.code]: Number(e.target.value) }))}
+                  />
+                </label>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <span className="label">Cognitive mix (optional — leave empty for a balanced spread)</span>
+            <div className="grid sm:grid-cols-5 gap-3">
+              {ctx.tags.cognitive.map((tag) => (
+                <label key={tag.code} className="flex items-center gap-2" title={tag.description ?? ''}>
+                  <span className="text-xs text-ink-muted flex-1 truncate">{tag.label}</span>
+                  <input
+                    type="number" min={0} className="input py-1.5 w-14"
+                    value={cognitiveMix[tag.code] ?? 0}
+                    onChange={(e) => {
+                      const n = Number(e.target.value);
+                      setCognitiveMix((m) => {
+                        const next = { ...m };
+                        if (n > 0) next[tag.code] = n;
+                        else delete next[tag.code];
+                        return next;
+                      });
+                    }}
+                  />
+                </label>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <span className="label">Skill focus (optional)</span>
+            <div className="flex flex-wrap gap-2">
+              {ctx.tags.skill.map((tag) => {
+                const on = skillFocus.includes(tag.code);
+                return (
+                  <button
+                    key={tag.code}
+                    type="button"
+                    title={tag.description ?? ''}
+                    onClick={() => setSkillFocus((s) => (on ? s.filter((x) => x !== tag.code) : [...s, tag.code]))}
+                    className={`badge ${on ? 'border-series-1/40 bg-series-1/[0.08] text-series-1' : ''}`}
+                  >
+                    {tag.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          <Field label="Extra instructions to the model (optional)">
+            <textarea
+              className="input font-mono text-xs"
+              rows={3}
+              value={form.extraInstructions}
+              onChange={(e) => setForm((f) => ({ ...f, extraInstructions: e.target.value }))}
+              placeholder="e.g. Use Indian currency and metric units. Include at least two questions with a diagram."
+            />
+          </Field>
+        </div>
+      </Card>
+
+      <Card
+        title="System prompt"
+        action={
+          <div className="flex gap-2">
+            <select
+              className="input w-auto text-xs py-1"
+              value={form.templateId}
+              onChange={(e) => {
+                const template = ctx.templates.find((t) => t.id === e.target.value);
+                setForm((f) => ({ ...f, templateId: e.target.value }));
+                if (template) setSystemPrompt(template.systemPrompt);
+              }}
+            >
+              {ctx.templates.map((t) => (
+                <option key={t.id} value={t.id}>{t.name}</option>
+              ))}
+            </select>
+            <button type="button" className="btn-secondary btn-sm" onClick={() => setEditingPrompt(true)}>
+              Edit
+            </button>
+          </div>
+        }
+      >
+        <p className="text-xs text-ink-muted mb-2">
+          This defines the strict reply format, the block types for maths and diagrams, and the tag vocabulary.
+          Editing it here affects only this run; save a template in Settings to keep changes.
+        </p>
+        <pre className="scroll-x max-h-40 overflow-y-auto rounded-lg bg-surface-sunken border border-line p-3 text-[11px] font-mono whitespace-pre-wrap text-ink-muted">
+          {systemPrompt.slice(0, 1200)}
+          {systemPrompt.length > 1200 && '\n…'}
+        </pre>
+      </Card>
+
+      <div className="flex flex-wrap gap-2">
+        <button type="button" className="btn-primary" disabled={busy || !form.subject.trim() || !form.model} onClick={generate}>
+          {busy ? <Spinner label="Generating — this can take a minute" /> : `Generate ${form.count} questions`}
+        </button>
+        <button type="button" className="btn-secondary" onClick={showPreview} disabled={busy}>
+          Preview the exact prompt
+        </button>
+      </div>
+
+      <Modal open={editingPrompt} onClose={() => setEditingPrompt(false)} title="Edit the system prompt" wide>
+        <textarea
+          className="input font-mono text-xs"
+          rows={24}
+          value={systemPrompt}
+          onChange={(e) => setSystemPrompt(e.target.value)}
+        />
+        <div className="flex justify-between gap-2 mt-3">
+          <button type="button" className="btn-ghost btn-sm" onClick={() => setSystemPrompt(ctx.defaults.systemPrompt)}>
+            Reset to default
+          </button>
+          <button type="button" className="btn-primary btn-sm" onClick={() => setEditingPrompt(false)}>
+            Done
+          </button>
+        </div>
+      </Modal>
+
+      <Modal open={!!preview} onClose={() => setPreview(null)} title="Exactly what will be sent" wide>
+        <div className="space-y-4">
+          <div>
+            <h3 className="text-xs font-medium text-ink-muted mb-1">System message</h3>
+            <pre className="scroll-x max-h-64 overflow-y-auto rounded-lg bg-surface-sunken border border-line p-3 text-[11px] font-mono whitespace-pre-wrap">
+              {preview?.systemPrompt}
+            </pre>
+          </div>
+          <div>
+            <h3 className="text-xs font-medium text-ink-muted mb-1">User message</h3>
+            <pre className="scroll-x rounded-lg bg-surface-sunken border border-line p-3 text-[11px] font-mono whitespace-pre-wrap">
+              {preview?.userPrompt}
+            </pre>
+          </div>
+        </div>
+      </Modal>
+    </div>
+  );
+}

@@ -1,0 +1,42 @@
+{
+	email {$ACME_EMAIL}
+}
+
+{$PUBLIC_HOST} {
+	encode zstd gzip
+
+	# The GitHub Pages landing button links here.  Everything under /api goes to
+	# the Node service; everything else is the React single-page app.
+	handle /api/* {
+		reverse_proxy api:4000
+	}
+
+	handle /uploads/* {
+		reverse_proxy api:4000
+	}
+
+	handle {
+		reverse_proxy web:80
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	log {
+		output file /data/access.log {
+			roll_size 20mb
+			roll_keep 5
+		}
+	}
+}
+
+# Plain HTTP on the raw IP is redirected to the canonical HTTPS hostname, so a
+# student who types the bare IP still lands on the secure site.
+:80 {
+	redir https://{$PUBLIC_HOST}{uri} permanent
+}

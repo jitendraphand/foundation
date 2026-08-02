@@ -1,0 +1,283 @@
+import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
+import { prisma } from '../../db.js';
+import { audit } from '../../middleware/auth.js';
+
+const testSchema = z.object({
+  title: z.string().trim().min(1).max(200),
+  description: z.string().max(2000).optional().nullable(),
+  kind: z.enum(['REGULAR', 'PRACTICE']).default('REGULAR'),
+  subject: z.string().trim().min(1).max(120),
+  grade: z.string().max(20).optional().nullable(),
+  targetGrades: z.array(z.string().max(20)).max(20).default([]),
+  targetDivisions: z.array(z.string().max(20)).max(20).default([]),
+  targetUserId: z.string().uuid().optional().nullable(),
+  marksPerQuestion: z.number().min(0.25).max(100).default(1),
+  negativeMarks: z.number().min(0).max(100).default(0),
+  durationMinutes: z.number().int().min(1).max(600).default(30),
+  maxAttempts: z.number().int().min(1).max(10).default(1),
+  passPercentage: z.number().min(0).max(100).default(35),
+  shuffleQuestions: z.boolean().default(true),
+  shuffleOptions: z.boolean().default(true),
+  showResultsAfter: z.boolean().default(true),
+  showAnswersAfter: z.boolean().default(true),
+  startsAt: z.string().datetime().optional().nullable(),
+  endsAt: z.string().datetime().optional().nullable(),
+});
+
+export default async function adminTestRoutes(app: FastifyInstance) {
+  app.get('/api/admin/tests', async (request) => {
+    const q = z
+      .object({
+        kind: z.enum(['REGULAR', 'PRACTICE']).optional(),
+        status: z.enum(['DRAFT', 'PUBLISHED', 'CLOSED']).optional(),
+        targetUserId: z.string().uuid().optional(),
+        page: z.coerce.number().int().min(1).default(1),
+        pageSize: z.coerce.number().int().min(1).max(100).default(25),
+      })
+      .parse(request.query);
+
+    const where = {
+      deletedAt: null,
+      ...(q.kind ? { kind: q.kind } : {}),
+      ...(q.status ? { status: q.status } : {}),
+      ...(q.targetUserId ? { targetUserId: q.targetUserId } : {}),
+    };
+
+    const [total, tests] = await Promise.all([
+      prisma.test.count({ where }),
+      prisma.test.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: (q.page - 1) * q.pageSize,
+        take: q.pageSize,
+        include: {
+          _count: { select: { questions: true, attempts: true } },
+          targetUser: { select: { id: true, username: true, firstName: true, lastName: true } },
+        },
+      }),
+    ]);
+
+    return { total, page: q.page, pageSize: q.pageSize, tests };
+  });
+
+  app.get('/api/admin/tests/:id', async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+
+    const test = await prisma.test.findFirst({
+      where: { id, deletedAt: null },
+      include: {
+        questions: { include: { question: true }, orderBy: { position: 'asc' } },
+        targetUser: { select: { id: true, username: true, firstName: true, lastName: true } },
+        _count: { select: { attempts: true } },
+      },
+    });
+    if (!test) return reply.code(404).send({ error: 'Test not found.' });
+    return { test };
+  });
+
+  app.post('/api/admin/tests', async (request, reply) => {
+    const body = testSchema.parse(request.body);
+
+    if (body.kind === 'PRACTICE' && !body.targetUserId) {
+      return reply.code(400).send({ error: 'A practice test must be assigned to one student.' });
+    }
+
+    const test = await prisma.test.create({
+      data: {
+        ...body,
+        description: body.description ?? null,
+        grade: body.grade ?? null,
+        targetUserId: body.targetUserId ?? null,
+        startsAt: body.startsAt ? new Date(body.startsAt) : null,
+        endsAt: body.endsAt ? new Date(body.endsAt) : null,
+        createdById: request.user!.sub,
+      },
+    });
+
+    await audit(request.user!.sub, 'test.create', { entity: 'Test', entityId: test.id, ip: request.ip });
+    return reply.code(201).send({ ok: true, test });
+  });
+
+  app.patch('/api/admin/tests/:id', async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const body = testSchema.partial().parse(request.body);
+
+    const existing = await prisma.test.findFirst({ where: { id, deletedAt: null }, include: { _count: { select: { attempts: true } } } });
+    if (!existing) return reply.code(404).send({ error: 'Test not found.' });
+
+    // Changing the marking scheme after students have sat the test would make
+    // existing scores meaningless.
+    if (existing._count.attempts > 0) {
+      const locked = ['marksPerQuestion', 'negativeMarks', 'durationMinutes'] as const;
+      const changed = locked.filter((f) => body[f] !== undefined && body[f] !== existing[f]);
+      if (changed.length > 0) {
+        return reply.code(409).send({
+          error: `Students have already attempted this test, so ${changed.join(', ')} can no longer be changed. Create a new test instead.`,
+        });
+      }
+    }
+
+    const test = await prisma.test.update({
+      where: { id },
+      data: {
+        ...body,
+        ...(body.startsAt !== undefined ? { startsAt: body.startsAt ? new Date(body.startsAt) : null } : {}),
+        ...(body.endsAt !== undefined ? { endsAt: body.endsAt ? new Date(body.endsAt) : null } : {}),
+      },
+    });
+
+    await audit(request.user!.sub, 'test.update', { entity: 'Test', entityId: id, ip: request.ip });
+    return { ok: true, test };
+  });
+
+  /** Sets the final question list — the "these drafts become the test" step. */
+  app.put('/api/admin/tests/:id/questions', async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const body = z
+      .object({
+        questionIds: z.array(z.string().uuid()).min(1).max(200),
+        /** Per-question override; falls back to the test's marksPerQuestion. */
+        marks: z.record(z.number().min(0.25).max(100)).optional(),
+      })
+      .parse(request.body);
+
+    const test = await prisma.test.findFirst({ where: { id, deletedAt: null }, include: { _count: { select: { attempts: true } } } });
+    if (!test) return reply.code(404).send({ error: 'Test not found.' });
+    if (test._count.attempts > 0) {
+      return reply.code(409).send({ error: 'Students have already attempted this test, so its questions can no longer be changed.' });
+    }
+
+    const found = await prisma.question.findMany({
+      where: { id: { in: body.questionIds }, deletedAt: null },
+      select: { id: true, status: true },
+    });
+
+    const missing = body.questionIds.filter((qid) => !found.some((f) => f.id === qid));
+    if (missing.length) return reply.code(400).send({ error: `${missing.length} of the selected questions no longer exist.` });
+
+    const notApproved = found.filter((f) => f.status !== 'APPROVED');
+    if (notApproved.length) {
+      return reply.code(400).send({
+        error: `${notApproved.length} of the selected questions are not approved yet. Approve them first, then add them to the test.`,
+      });
+    }
+
+    await prisma.$transaction([
+      prisma.testQuestion.deleteMany({ where: { testId: id } }),
+      prisma.testQuestion.createMany({
+        data: body.questionIds.map((qid, index) => ({
+          testId: id,
+          questionId: qid,
+          position: index,
+          marks: body.marks?.[qid] ?? test.marksPerQuestion,
+        })),
+      }),
+    ]);
+
+    await audit(request.user!.sub, 'test.set_questions', {
+      entity: 'Test', entityId: id, ip: request.ip, detail: { count: body.questionIds.length },
+    });
+
+    return { ok: true, count: body.questionIds.length };
+  });
+
+  app.post('/api/admin/tests/:id/publish', async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const { status } = z.object({ status: z.enum(['DRAFT', 'PUBLISHED', 'CLOSED']) }).parse(request.body);
+
+    const test = await prisma.test.findFirst({
+      where: { id, deletedAt: null },
+      include: { _count: { select: { questions: true } } },
+    });
+    if (!test) return reply.code(404).send({ error: 'Test not found.' });
+
+    if (status === 'PUBLISHED' && test._count.questions === 0) {
+      return reply.code(400).send({ error: 'Add questions to this test before publishing it.' });
+    }
+
+    const updated = await prisma.test.update({
+      where: { id },
+      data: { status, publishedAt: status === 'PUBLISHED' ? new Date() : test.publishedAt },
+    });
+
+    await audit(request.user!.sub, `test.${status.toLowerCase()}`, { entity: 'Test', entityId: id, ip: request.ip });
+
+    return {
+      ok: true,
+      test: updated,
+      message:
+        status === 'PUBLISHED'
+          ? 'The test is now live and will appear on the students’ dashboards.'
+          : status === 'CLOSED'
+            ? 'The test is closed. No new attempts can be started.'
+            : 'The test has been moved back to draft and is hidden from students.',
+    };
+  });
+
+  app.delete('/api/admin/tests/:id', async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+
+    const test = await prisma.test.findFirst({ where: { id, deletedAt: null }, include: { _count: { select: { attempts: true } } } });
+    if (!test) return reply.code(404).send({ error: 'Test not found.' });
+
+    if (test._count.attempts > 0) {
+      await prisma.test.update({ where: { id }, data: { deletedAt: new Date(), status: 'CLOSED' } });
+      return { ok: true, mode: 'soft', message: 'This test has attempts, so it has been archived rather than deleted. Results are retained.' };
+    }
+
+    await prisma.test.delete({ where: { id } });
+    await audit(request.user!.sub, 'test.delete', { entity: 'Test', entityId: id, ip: request.ip });
+    return { ok: true, mode: 'hard' };
+  });
+
+  /** Live results for one test, for the invigilator's view. */
+  app.get('/api/admin/tests/:id/results', async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+
+    const test = await prisma.test.findFirst({ where: { id, deletedAt: null } });
+    if (!test) return reply.code(404).send({ error: 'Test not found.' });
+
+    const attempts = await prisma.attempt.findMany({
+      where: { testId: id },
+      orderBy: [{ percentage: 'desc' }],
+      select: {
+        id: true, status: true, score: true, maxScore: true, percentage: true,
+        correctCount: true, incorrectCount: true, unansweredCount: true,
+        startedAt: true, submittedAt: true, breakdown: true,
+        user: { select: { id: true, username: true, firstName: true, lastName: true, grade: true, division: true, rollNo: true } },
+      },
+    });
+
+    const done = attempts.filter((a) => a.status === 'SUBMITTED' || a.status === 'AUTO_SUBMITTED');
+    const pcts = done.map((a) => a.percentage).sort((a, b) => a - b);
+
+    const stats = {
+      attempted: attempts.length,
+      completed: done.length,
+      inProgress: attempts.filter((a) => a.status === 'IN_PROGRESS').length,
+      average: pcts.length ? Math.round((pcts.reduce((s, p) => s + p, 0) / pcts.length) * 10) / 10 : 0,
+      median: pcts.length ? pcts[Math.floor(pcts.length / 2)] : 0,
+      highest: pcts.length ? pcts[pcts.length - 1] : 0,
+      lowest: pcts.length ? pcts[0] : 0,
+      passed: done.filter((a) => a.percentage >= test.passPercentage).length,
+    };
+
+    // Per-question difficulty on this specific test, to spot bad questions.
+    const perQuestion = await prisma.answer.groupBy({
+      by: ['questionId', 'isCorrect'],
+      where: { attempt: { testId: id, status: { in: ['SUBMITTED', 'AUTO_SUBMITTED'] } } },
+      _count: { _all: true },
+    });
+
+    const questionStats: Record<string, { correct: number; incorrect: number; unanswered: number }> = {};
+    for (const row of perQuestion) {
+      const entry = (questionStats[row.questionId] ??= { correct: 0, incorrect: 0, unanswered: 0 });
+      if (row.isCorrect === true) entry.correct += row._count._all;
+      else if (row.isCorrect === false) entry.incorrect += row._count._all;
+      else entry.unanswered += row._count._all;
+    }
+
+    return { test, stats, attempts, questionStats };
+  });
+}

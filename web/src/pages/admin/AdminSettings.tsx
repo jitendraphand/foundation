@@ -1,0 +1,543 @@
+import { useCallback, useEffect, useState } from 'react';
+import { api, ApiError } from '../../lib/api';
+import { Alert, Badge, Card, EmptyState, Field, Modal, PageLoader, Spinner, Tabs, formatDate } from '../../components/ui';
+import type { Tag } from '../../lib/types';
+
+type SettingsTab = 'providers' | 'prompts' | 'tags' | 'classes' | 'audit';
+
+export default function AdminSettings() {
+  const [tab, setTab] = useState<SettingsTab>('providers');
+
+  return (
+    <div className="space-y-5">
+      <h1 className="text-lg font-semibold">Settings</h1>
+
+      <Tabs
+        tabs={[
+          { id: 'providers', label: 'LLM providers' },
+          { id: 'prompts', label: 'Prompts' },
+          { id: 'tags', label: 'Tags' },
+          { id: 'classes', label: 'Grades & divisions' },
+          { id: 'audit', label: 'Activity log' },
+        ]}
+        active={tab}
+        onChange={setTab}
+      />
+
+      {tab === 'providers' && <Providers />}
+      {tab === 'prompts' && <Prompts />}
+      {tab === 'tags' && <Tags />}
+      {tab === 'classes' && <Classes />}
+      {tab === 'audit' && <AuditLog />}
+    </div>
+  );
+}
+
+// --- Providers -------------------------------------------------------------
+
+interface Credential {
+  id: string;
+  provider: string;
+  label: string;
+  baseUrl: string;
+  keyHint: string;
+  defaultModel: string | null;
+  isActive: boolean;
+  createdAt: string;
+}
+
+interface ProviderDef {
+  id: string;
+  label: string;
+  defaultBaseUrl: string;
+  docsUrl: string;
+  suggestedModels: string[];
+  supportsJsonMode: boolean;
+}
+
+function Providers() {
+  const [credentials, setCredentials] = useState<Credential[]>([]);
+  const [providers, setProviders] = useState<ProviderDef[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+  const [testing, setTesting] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const res = await api.get<{ credentials: Credential[]; providers: ProviderDef[] }>('/api/admin/credentials');
+      setCredentials(res.credentials);
+      setProviders(res.providers);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not load providers.');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const test = async (credential: Credential) => {
+    setTesting(credential.id);
+    setNotice(null);
+    setError(null);
+    try {
+      const res = await api.post<{ ok: boolean; message: string }>(`/api/admin/credentials/${credential.id}/test`, {});
+      if (res.ok) setNotice(`${credential.label}: ${res.message}`);
+      else setError(`${credential.label}: ${res.message}`);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'The connection test failed.');
+    } finally {
+      setTesting(null);
+    }
+  };
+
+  const remove = async (credential: Credential) => {
+    try {
+      await api.delete(`/api/admin/credentials/${credential.id}`);
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not delete that credential.');
+    }
+  };
+
+  if (loading) return <PageLoader label="Loading" />;
+
+  return (
+    <div className="space-y-4">
+      {error && <Alert tone="error" onDismiss={() => setError(null)}>{error}</Alert>}
+      {notice && <Alert tone="success" onDismiss={() => setNotice(null)}>{notice}</Alert>}
+
+      <Card
+        title="API credentials"
+        action={<button type="button" className="btn-primary btn-sm" onClick={() => setAdding(true)}>Add credential</button>}
+        padded={false}
+      >
+        {credentials.length === 0 ? (
+          <EmptyState
+            title="No providers configured"
+            hint="Add an OpenRouter or NVIDIA API key to start generating questions."
+            action={<button type="button" className="btn-primary btn-sm" onClick={() => setAdding(true)}>Add credential</button>}
+          />
+        ) : (
+          <div className="scroll-x">
+            <table className="table-base">
+              <thead>
+                <tr>
+                  <th>Label</th>
+                  <th>Provider</th>
+                  <th>Key</th>
+                  <th>Default model</th>
+                  <th>Added</th>
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {credentials.map((credential) => (
+                  <tr key={credential.id}>
+                    <td className="font-medium">{credential.label}</td>
+                    <td className="text-ink-muted">{credential.provider}</td>
+                    <td className="font-mono text-xs text-ink-faint">{credential.keyHint}</td>
+                    <td className="font-mono text-xs text-ink-muted">{credential.defaultModel ?? '—'}</td>
+                    <td className="text-xs text-ink-muted whitespace-nowrap">{formatDate(credential.createdAt)}</td>
+                    <td className="text-right whitespace-nowrap">
+                      <button type="button" className="btn-ghost btn-sm" onClick={() => test(credential)} disabled={testing === credential.id}>
+                        {testing === credential.id ? 'Testing…' : 'Test connection'}
+                      </button>
+                      <button type="button" className="btn-ghost btn-sm text-bad" onClick={() => remove(credential)}>Delete</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+
+      <Alert tone="info">
+        API keys are encrypted before they are stored and are never shown in full again. If you change{' '}
+        <code className="font-mono">ENCRYPTION_KEY</code> in <code className="font-mono">.env</code>, saved keys can no
+        longer be decrypted and must be re-entered.
+      </Alert>
+
+      {adding && (
+        <AddCredentialModal
+          providers={providers}
+          onClose={() => setAdding(false)}
+          onAdded={async () => { setAdding(false); await load(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function AddCredentialModal({ providers, onClose, onAdded }: { providers: ProviderDef[]; onClose: () => void; onAdded: () => void }) {
+  const [provider, setProvider] = useState(providers[0]?.id ?? 'openrouter');
+  const [label, setLabel] = useState('');
+  const [apiKey, setApiKey] = useState('');
+  const [baseUrl, setBaseUrl] = useState('');
+  const [defaultModel, setDefaultModel] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const def = providers.find((p) => p.id === provider);
+
+  useEffect(() => {
+    setBaseUrl(def?.defaultBaseUrl ?? '');
+    setDefaultModel(def?.suggestedModels[0] ?? '');
+    setLabel((l) => l || def?.label || '');
+  }, [provider, def]);
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      await api.post('/api/admin/credentials', {
+        provider,
+        label: label.trim(),
+        apiKey: apiKey.trim(),
+        baseUrl: baseUrl.trim() || undefined,
+        defaultModel: defaultModel.trim() || undefined,
+      });
+      onAdded();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not save that credential.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal open onClose={onClose} title="Add an API credential">
+      <form onSubmit={submit} className="space-y-4">
+        {error && <Alert tone="error">{error}</Alert>}
+
+        <Field label="Provider" required>
+          <select className="input" value={provider} onChange={(e) => setProvider(e.target.value)}>
+            {providers.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+          </select>
+        </Field>
+
+        <Field label="Label" required hint="Just for you, so you can tell several keys apart.">
+          <input className="input" value={label} onChange={(e) => setLabel(e.target.value)} required />
+        </Field>
+
+        <Field label="API key" required hint="Encrypted before it is stored. It is never displayed again.">
+          <input className="input font-mono text-xs" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} required minLength={8} autoComplete="off" />
+        </Field>
+
+        <Field label="Base URL" required={provider === 'custom'}>
+          <input className="input font-mono text-xs" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://openrouter.ai/api/v1" />
+        </Field>
+
+        <Field label="Default model">
+          <input className="input font-mono text-xs" value={defaultModel} onChange={(e) => setDefaultModel(e.target.value)} list="provider-models" />
+          <datalist id="provider-models">
+            {def?.suggestedModels.map((m) => <option key={m} value={m} />)}
+          </datalist>
+        </Field>
+
+        <div className="flex justify-end gap-2">
+          <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
+          <button type="submit" className="btn-primary" disabled={busy}>{busy ? <Spinner label="Saving" /> : 'Save credential'}</button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+// --- Prompts ---------------------------------------------------------------
+
+interface Template {
+  id: string;
+  name: string;
+  description: string | null;
+  systemPrompt: string;
+  userTemplate: string;
+  kind: 'REGULAR' | 'PRACTICE';
+  isDefault: boolean;
+  isActive: boolean;
+  version: number;
+}
+
+function Prompts() {
+  const [templates, setTemplates] = useState<Template[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState<Template | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const res = await api.get<{ templates: Template[] }>('/api/admin/prompts');
+      setTemplates(res.templates.filter((t) => t.isActive));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not load prompts.');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  if (loading) return <PageLoader label="Loading" />;
+
+  return (
+    <div className="space-y-4">
+      {error && <Alert tone="error" onDismiss={() => setError(null)}>{error}</Alert>}
+
+      <p className="text-xs text-ink-muted">
+        The system prompt defines the strict JSON reply format, the block types for maths and diagrams, and the tag
+        vocabulary. Past generation runs keep their own frozen copy, so editing here never rewrites history.
+      </p>
+
+      <ul className="space-y-3">
+        {templates.map((template) => (
+          <li key={template.id} className="card p-4">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <h3 className="text-sm font-medium">
+                  {template.name}
+                  {template.isDefault && <Badge tone="info">default</Badge>}
+                  <Badge>{template.kind.toLowerCase()}</Badge>
+                  <span className="ml-2 text-[11px] text-ink-faint">v{template.version}</span>
+                </h3>
+                {template.description && <p className="text-xs text-ink-muted mt-1">{template.description}</p>}
+              </div>
+              <button type="button" className="btn-secondary btn-sm shrink-0" onClick={() => setEditing(template)}>Edit</button>
+            </div>
+            <pre className="mt-3 max-h-28 overflow-y-auto scroll-x rounded-lg bg-surface-sunken border border-line p-2 text-[11px] font-mono whitespace-pre-wrap text-ink-muted">
+              {template.systemPrompt.slice(0, 500)}…
+            </pre>
+          </li>
+        ))}
+      </ul>
+
+      {editing && (
+        <EditPromptModal
+          template={editing}
+          onClose={() => setEditing(null)}
+          onSaved={async () => { setEditing(null); await load(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+function EditPromptModal({ template, onClose, onSaved }: { template: Template; onClose: () => void; onSaved: () => void }) {
+  const [name, setName] = useState(template.name);
+  const [systemPrompt, setSystemPrompt] = useState(template.systemPrompt);
+  const [userTemplate, setUserTemplate] = useState(template.userTemplate);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.patch(`/api/admin/prompts/${template.id}`, { name, systemPrompt, userTemplate });
+      onSaved();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not save.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal open onClose={onClose} title={`Edit "${template.name}"`} wide>
+      <div className="space-y-4">
+        {error && <Alert tone="error">{error}</Alert>}
+
+        <Field label="Name"><input className="input" value={name} onChange={(e) => setName(e.target.value)} /></Field>
+
+        <Field label="System prompt" hint="Defines the reply contract. Keep the JSON schema section intact or generation will fail.">
+          <textarea className="input font-mono text-[11px]" rows={18} value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} spellCheck={false} />
+        </Field>
+
+        <Field label="User message template" hint="Placeholders: {{count}} {{subject}} {{topic}} {{subtopic}} {{grade}} {{marksPerQuestion}} {{difficultyMix}} {{cognitiveMix}} {{formats}} {{skillFocus}} {{extraInstructions}}">
+          <textarea className="input font-mono text-[11px]" rows={8} value={userTemplate} onChange={(e) => setUserTemplate(e.target.value)} spellCheck={false} />
+        </Field>
+
+        <div className="flex justify-end gap-2">
+          <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
+          <button type="button" className="btn-primary" onClick={save} disabled={busy}>{busy ? 'Saving…' : 'Save'}</button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// --- Tags ------------------------------------------------------------------
+
+function Tags() {
+  const [tags, setTags] = useState<Tag[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    api
+      .get<{ tags: Tag[] }>('/api/admin/tags')
+      .then((res) => setTags(res.tags))
+      .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load tags.'))
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) return <PageLoader label="Loading" />;
+  if (error) return <Alert tone="error">{error}</Alert>;
+
+  const axes: Array<{ axis: Tag['axis']; title: string; description: string }> = [
+    { axis: 'DIFFICULTY', title: 'Difficulty', description: 'How hard the question is.' },
+    { axis: 'COGNITIVE', title: 'Cognitive level', description: 'What the student has to do: recall, understand, apply, reason, analyse.' },
+    { axis: 'SKILL', title: 'Skill', description: 'Which ability the question exercises.' },
+  ];
+
+  return (
+    <div className="space-y-4">
+      <Alert tone="info">
+        These three axes are deliberately independent. Because a question carries one difficulty, one cognitive level
+        and one or more skills, a wrong answer lands in a specific cell of the grid — which is what makes the weak-area
+        reports and targeted practice tests possible. Tag codes cannot be renamed once questions use them; deactivate
+        and add a replacement instead.
+      </Alert>
+
+      {axes.map((axis) => (
+        <Card key={axis.axis} title={axis.title} padded={false}>
+          <p className="px-4 pt-3 text-xs text-ink-muted">{axis.description}</p>
+          <div className="scroll-x">
+            <table className="table-base">
+              <thead>
+                <tr><th>Code</th><th>Label</th><th>Description</th><th className="text-center">Weight</th><th>Status</th></tr>
+              </thead>
+              <tbody>
+                {tags.filter((t) => t.axis === axis.axis).map((tag) => (
+                  <tr key={tag.id}>
+                    <td className="font-mono text-xs">{tag.code}</td>
+                    <td className="font-medium">{tag.label}</td>
+                    <td className="text-xs text-ink-muted">{tag.description ?? '—'}</td>
+                    <td className="text-center tabular-nums">{tag.weight || '—'}</td>
+                    <td><Badge tone={tag.isActive ? 'good' : 'neutral'}>{tag.isActive ? 'active' : 'inactive'}</Badge></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+// --- Classes ---------------------------------------------------------------
+
+interface SchoolClass {
+  id: string;
+  kind: string;
+  code: string;
+  label: string;
+  sortOrder: number;
+  isActive: boolean;
+}
+
+function Classes() {
+  const [data, setData] = useState<{ grades: SchoolClass[]; divisions: SchoolClass[] } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setData(await api.get<{ grades: SchoolClass[]; divisions: SchoolClass[] }>('/api/admin/classes'));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not load classes.');
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const toggle = async (row: SchoolClass) => {
+    await api.patch(`/api/admin/classes/${row.id}`, { isActive: !row.isActive }).catch(() => undefined);
+    await load();
+  };
+
+  if (error) return <Alert tone="error">{error}</Alert>;
+  if (!data) return <PageLoader label="Loading" />;
+
+  return (
+    <div className="grid md:grid-cols-2 gap-4">
+      {([['Grades', data.grades], ['Divisions', data.divisions]] as const).map(([title, rows]) => (
+        <Card key={title} title={title} padded={false}>
+          <ul className="divide-y divide-line">
+            {rows.map((row) => (
+              <li key={row.id} className="px-4 py-2 flex items-center justify-between gap-3">
+                <span className="text-sm">
+                  {row.label}
+                  <span className="ml-2 font-mono text-xs text-ink-faint">{row.code}</span>
+                </span>
+                <button type="button" className="btn-ghost btn-sm" onClick={() => toggle(row)}>
+                  {row.isActive ? 'Hide from signup' : 'Show on signup'}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      ))}
+    </div>
+  );
+}
+
+// --- Audit -----------------------------------------------------------------
+
+interface AuditEntry {
+  id: string;
+  action: string;
+  entity: string | null;
+  entityId: string | null;
+  ip: string | null;
+  createdAt: string;
+  actor: { username: string } | null;
+}
+
+function AuditLog() {
+  const [entries, setEntries] = useState<AuditEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    api
+      .get<{ entries: AuditEntry[] }>('/api/admin/audit?pageSize=100')
+      .then((res) => setEntries(res.entries))
+      .catch(() => undefined)
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) return <PageLoader label="Loading" />;
+
+  return (
+    <Card padded={false}>
+      <div className="scroll-x">
+        <table className="table-base">
+          <thead>
+            <tr><th>When</th><th>Who</th><th>Action</th><th>Entity</th><th>IP</th></tr>
+          </thead>
+          <tbody>
+            {entries.map((entry) => (
+              <tr key={entry.id}>
+                <td className="text-xs text-ink-muted whitespace-nowrap">{formatDate(entry.createdAt, true)}</td>
+                <td className="font-mono text-xs">{entry.actor?.username ?? '—'}</td>
+                <td className="font-mono text-xs">{entry.action}</td>
+                <td className="text-xs text-ink-muted">{entry.entity ?? '—'}</td>
+                <td className="font-mono text-xs text-ink-faint">{entry.ip ?? '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}

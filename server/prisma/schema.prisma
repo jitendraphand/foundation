@@ -1,0 +1,596 @@
+// ---------------------------------------------------------------------------
+// Foundation Exam System - data model
+//
+// DESIGN RULES (these are what make the schema survive future upgrades):
+//
+//  1. Every table has a UUID primary key. Never a natural key, never an
+//     auto-increment integer. Rows can therefore be merged across databases
+//     during a restore without collisions.
+//
+//  2. Anything whose *shape* may change lives in a JSONB column carrying its
+//     own `version` field (question content, chart specs, answer keys,
+//     analytics snapshots). Adding a new kind of question block or a new
+//     simulation widget is then a code change, not a database migration.
+//
+//  3. Anything queried, filtered, sorted or aggregated lives in a real typed
+//     column with a real index. JSONB is for content, never for the fields
+//     analytics runs on.
+//
+//  4. Every table has a `meta Json` escape hatch defaulting to {}. New
+//     optional fields land there first and graduate to real columns later if
+//     they turn out to be worth indexing.
+//
+//  5. Vocabularies (difficulty levels, cognitive levels, skills, grades,
+//     divisions) are ROWS in the Tag / SchoolClass tables, not enum types.
+//     Adding "very difficult" later is an INSERT, not a migration.
+//     Only genuinely closed sets (user role, attempt status) are enums.
+//
+//  6. Deletes are soft wherever the row is referenced by historical results,
+//     so an old score never loses the question it came from.
+// ---------------------------------------------------------------------------
+
+generator client {
+  provider = "prisma-client-js"
+  // Both targets so the image builds on x86 laptops and arm64 servers alike.
+  binaryTargets = ["native", "linux-arm64-openssl-3.0.x", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// --- Closed sets: safe as enums -------------------------------------------
+
+enum Role {
+  STUDENT
+  ADMIN
+}
+
+enum TestKind {
+  REGULAR // a normal class test
+  PRACTICE // remedial test generated for one student's weak areas
+}
+
+enum TestStatus {
+  DRAFT
+  PUBLISHED
+  CLOSED
+}
+
+enum QuestionStatus {
+  DRAFT // returned by the LLM, awaiting admin review
+  APPROVED // admin accepted it; eligible to be placed on a test
+  REJECTED // admin discarded it; kept for prompt-quality analysis
+}
+
+enum QuestionFormat {
+  MCQ_SINGLE
+  MCQ_MULTI
+  TRUE_FALSE
+  NUMERIC
+}
+
+enum AttemptStatus {
+  IN_PROGRESS
+  SUBMITTED
+  AUTO_SUBMITTED // timer expired
+  ABANDONED
+}
+
+enum GenerationStatus {
+  PENDING
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+enum TagAxis {
+  DIFFICULTY
+  COGNITIVE
+  SKILL
+}
+
+// --- People ----------------------------------------------------------------
+
+model User {
+  id       String @id @default(uuid())
+  username String @unique // firstname+lastname, then +1, +2 on collision
+
+  firstName String
+  lastName  String
+
+  // Stored as codes referencing SchoolClass rows so analytics never has to
+  // cope with "8th" / "VIII" / "8 th" being the same class.
+  grade    String
+  division String
+  rollNo   String
+
+  dateOfBirth DateTime @db.Date
+
+  passwordHash       String
+  mustChangePassword Boolean @default(false)
+
+  role     Role    @default(STUDENT)
+  isActive Boolean @default(true)
+
+  lastLoginAt   DateTime?
+  failedLogins  Int       @default(0)
+  lockedUntil   DateTime?
+  passwordSetAt DateTime  @default(now())
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime? // soft delete: results survive the user being removed
+
+  meta Json @default("{}")
+
+  attempts        Attempt[]
+  generationRuns  GenerationRun[] @relation("RunRequestedBy")
+  practiceTests   Test[]          @relation("PracticeTarget")
+  createdTests    Test[]          @relation("TestCreatedBy")
+  auditLogs       AuditLog[]
+  backups         BackupArchive[]
+
+  // A roll number is unique inside a class, not globally.
+  @@unique([grade, division, rollNo], name: "roll_in_class")
+  @@index([role, isActive])
+  @@index([grade, division])
+  @@index([deletedAt])
+}
+
+/// Grades and divisions as data, so the admin can add "Grade 13" or
+/// "Division G" from the UI without a schema change or a redeploy.
+model SchoolClass {
+  id        String   @id @default(uuid())
+  kind      String // "GRADE" | "DIVISION"
+  code      String // canonical value stored on User.grade / User.division
+  label     String // what the dropdown shows
+  sortOrder Int      @default(0)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  meta      Json     @default("{}")
+
+  @@unique([kind, code])
+  @@index([kind, isActive, sortOrder])
+}
+
+// --- Curriculum ------------------------------------------------------------
+
+/// Self-referencing tree: Subject -> Topic -> Subtopic. Arbitrary depth, so a
+/// future "unit" or "chapter" level slots in without a migration.
+model CurriculumNode {
+  id       String  @id @default(uuid())
+  parentId String?
+  parent   CurriculumNode?  @relation("NodeTree", fields: [parentId], references: [id], onDelete: Cascade)
+  children CurriculumNode[] @relation("NodeTree")
+
+  level String // "SUBJECT" | "TOPIC" | "SUBTOPIC"
+  code  String // stable machine key, never renamed
+  label String // human label, freely renamable
+  path  String // denormalised "algebra/quadratics/discriminant" for fast filtering
+
+  grade     String? // optional: scope a topic to one grade
+  sortOrder Int     @default(0)
+  isActive  Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  meta      Json     @default("{}")
+
+  questions Question[]
+
+  @@unique([parentId, code])
+  @@index([level, isActive])
+  @@index([path])
+}
+
+/// The tag vocabulary. Three orthogonal axes, because orthogonality is what
+/// makes "weak at APPLICATION-level ALGEBRAIC_MANIPULATION in Quadratics at
+/// MODERATE difficulty" fall out of the data automatically.
+model Tag {
+  id          String   @id @default(uuid())
+  axis        TagAxis
+  code        String // stable key used in Question columns and LLM output
+  label       String
+  description String? // shown to the admin, and injected into the LLM prompt
+  /// Ordinal weight along the axis: difficulty easy=1 moderate=2 difficult=3.
+  /// Lets analytics compute a weighted mastery score, not just a raw count.
+  weight      Int      @default(0)
+  sortOrder   Int      @default(0)
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  meta        Json     @default("{}")
+
+  @@unique([axis, code])
+  @@index([axis, isActive, sortOrder])
+}
+
+// --- Questions -------------------------------------------------------------
+
+model Question {
+  id String @id @default(uuid())
+
+  status QuestionStatus @default(DRAFT)
+  format QuestionFormat @default(MCQ_SINGLE)
+
+  /// Rendered content as an ordered list of typed blocks:
+  ///   { version: 1, blocks: [
+  ///       { type: "text",    value: "..." },
+  ///       { type: "math",    tex: "\\frac{a}{b}", display: true },
+  ///       { type: "svg",     svg: "<svg .../>" },
+  ///       { type: "mermaid", code: "graph TD; A-->B" },
+  ///       { type: "chart",   spec: { kind:"line", series:[...] } },
+  ///       { type: "image",   assetId: "uuid", alt: "..." },
+  ///       { type: "table",   headers: [...], rows: [[...]] },
+  ///       { type: "code",    language: "python", value: "..." }
+  ///   ]}
+  /// A future "simulation" block type needs only a new renderer component.
+  content Json
+
+  /// [{ id: "a", blocks: [...] }, ...] - empty for NUMERIC questions.
+  options Json @default("[]")
+
+  /// Shape depends on `format`:
+  ///   MCQ_SINGLE  { correctOptionId: "b" }
+  ///   MCQ_MULTI   { correctOptionIds: ["a","c"], partialCredit: true }
+  ///   TRUE_FALSE  { value: true }
+  ///   NUMERIC     { value: 3.14, tolerance: 0.01, toleranceKind: "ABSOLUTE"|"RELATIVE", unit: "cm" }
+  /// Never sent to a student before their attempt is submitted.
+  answerKey Json
+
+  /// Worked solution, same block format as `content`.
+  explanation Json @default("{\"version\":1,\"blocks\":[]}")
+
+  // --- Tag axes: real columns because every analytics query filters on them.
+  difficultyTag String // Tag.code where axis = DIFFICULTY
+  cognitiveTag  String // Tag.code where axis = COGNITIVE
+  skillTags     String[] @default([]) // Tag.code[] where axis = SKILL
+
+  curriculumNodeId String?
+  curriculumNode   CurriculumNode? @relation(fields: [curriculumNodeId], references: [id], onDelete: SetNull)
+
+  // Denormalised from the curriculum tree so a single-table scan can group by
+  // subject/topic without recursive joins. Kept in sync on write.
+  subject  String
+  topic    String?
+  subtopic String?
+  grade    String?
+
+  /// Admin's estimate, in seconds. Feeds the suggested test duration.
+  estimatedSeconds Int @default(60)
+
+  // --- Provenance: lets the admin see which prompt produces good questions.
+  generationRunId String?
+  generationRun   GenerationRun? @relation(fields: [generationRunId], references: [id], onDelete: SetNull)
+  sourceModel     String?
+  isAdminEdited   Boolean        @default(false)
+  reviewNote      String?
+
+  // --- Live difficulty, recomputed from real attempts.
+  timesServed  Int   @default(0)
+  timesCorrect Int   @default(0)
+  observedP    Float @default(0) // timesCorrect / timesServed
+
+  contentVersion Int      @default(1)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  deletedAt      DateTime?
+
+  meta Json @default("{}")
+
+  testQuestions TestQuestion[]
+  answers       Answer[]
+  assets        Asset[]
+
+  @@index([status, subject])
+  @@index([difficultyTag, cognitiveTag])
+  @@index([subject, topic, subtopic])
+  @@index([generationRunId])
+  @@index([skillTags], type: Gin)
+}
+
+/// Binary content (admin uploads, or a rendered diagram cached to disk).
+/// Content-addressed by SHA-256 so identical images are stored once and a
+/// restore can verify integrity.
+model Asset {
+  id         String   @id @default(uuid())
+  kind       String // "IMAGE" | "RENDERED_DIAGRAM"
+  mimeType   String
+  byteSize   Int
+  sha256     String
+  storageKey String // path under the uploads volume
+  width      Int?
+  height     Int?
+  altText    String?
+
+  questionId String?
+  question   Question? @relation(fields: [questionId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  meta      Json     @default("{}")
+
+  @@index([sha256])
+  @@index([questionId])
+}
+
+// --- LLM generation --------------------------------------------------------
+
+/// A saved, reusable prompt. Kept separate from the run so editing a prompt
+/// never rewrites the history of questions produced by the old version.
+model PromptTemplate {
+  id           String   @id @default(uuid())
+  name         String
+  description  String?
+  systemPrompt String   @db.Text
+  userTemplate String   @db.Text // supports {{subject}}, {{topic}}, {{count}} ...
+  kind         TestKind @default(REGULAR)
+  isDefault    Boolean  @default(false)
+  isActive     Boolean  @default(true)
+  version      Int      @default(1)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  meta         Json     @default("{}")
+
+  runs GenerationRun[]
+
+  @@index([kind, isActive])
+}
+
+/// One click of "Generate questions". Stores the exact prompt and the raw
+/// response so a bad batch can be diagnosed after the fact.
+model GenerationRun {
+  id     String           @id @default(uuid())
+  status GenerationStatus @default(PENDING)
+
+  requestedById String
+  requestedBy   User   @relation("RunRequestedBy", fields: [requestedById], references: [id])
+
+  provider String // "openrouter" | "nvidia" | "custom"
+  model    String
+
+  promptTemplateId String?
+  promptTemplate   PromptTemplate? @relation(fields: [promptTemplateId], references: [id], onDelete: SetNull)
+
+  // Frozen copies: the template may be edited later, this run must not change.
+  systemPrompt String @db.Text
+  userPrompt   String @db.Text
+
+  /// { subject, topic, subtopic, grade, count, marksPerQuestion,
+  ///   difficultyMix: { easy: 4, moderate: 4, difficult: 2 },
+  ///   cognitiveMix: {...}, skillFocus: [...], formats: [...] }
+  requestSpec Json
+
+  kind TestKind @default(REGULAR)
+
+  // For practice generation: whose weak areas seeded this run.
+  targetUserId String?
+
+  rawResponse   String? @db.Text
+  errorMessage  String? @db.Text
+  parseAttempts Int     @default(0)
+
+  promptTokens     Int?
+  completionTokens Int?
+  latencyMs        Int?
+
+  questionsRequested Int @default(0)
+  questionsParsed    Int @default(0)
+  questionsAccepted  Int @default(0)
+
+  createdAt   DateTime  @default(now())
+  completedAt DateTime?
+  meta        Json      @default("{}")
+
+  questions Question[]
+
+  @@index([status, createdAt])
+  @@index([requestedById])
+  @@index([targetUserId])
+}
+
+/// LLM provider credentials. The key itself is AES-256-GCM encrypted at rest
+/// with ENCRYPTION_KEY and is never returned to any client in full.
+model ApiCredential {
+  id           String   @id @default(uuid())
+  provider     String // "openrouter" | "nvidia" | "custom"
+  label        String
+  baseUrl      String
+  encryptedKey String   @db.Text
+  keyHint      String // last 4 characters, for the admin to identify it
+  defaultModel String?
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  meta         Json     @default("{}")
+
+  @@index([provider, isActive])
+}
+
+// --- Tests -----------------------------------------------------------------
+
+model Test {
+  id          String     @id @default(uuid())
+  title       String
+  description String?    @db.Text
+  kind        TestKind   @default(REGULAR)
+  status      TestStatus @default(DRAFT)
+
+  subject String
+  grade   String?
+
+  // Audience. Empty arrays mean "everyone", so a test can be class-scoped
+  // without a separate join table until one is actually needed.
+  targetGrades    String[] @default([])
+  targetDivisions String[] @default([])
+
+  // Practice tests are aimed at exactly one student and are always segregated
+  // from REGULAR results in every chart and every export.
+  targetUserId String?
+  targetUser   User?   @relation("PracticeTarget", fields: [targetUserId], references: [id], onDelete: Cascade)
+
+  marksPerQuestion Float @default(1)
+  negativeMarks    Float @default(0) // positive number = amount deducted
+  durationMinutes  Int   @default(30)
+  maxAttempts      Int   @default(1)
+  passPercentage   Float @default(35)
+
+  shuffleQuestions   Boolean @default(true)
+  shuffleOptions     Boolean @default(true)
+  showResultsAfter   Boolean @default(true) // score immediately on submit
+  showAnswersAfter   Boolean @default(true) // correct answers + explanations
+
+  startsAt DateTime?
+  endsAt   DateTime?
+
+  createdById String
+  createdBy   User   @relation("TestCreatedBy", fields: [createdById], references: [id])
+
+  publishedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  meta Json @default("{}")
+
+  questions TestQuestion[]
+  attempts  Attempt[]
+
+  @@index([status, kind, startsAt])
+  @@index([targetUserId])
+  @@index([createdById])
+}
+
+model TestQuestion {
+  id         String @id @default(uuid())
+  testId     String
+  test       Test     @relation(fields: [testId], references: [id], onDelete: Cascade)
+  questionId String
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Restrict)
+
+  position Int
+  marks    Float // copied from the test, overridable per question
+
+  @@unique([testId, questionId])
+  @@index([testId, position])
+}
+
+// --- Attempts and answers --------------------------------------------------
+
+model Attempt {
+  id     String        @id @default(uuid())
+  testId String
+  test   Test          @relation(fields: [testId], references: [id], onDelete: Cascade)
+  userId String
+  user   User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status AttemptStatus @default(IN_PROGRESS)
+
+  attemptNumber Int @default(1)
+
+  /// Frozen per-attempt shuffle, so a page reload or a reconnect on another
+  /// device shows the exact same order:
+  ///   { questionIds: [...], optionOrder: { questionId: ["c","a","b"] } }
+  layout Json @default("{}")
+
+  startedAt   DateTime  @default(now())
+  /// Server-authoritative deadline. The client clock is never trusted.
+  expiresAt   DateTime
+  submittedAt DateTime?
+  lastSeenAt  DateTime  @default(now())
+
+  score      Float @default(0)
+  maxScore   Float @default(0)
+  percentage Float @default(0)
+
+  correctCount   Int @default(0)
+  incorrectCount Int @default(0)
+  unansweredCount Int @default(0)
+
+  /// Per-axis breakdown computed once at submit, so the student dashboard and
+  /// the admin analytics never recompute it:
+  ///   { byDifficulty: { easy: {correct,total}, ... },
+  ///     byCognitive:  {...}, bySkill: {...}, byTopic: {...} }
+  breakdown Json @default("{}")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  meta      Json     @default("{}")
+
+  answers Answer[]
+
+  @@unique([testId, userId, attemptNumber])
+  @@index([userId, status])
+  @@index([testId, status])
+  @@index([submittedAt])
+}
+
+model Answer {
+  id        String  @id @default(uuid())
+  attemptId String
+  attempt   Attempt @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+
+  questionId String
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Restrict)
+
+  /// Shape mirrors the answer key:
+  ///   { optionId: "b" } | { optionIds: [...] } | { value: true } | { value: 3.14 }
+  response Json?
+
+  isCorrect     Boolean?
+  marksAwarded  Float    @default(0)
+  timeSpentMs   Int      @default(0)
+  visitCount    Int      @default(0)
+  isMarkedForReview Boolean @default(false)
+
+  answeredAt DateTime?
+  updatedAt  DateTime  @updatedAt
+  meta       Json      @default("{}")
+
+  @@unique([attemptId, questionId])
+  @@index([questionId, isCorrect])
+}
+
+// --- Operations ------------------------------------------------------------
+
+model BackupArchive {
+  id          String   @id @default(uuid())
+  filename    String
+  byteSize    Int
+  sha256      String
+  isEncrypted Boolean  @default(true)
+  includesAssets Boolean @default(true)
+  /// { schemaVersion, appVersion, tableCounts: {...}, createdAtUtc }
+  manifest    Json     @default("{}")
+
+  createdById String?
+  createdBy   User?   @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  createdAt DateTime  @default(now())
+  expiresAt DateTime?
+  meta      Json      @default("{}")
+
+  @@index([createdAt])
+}
+
+model AuditLog {
+  id       String  @id @default(uuid())
+  actorId  String?
+  actor    User?   @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  action   String // "user.deactivate", "test.publish", "backup.create", ...
+  entity   String?
+  entityId String?
+  ip       String?
+  /// Before/after snapshot for anything the admin changed.
+  detail   Json     @default("{}")
+  createdAt DateTime @default(now())
+
+  @@index([actorId, createdAt])
+  @@index([action, createdAt])
+}
+
+/// Loose key/value application settings, so a new toggle never needs a
+/// migration. Values are JSON to keep types intact.
+model Setting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+}

@@ -1,0 +1,344 @@
+import type { FastifyInstance } from 'fastify';
+import { z } from 'zod';
+import { prisma } from '../../db.js';
+import { audit } from '../../middleware/auth.js';
+import { normalizeContent, normalizeBlocks, blocksToText } from '../../lib/content.js';
+import { validateAnswerKey } from '../../lib/grading.js';
+import { runGeneration, buildUserPrompt } from '../../llm/generate.js';
+import { LlmError, PROVIDERS } from '../../llm/providers.js';
+import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_TEMPLATE } from '../../llm/prompts.js';
+import { findWeakAreas, weakAreasToPromptHint, type Breakdown } from '../../lib/analytics.js';
+
+const generateSchema = z.object({
+  credentialId: z.string().uuid(),
+  model: z.string().min(1).max(200),
+  promptTemplateId: z.string().uuid().optional(),
+  systemPrompt: z.string().max(40_000).optional(),
+  /** Fully custom user prompt; overrides the templated one when present. */
+  userPrompt: z.string().max(40_000).optional(),
+  temperature: z.number().min(0).max(2).optional(),
+  kind: z.enum(['REGULAR', 'PRACTICE']).default('REGULAR'),
+  targetUserId: z.string().uuid().optional(),
+  spec: z.object({
+    subject: z.string().min(1).max(120),
+    topic: z.string().max(200).optional(),
+    subtopic: z.string().max(200).optional(),
+    grade: z.string().max(20).optional(),
+    count: z.number().int().min(1).max(30),
+    marksPerQuestion: z.number().min(0.25).max(100).default(1),
+    difficultyMix: z.record(z.number().int().min(0)).optional(),
+    cognitiveMix: z.record(z.number().int().min(0)).optional(),
+    skillFocus: z.array(z.string()).max(8).optional(),
+    formats: z.array(z.enum(['MCQ_SINGLE', 'MCQ_MULTI', 'TRUE_FALSE', 'NUMERIC'])).max(4).optional(),
+    extraInstructions: z.string().max(4000).optional(),
+  }),
+});
+
+export default async function adminQuestionRoutes(app: FastifyInstance) {
+  /** Everything the "Set test" screen needs to render its form. */
+  app.get('/api/admin/generation/context', async () => {
+    const [tags, credentials, templates, curriculum] = await Promise.all([
+      prisma.tag.findMany({ where: { isActive: true }, orderBy: [{ axis: 'asc' }, { sortOrder: 'asc' }] }),
+      prisma.apiCredential.findMany({
+        where: { isActive: true },
+        orderBy: { createdAt: 'asc' },
+        select: { id: true, provider: true, label: true, baseUrl: true, keyHint: true, defaultModel: true },
+      }),
+      prisma.promptTemplate.findMany({
+        where: { isActive: true },
+        orderBy: [{ isDefault: 'desc' }, { name: 'asc' }],
+        select: { id: true, name: true, description: true, kind: true, isDefault: true, systemPrompt: true, userTemplate: true },
+      }),
+      prisma.curriculumNode.findMany({
+        where: { isActive: true },
+        orderBy: [{ level: 'asc' }, { sortOrder: 'asc' }],
+        select: { id: true, parentId: true, level: true, code: true, label: true, path: true, grade: true },
+      }),
+    ]);
+
+    return {
+      tags: {
+        difficulty: tags.filter((t) => t.axis === 'DIFFICULTY'),
+        cognitive: tags.filter((t) => t.axis === 'COGNITIVE'),
+        skill: tags.filter((t) => t.axis === 'SKILL'),
+      },
+      credentials,
+      templates,
+      curriculum,
+      providers: Object.values(PROVIDERS),
+      defaults: { systemPrompt: DEFAULT_SYSTEM_PROMPT, userTemplate: DEFAULT_USER_TEMPLATE },
+      formats: ['MCQ_SINGLE', 'MCQ_MULTI', 'TRUE_FALSE', 'NUMERIC'],
+    };
+  });
+
+  /** Preview the exact prompt that would be sent, before spending a call. */
+  app.post('/api/admin/generation/preview-prompt', async (request) => {
+    const body = generateSchema.pick({ spec: true, systemPrompt: true, userPrompt: true, promptTemplateId: true }).parse(request.body);
+
+    let template = DEFAULT_USER_TEMPLATE;
+    let systemPrompt = body.systemPrompt ?? DEFAULT_SYSTEM_PROMPT;
+
+    if (body.promptTemplateId) {
+      const t = await prisma.promptTemplate.findUnique({ where: { id: body.promptTemplateId } });
+      if (t) {
+        template = t.userTemplate;
+        systemPrompt = body.systemPrompt ?? t.systemPrompt;
+      }
+    }
+
+    return {
+      systemPrompt,
+      userPrompt: body.userPrompt ?? buildUserPrompt(body.spec, template),
+    };
+  });
+
+  /** Generate draft questions from the LLM. */
+  app.post('/api/admin/generation/run', { config: { rateLimit: { max: 30, timeWindow: '10 minutes' } } }, async (request, reply) => {
+    const body = generateSchema.parse(request.body);
+
+    let systemPrompt = body.systemPrompt;
+    let userPrompt = body.userPrompt;
+
+    if (body.promptTemplateId && !systemPrompt) {
+      const t = await prisma.promptTemplate.findUnique({ where: { id: body.promptTemplateId } });
+      if (t) {
+        systemPrompt = t.systemPrompt;
+        if (!userPrompt) userPrompt = buildUserPrompt(body.spec, t.userTemplate);
+      }
+    }
+
+    // Practice runs are seeded from the student's actual weak areas.
+    let spec = body.spec;
+    if (body.kind === 'PRACTICE') {
+      if (!body.targetUserId) return reply.code(400).send({ error: 'A practice test needs a target student.' });
+
+      const attempts = await prisma.attempt.findMany({
+        where: { userId: body.targetUserId, status: { in: ['SUBMITTED', 'AUTO_SUBMITTED'] } },
+        select: { breakdown: true },
+        orderBy: { submittedAt: 'desc' },
+        take: 25,
+      });
+      const weak = findWeakAreas(attempts.map((a) => a.breakdown as unknown as Breakdown).filter(Boolean), { limit: 8 });
+      spec = {
+        ...spec,
+        extraInstructions: `${spec.extraInstructions ?? ''}\n\n${weakAreasToPromptHint(weak)}`.trim(),
+      };
+    }
+
+    try {
+      const outcome = await runGeneration({
+        requestedById: request.user!.sub,
+        credentialId: body.credentialId,
+        model: body.model,
+        systemPrompt,
+        userPrompt,
+        promptTemplateId: body.promptTemplateId,
+        spec,
+        kind: body.kind,
+        targetUserId: body.targetUserId,
+        temperature: body.temperature,
+      });
+
+      await audit(request.user!.sub, 'generation.run', {
+        entity: 'GenerationRun', entityId: outcome.runId, ip: request.ip,
+        detail: { accepted: outcome.accepted, parsed: outcome.parsed, kind: body.kind },
+      });
+
+      return outcome;
+    } catch (err) {
+      if (err instanceof LlmError) return reply.code(502).send({ error: err.message });
+      throw err;
+    }
+  });
+
+  /** Generation history, so a bad batch can be diagnosed after the fact. */
+  app.get('/api/admin/generation/runs', async (request) => {
+    const q = z.object({ page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(20) }).parse(request.query);
+
+    const [total, runs] = await Promise.all([
+      prisma.generationRun.count(),
+      prisma.generationRun.findMany({
+        orderBy: { createdAt: 'desc' },
+        skip: (q.page - 1) * q.pageSize,
+        take: q.pageSize,
+        select: {
+          id: true, status: true, provider: true, model: true, kind: true, createdAt: true,
+          completedAt: true, questionsRequested: true, questionsParsed: true, questionsAccepted: true,
+          latencyMs: true, promptTokens: true, completionTokens: true, errorMessage: true,
+          requestSpec: true, targetUserId: true,
+          requestedBy: { select: { username: true } },
+        },
+      }),
+    ]);
+
+    return { total, page: q.page, pageSize: q.pageSize, runs };
+  });
+
+  app.get('/api/admin/generation/runs/:id', async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const run = await prisma.generationRun.findUnique({
+      where: { id },
+      include: { questions: { orderBy: { createdAt: 'asc' } }, requestedBy: { select: { username: true } } },
+    });
+    if (!run) return reply.code(404).send({ error: 'Generation run not found.' });
+    return { run };
+  });
+
+  // --- The question bank ---------------------------------------------------
+
+  app.get('/api/admin/questions', async (request) => {
+    const q = z
+      .object({
+        status: z.enum(['DRAFT', 'APPROVED', 'REJECTED']).optional(),
+        subject: z.string().optional(),
+        topic: z.string().optional(),
+        difficultyTag: z.string().optional(),
+        cognitiveTag: z.string().optional(),
+        skillTag: z.string().optional(),
+        generationRunId: z.string().uuid().optional(),
+        search: z.string().optional(),
+        page: z.coerce.number().int().min(1).default(1),
+        pageSize: z.coerce.number().int().min(1).max(100).default(20),
+      })
+      .parse(request.query);
+
+    const where = {
+      deletedAt: null,
+      ...(q.status ? { status: q.status } : {}),
+      ...(q.subject ? { subject: q.subject } : {}),
+      ...(q.topic ? { topic: q.topic } : {}),
+      ...(q.difficultyTag ? { difficultyTag: q.difficultyTag } : {}),
+      ...(q.cognitiveTag ? { cognitiveTag: q.cognitiveTag } : {}),
+      ...(q.skillTag ? { skillTags: { has: q.skillTag } } : {}),
+      ...(q.generationRunId ? { generationRunId: q.generationRunId } : {}),
+    };
+
+    const [total, questions] = await Promise.all([
+      prisma.question.count({ where }),
+      prisma.question.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: (q.page - 1) * q.pageSize,
+        take: q.pageSize,
+      }),
+    ]);
+
+    // Text search happens after the fetch: question text lives inside JSONB
+    // blocks, and a proper full-text index is not worth it at this scale.
+    const filtered = q.search
+      ? questions.filter((x) =>
+          blocksToText((x.content as { blocks: never[] }).blocks).toLowerCase().includes(q.search!.toLowerCase()),
+        )
+      : questions;
+
+    return { total, page: q.page, pageSize: q.pageSize, questions: filtered };
+  });
+
+  app.get('/api/admin/questions/:id', async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const question = await prisma.question.findFirst({ where: { id, deletedAt: null } });
+    if (!question) return reply.code(404).send({ error: 'Question not found.' });
+    return { question };
+  });
+
+  /** Approve or reject drafts in bulk - the main review action. */
+  app.post('/api/admin/questions/bulk-status', async (request) => {
+    const body = z
+      .object({
+        ids: z.array(z.string().uuid()).min(1).max(200),
+        status: z.enum(['DRAFT', 'APPROVED', 'REJECTED']),
+        reviewNote: z.string().max(1000).optional(),
+      })
+      .parse(request.body);
+
+    const result = await prisma.question.updateMany({
+      where: { id: { in: body.ids }, deletedAt: null },
+      data: { status: body.status, ...(body.reviewNote ? { reviewNote: body.reviewNote } : {}) },
+    });
+
+    await audit(request.user!.sub, 'question.bulk_status', {
+      entity: 'Question', ip: request.ip, detail: { count: result.count, status: body.status },
+    });
+
+    return { ok: true, updated: result.count };
+  });
+
+  /** Full edit of a draft question, including its diagram blocks. */
+  app.patch('/api/admin/questions/:id', async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const body = z
+      .object({
+        format: z.enum(['MCQ_SINGLE', 'MCQ_MULTI', 'TRUE_FALSE', 'NUMERIC']).optional(),
+        content: z.any().optional(),
+        options: z.array(z.object({ id: z.string().min(1).max(8), blocks: z.array(z.any()) })).optional(),
+        answerKey: z.any().optional(),
+        explanation: z.any().optional(),
+        difficultyTag: z.string().optional(),
+        cognitiveTag: z.string().optional(),
+        skillTags: z.array(z.string()).max(4).optional(),
+        subject: z.string().max(120).optional(),
+        topic: z.string().max(200).nullable().optional(),
+        subtopic: z.string().max(200).nullable().optional(),
+        grade: z.string().max(20).nullable().optional(),
+        estimatedSeconds: z.number().int().min(5).max(1800).optional(),
+        status: z.enum(['DRAFT', 'APPROVED', 'REJECTED']).optional(),
+        reviewNote: z.string().max(1000).nullable().optional(),
+      })
+      .parse(request.body);
+
+    const existing = await prisma.question.findFirst({ where: { id, deletedAt: null } });
+    if (!existing) return reply.code(404).send({ error: 'Question not found.' });
+
+    const format = body.format ?? existing.format;
+    const data: Record<string, unknown> = { isAdminEdited: true };
+
+    try {
+      if (body.content !== undefined) data.content = normalizeContent(body.content);
+      if (body.explanation !== undefined) {
+        data.explanation = { version: 1, blocks: normalizeBlocks(body.explanation.blocks ?? []) };
+      }
+      if (body.options !== undefined) {
+        data.options = body.options.map((o) => ({ id: o.id, blocks: normalizeBlocks(o.blocks) }));
+      }
+      if (body.answerKey !== undefined) data.answerKey = validateAnswerKey(format, body.answerKey);
+    } catch (err) {
+      return reply.code(400).send({ error: err instanceof Error ? err.message : 'Invalid question content.' });
+    }
+
+    // A changed key must still point at an option that exists.
+    const options = (data.options ?? existing.options) as Array<{ id: string }>;
+    const key = (data.answerKey ?? existing.answerKey) as Record<string, unknown>;
+    if (format === 'MCQ_SINGLE' && !options.some((o) => o.id === key.correctOptionId)) {
+      return reply.code(400).send({ error: `The answer key points at option "${key.correctOptionId}", which does not exist.` });
+    }
+    if (format === 'MCQ_MULTI') {
+      const ids = (key.correctOptionIds as string[]) ?? [];
+      const missing = ids.filter((i) => !options.some((o) => o.id === i));
+      if (missing.length) return reply.code(400).send({ error: `The answer key points at option(s) ${missing.join(', ')}, which do not exist.` });
+    }
+
+    for (const field of ['format', 'difficultyTag', 'cognitiveTag', 'skillTags', 'subject', 'topic', 'subtopic', 'grade', 'estimatedSeconds', 'status', 'reviewNote'] as const) {
+      if (body[field] !== undefined) data[field] = body[field];
+    }
+
+    const updated = await prisma.question.update({ where: { id }, data });
+    await audit(request.user!.sub, 'question.update', { entity: 'Question', entityId: id, ip: request.ip });
+
+    return { ok: true, question: updated };
+  });
+
+  app.delete('/api/admin/questions/:id', async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+
+    const used = await prisma.testQuestion.count({ where: { questionId: id } });
+    if (used > 0) {
+      // Soft delete only: a hard delete would orphan historical answers.
+      await prisma.question.update({ where: { id }, data: { deletedAt: new Date(), status: 'REJECTED' } });
+      return { ok: true, mode: 'soft', message: 'This question is used by a test, so it has been retired rather than deleted.' };
+    }
+
+    await prisma.question.delete({ where: { id } });
+    await audit(request.user!.sub, 'question.delete', { entity: 'Question', entityId: id, ip: request.ip });
+    return { ok: true, mode: 'hard' };
+  });
+}

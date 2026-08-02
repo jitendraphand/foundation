@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="light" />
+<title>Foundation — Online Exams</title>
+<meta name="description" content="Enter the Foundation online examination system." />
+<style>
+  :root {
+    --surface: #fcfcfb;
+    --raised: #ffffff;
+    --ink: #0b0b0b;
+    --muted: #52514e;
+    --faint: #8a8983;
+    --line: #e6e5e1;
+    --brand: #2a78d6;
+    --brand-dark: #256abf;
+    color-scheme: light;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body { height: 100%; }
+
+  body {
+    margin: 0;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    background: var(--surface);
+    color: var(--ink);
+    font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .card {
+    width: 100%;
+    max-width: 380px;
+    background: var(--raised);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    box-shadow: 0 1px 2px rgba(11,11,11,.04), 0 1px 3px rgba(11,11,11,.03);
+    padding: 32px 28px;
+    text-align: center;
+  }
+
+  .mark {
+    width: 44px; height: 44px;
+    margin: 0 auto 14px;
+    border-radius: 12px;
+    background: var(--brand);
+    color: #fff;
+    font-weight: 600;
+    font-size: 19px;
+    display: grid;
+    place-items: center;
+  }
+
+  h1 { margin: 0; font-size: 19px; font-weight: 600; letter-spacing: -.01em; }
+  p.sub { margin: 4px 0 24px; font-size: 13px; color: var(--muted); }
+
+  a.enter {
+    display: block;
+    padding: 12px 20px;
+    border-radius: 10px;
+    background: var(--brand);
+    color: #fff;
+    font-size: 15px;
+    font-weight: 500;
+    text-decoration: none;
+    transition: background .15s;
+  }
+  a.enter:hover { background: var(--brand-dark); }
+  a.enter:focus-visible { outline: 2px solid var(--brand); outline-offset: 3px; }
+
+  .note {
+    margin-top: 18px;
+    font-size: 11.5px;
+    color: var(--faint);
+    line-height: 1.5;
+  }
+
+  .warn {
+    display: none;
+    margin-top: 18px;
+    padding: 10px 12px;
+    border: 1px solid #f0d9a0;
+    background: #fdf8ec;
+    border-radius: 10px;
+    font-size: 12px;
+    color: #7a5a12;
+    text-align: left;
+  }
+  .warn code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 11px;
+    background: rgba(0,0,0,.05);
+    padding: 1px 4px;
+    border-radius: 3px;
+  }
+</style>
+</head>
+<body>
+  <main class="card">
+    <div class="mark" aria-hidden="true">F</div>
+    <h1>Foundation</h1>
+    <p class="sub">Online examinations</p>
+
+    <a class="enter" id="enter" href="#">Enter</a>
+
+    <p class="note">
+      You will be taken to the exam server.<br />
+      Sign in with the username your teacher gave you.
+    </p>
+
+    <div class="warn" id="unconfigured">
+      <strong>Not configured yet.</strong><br />
+      Edit <code>docs/config.js</code> in this repository and set
+      <code>SERVER_URL</code> to your instance address, for example
+      <code>https://132-145-10-20.sslip.io</code>.
+    </div>
+  </main>
+
+  <!-- Kept in a separate file so the address can be changed without touching
+       this page. GitHub Pages redeploys within a minute of the commit. -->
+  <script src="./config.js"></script>
+  <script>
+    (function () {
+      var url = (window.FOUNDATION_CONFIG && window.FOUNDATION_CONFIG.SERVER_URL) || '';
+      var button = document.getElementById('enter');
+
+      var configured = url && url.indexOf('REPLACE_ME') === -1;
+
+      if (!configured) {
+        document.getElementById('unconfigured').style.display = 'block';
+        button.setAttribute('aria-disabled', 'true');
+        button.style.opacity = '.5';
+        button.style.pointerEvents = 'none';
+        return;
+      }
+
+      button.href = url;
+      // Opening in the same tab keeps it feeling like one site, and avoids the
+      // pop-up blocker that window.open() would run into.
+      button.target = '_self';
+      button.rel = 'noopener';
+    })();
+  </script>
+</body>
+</html>

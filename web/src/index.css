@@ -1,0 +1,77 @@
+@import 'katex/dist/katex.min.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* The app commits to a single light look, as specified. */
+    color-scheme: light;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-surface text-ink font-sans antialiased;
+    font-size: 15px;
+    line-height: 1.55;
+  }
+
+  h1, h2, h3, h4 {
+    @apply font-semibold tracking-[-0.01em] text-ink;
+  }
+
+  :focus-visible {
+    @apply outline-none ring-2 ring-series-1/50 ring-offset-2 ring-offset-surface rounded;
+  }
+
+  /* Question maths should sit comfortably inside prose, not tower over it. */
+  .katex { font-size: 1.05em; }
+  .katex-display { @apply my-3 overflow-x-auto overflow-y-hidden py-1; }
+}
+
+@layer components {
+  .card {
+    @apply bg-surface-raised border border-line rounded-xl shadow-card;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-medium
+           transition-colors disabled:opacity-50 disabled:cursor-not-allowed select-none;
+  }
+  .btn-primary { @apply btn bg-series-1 text-white hover:bg-[#256abf]; }
+  .btn-secondary { @apply btn bg-surface-sunken text-ink border border-line hover:bg-line/60; }
+  .btn-ghost { @apply btn text-ink-muted hover:bg-surface-sunken; }
+  .btn-danger { @apply btn bg-bad text-white hover:bg-[#a33224]; }
+  .btn-sm { @apply px-3 py-1.5 text-xs; }
+
+  .input {
+    @apply w-full rounded-lg border border-line bg-surface-raised px-3 py-2 text-sm text-ink
+           placeholder:text-ink-faint focus:border-series-1 focus:outline-none
+           focus:ring-2 focus:ring-series-1/20 disabled:bg-surface-sunken;
+  }
+  .label { @apply block text-xs font-medium text-ink-muted mb-1.5; }
+
+  .badge {
+    @apply inline-flex items-center rounded-md px-2 py-0.5 text-[11px] font-medium
+           border border-line bg-surface-sunken text-ink-muted whitespace-nowrap;
+  }
+
+  /* Wide content must scroll inside its own box, never the page body. */
+  .scroll-x { @apply overflow-x-auto -mx-1 px-1; }
+
+  .table-base { @apply w-full text-sm border-collapse; }
+  .table-base th {
+    @apply text-left text-xs font-medium text-ink-muted px-3 py-2 border-b border-line whitespace-nowrap;
+  }
+  .table-base td { @apply px-3 py-2 border-b border-line/70 align-middle; }
+  .table-base tbody tr:hover { @apply bg-surface-sunken/60; }
+}
+
+/* Mermaid renders into a div; keep it from overflowing its card. */
+.mermaid-host svg { max-width: 100%; height: auto; }
