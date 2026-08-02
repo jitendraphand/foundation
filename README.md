@@ -45,6 +45,9 @@ ARM)** instance with `docker compose up -d`.
 - **Release results** — one action per test reveals every student's score at
   once, so nobody learns the answers from a classmate who sat it earlier.
   Reversible. Practice tests are exempt and always show results immediately.
+- **Daily availability windows** — pause a test outside set hours: "only during
+  school hours, Mon–Fri" or "paused between 11pm and 5am". Editable on a live
+  test without disturbing anyone's score.
 - **Analytics** — score distribution, trend over time, per-class and per-subject
   comparison, cohort-wide tag mastery, and a weakest-first student ranking.
 - **Per-student analysis** — mastery grid across all four tag axes, and one
@@ -119,6 +122,33 @@ result endpoint, the dashboard list, the summary tiles, the trend chart and
 the weak-area analysis — there is nowhere to read it out of the network
 traffic. Practice tests are deliberately exempt: they exist for the student to
 learn from, so their results are immediate.
+
+### Availability windows
+
+Separate from `startsAt`/`endsAt`, which bound a test overall, a **daily
+window** controls which hours of the day it may be attempted. Two modes,
+because the two obvious requests are opposites:
+
+| Mode | Meaning | Example |
+|---|---|---|
+| `ALLOW_WINDOW` | Attemptable only inside the window | School hours, 08:00–15:00, Mon–Fri |
+| `BLOCK_WINDOW` | Paused inside the window | 23:00–05:00 every night |
+
+Times are wall-clock **in the school's timezone** (Settings → School), stored
+as minutes from local midnight. The container runs UTC, so evaluating against
+the server clock directly would be out by the offset; `lib/availability.ts`
+does the conversion with `Intl` — no timezone library, no hard-coded offsets.
+A window whose end is before its start wraps past midnight, and the weekday
+filter then applies to the day it *opened*, so "Friday 23:00–05:00" still
+covers early Saturday.
+
+The window governs **starting** a paper. An attempt already under way is left
+alone by default — the clock has been running, so locking someone out mid-paper
+would only cost them marks. A per-test switch, *"Submit papers still in
+progress when the window closes"*, turns that into a hard cut-off instead.
+
+A malformed window (missing an end, or start equal to end) fails **open** — the
+test stays available rather than silently becoming unattemptable.
 
 ### Question types
 

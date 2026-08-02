@@ -5,6 +5,8 @@ import { prisma } from '../db.js';
 import { authenticate, requireFreshPassword } from '../middleware/auth.js';
 import { finalizeAttempt, buildLayout, publicQuestion, remainingMs, resultsAreVisible, sweepExpiredAttempts } from '../services/attempt.js';
 import { findWeakAreas, type Breakdown } from '../lib/analytics.js';
+import { evaluateAvailability } from '../lib/availability.js';
+import { getSchoolTimezone } from '../services/settings.js';
 import { validateResponse } from '../lib/grading.js';
 
 export default async function studentRoutes(app: FastifyInstance) {
@@ -54,6 +56,7 @@ export default async function studentRoutes(app: FastifyInstance) {
         id: true, publicId: true, title: true, description: true, kind: true, subject: true,
         durationMinutes: true, marksPerQuestion: true, negativeMarks: true,
         maxAttempts: true, startsAt: true, endsAt: true, passPercentage: true,
+        availabilityMode: true, windowStartMinute: true, windowEndMinute: true, windowDays: true,
         _count: { select: { questions: true } },
         attempts: {
           where: { userId },
@@ -63,9 +66,12 @@ export default async function studentRoutes(app: FastifyInstance) {
       },
     });
 
+    const timezone = await getSchoolTimezone();
+
     const available = tests.map((t) => {
       const used = t.attempts.filter((a) => a.status !== 'IN_PROGRESS').length;
       const inProgress = t.attempts.find((a) => a.status === 'IN_PROGRESS') ?? null;
+      const window = evaluateAvailability(t, timezone, now);
       return {
         id: t.id,
         publicId: t.publicId,
@@ -82,7 +88,12 @@ export default async function studentRoutes(app: FastifyInstance) {
         endsAt: t.endsAt,
         attemptsUsed: used,
         maxAttempts: t.maxAttempts,
-        canAttempt: used < t.maxAttempts && t._count.questions > 0,
+        // A closed window blocks starting, but never hides a paper already
+        // under way - the student can always go back and finish it.
+        canAttempt: used < t.maxAttempts && t._count.questions > 0 && window.open,
+        isOpenNow: window.open,
+        closedReason: window.reason,
+        windowLabel: window.windowLabel,
         inProgressAttemptId: inProgress?.id ?? null,
         lastPercentage: t.attempts.find((a) => a.status !== 'IN_PROGRESS')?.percentage ?? null,
       };
@@ -270,6 +281,10 @@ export default async function studentRoutes(app: FastifyInstance) {
     if (test.endsAt && test.endsAt < now) return reply.code(409).send({ error: 'That test has closed.' });
     if (test.questions.length === 0) return reply.code(409).send({ error: 'That test has no questions yet.' });
 
+    // The daily window governs starting a paper. An attempt already in
+    // progress is handled below and is allowed to continue.
+    const window = evaluateAvailability(test, await getSchoolTimezone(), now);
+
     const existing = await prisma.attempt.findFirst({
       where: { testId, userId, status: 'IN_PROGRESS' },
       orderBy: { attemptNumber: 'desc' },
@@ -281,7 +296,18 @@ export default async function studentRoutes(app: FastifyInstance) {
         await finalizeAttempt(existing.id, true);
         return reply.code(409).send({ error: 'Your time for that attempt had already run out. It has been submitted.', attemptId: existing.id });
       }
+      // Deliberately not window-checked: the clock has been running the whole
+      // time, so locking them out mid-paper would only cost them marks.
       return { attemptId: existing.id, resumed: true };
+    }
+
+    // The daily window governs starting a new paper.
+    if (!window.open) {
+      return reply.code(409).send({
+        error: window.reason ?? 'That test is not available right now.',
+        closedByWindow: true,
+        windowLabel: window.windowLabel,
+      });
     }
 
     const finished = await prisma.attempt.count({

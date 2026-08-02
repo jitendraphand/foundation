@@ -91,6 +91,13 @@ enum TagAxis {
   SKILL
 }
 
+/// How a daily availability window is interpreted. See lib/availability.ts.
+enum AvailabilityMode {
+  ALWAYS // no daily restriction
+  ALLOW_WINDOW // attemptable only inside the window, e.g. school hours
+  BLOCK_WINDOW // paused inside the window, e.g. 11pm to 5am
+}
+
 // --- People ----------------------------------------------------------------
 
 model User {
@@ -502,8 +509,24 @@ model Test {
   resultsReleasedAt DateTime?
   releasedById      String?
 
+  // Absolute open and close instants for the test as a whole.
   startsAt DateTime?
   endsAt   DateTime?
+
+  // --- Daily availability window ------------------------------------------
+  // Independent of startsAt/endsAt: those bound the test overall, this
+  // controls which hours of the day it may be attempted. Wall-clock times in
+  // the school's timezone (Setting "school.timezone"), stored as minutes from
+  // local midnight so a window survives a timezone change intact.
+  availabilityMode  AvailabilityMode @default(ALWAYS)
+  /// 0..1439. An end earlier than the start wraps past midnight.
+  windowStartMinute Int?
+  windowEndMinute   Int?
+  /// 0 = Sunday .. 6 = Saturday. Empty means every day.
+  windowDays        Int[]            @default([])
+  /// When the window closes, submit any attempt still in progress. Off by
+  /// default: a student who started in time is normally allowed to finish.
+  autoSubmitOnClose Boolean          @default(false)
 
   createdById String
   createdBy   User   @relation("TestCreatedBy", fields: [createdById], references: [id])

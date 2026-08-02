@@ -2,6 +2,8 @@ import { prisma } from '../db.js';
 import { gradeAnswer, marksFor, round2 } from '../lib/grading.js';
 import { buildBreakdown, type GradedRow } from '../lib/analytics.js';
 import type { Attempt, Question, Test, TestQuestion } from '@prisma/client';
+import { evaluateAvailability } from '../lib/availability.js';
+import { getSchoolTimezone } from './settings.js';
 
 /**
  * Deterministic shuffle from a seed, so the same attempt always produces the
@@ -231,14 +233,44 @@ export async function finalizeAttempt(attemptId: string, auto: boolean) {
  * so a result never sits un-graded because the browser was closed.
  */
 export async function sweepExpiredAttempts(): Promise<number> {
+  const now = new Date();
+
   const expired = await prisma.attempt.findMany({
-    where: { status: 'IN_PROGRESS', expiresAt: { lt: new Date() } },
+    where: { status: 'IN_PROGRESS', expiresAt: { lt: now } },
     select: { id: true },
     take: 200,
   });
 
+  const toClose = new Set(expired.map((a) => a.id));
+
+  // Tests that opt in to cutting papers off when their daily window shuts.
+  // Off by default: a student who started in time normally finishes.
+  const windowed = await prisma.attempt.findMany({
+    where: {
+      status: 'IN_PROGRESS',
+      expiresAt: { gte: now },
+      test: { autoSubmitOnClose: true, availabilityMode: { not: 'ALWAYS' } },
+    },
+    select: {
+      id: true,
+      test: {
+        select: {
+          availabilityMode: true, windowStartMinute: true, windowEndMinute: true, windowDays: true,
+        },
+      },
+    },
+    take: 200,
+  });
+
+  if (windowed.length > 0) {
+    const timezone = await getSchoolTimezone();
+    for (const attempt of windowed) {
+      if (!evaluateAvailability(attempt.test, timezone, now).open) toClose.add(attempt.id);
+    }
+  }
+
   let done = 0;
-  for (const { id } of expired) {
+  for (const id of toClose) {
     try {
       await finalizeAttempt(id, true);
       done++;

@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom';
 import { api, ApiError } from '../../lib/api';
 import { Alert, Badge, Card, EmptyState, PageLoader, Tabs, formatDate, humanizeTag } from '../../components/ui';
 import { BarChart, DataTable, StatTile } from '../../components/charts';
+import { WindowEditor, describeWindowValue, type WindowPreset, type WindowValue } from '../../components/WindowEditor';
 import { ContentRenderer } from '../../renderers/BlockRenderer';
 import type { BankQuestion } from '../../lib/types';
 
@@ -23,6 +24,11 @@ interface TestDetail {
   negativeMarks: number;
   passPercentage: number;
   showAnswersAfter: boolean;
+  availabilityMode: 'ALWAYS' | 'ALLOW_WINDOW' | 'BLOCK_WINDOW';
+  windowStartMinute: number | null;
+  windowEndMinute: number | null;
+  windowDays: number[];
+  autoSubmitOnClose: boolean;
   resultsReleased: boolean;
   resultsReleasedAt: string | null;
   questions: Array<{ id: string; position: number; marks: number; question: BankQuestion }>;
@@ -94,6 +100,8 @@ export default function AdminTestBuilder() {
       </div>
 
       {notice && <Alert tone="success" onDismiss={() => setNotice(null)}>{notice}</Alert>}
+
+      <AvailabilityCard test={test} onSaved={async (msg) => { setNotice(msg); await load(); }} onError={setError} />
 
       {/* Releasing is the action that lets students see their score at all. */}
       {!isPractice && test._count.attempts > 0 && (
@@ -417,5 +425,111 @@ function TestResults({ testId }: { testId: string }) {
         </div>
       </Card>
     </div>
+  );
+}
+
+// --- Daily availability ----------------------------------------------------
+
+/**
+ * Editing when a live test may be attempted, e.g. pausing it overnight. This
+ * stays editable after students have started, unlike the marking scheme:
+ * changing the hours does not invalidate anybody's score.
+ */
+function AvailabilityCard({
+  test, onSaved, onError,
+}: {
+  test: TestDetail;
+  onSaved: (message: string) => Promise<void>;
+  onError: (message: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [tz, setTz] = useState<{ timezone: string; localTimeNow: string; windowPresets: WindowPreset[] } | null>(null);
+  const [value, setValue] = useState<WindowValue>({
+    availabilityMode: test.availabilityMode,
+    windowStartMinute: test.windowStartMinute,
+    windowEndMinute: test.windowEndMinute,
+    windowDays: test.windowDays,
+    autoSubmitOnClose: test.autoSubmitOnClose,
+  });
+
+  useEffect(() => {
+    api.get<{ timezone: string; localTimeNow: string; windowPresets: WindowPreset[] }>('/api/admin/timezone')
+      .then(setTz)
+      .catch(() => undefined);
+  }, []);
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      await api.patch(`/api/admin/tests/${test.id}`, value);
+      setEditing(false);
+      await onSaved('Availability updated.');
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : 'Could not save the availability window.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-sm font-semibold">Availability</h2>
+          <p className="text-xs text-ink-muted mt-1">
+            {describeWindowValue(value)}
+            {tz?.timezone && value.availabilityMode !== 'ALWAYS' && (
+              <span className="text-ink-faint"> ({tz.timezone}{tz.localTimeNow ? `, now ${tz.localTimeNow}` : ''})</span>
+            )}
+          </p>
+          {value.availabilityMode !== 'ALWAYS' && (
+            <p className="text-[11px] text-ink-faint mt-1">
+              {value.autoSubmitOnClose
+                ? 'Papers still in progress are submitted when the window closes.'
+                : 'A student who started in time may finish after the window closes.'}
+            </p>
+          )}
+        </div>
+        {!editing && (
+          <button type="button" className="btn-secondary btn-sm shrink-0" onClick={() => setEditing(true)}>
+            Change
+          </button>
+        )}
+      </div>
+
+      {editing && (
+        <div className="mt-4 pt-4 border-t border-line space-y-3">
+          <WindowEditor
+            value={value}
+            onChange={setValue}
+            presets={tz?.windowPresets ?? []}
+            timezone={tz?.timezone}
+            localTimeNow={tz?.localTimeNow}
+          />
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              onClick={() => {
+                setValue({
+                  availabilityMode: test.availabilityMode,
+                  windowStartMinute: test.windowStartMinute,
+                  windowEndMinute: test.windowEndMinute,
+                  windowDays: test.windowDays,
+                  autoSubmitOnClose: test.autoSubmitOnClose,
+                });
+                setEditing(false);
+              }}
+            >
+              Cancel
+            </button>
+            <button type="button" className="btn-primary btn-sm" onClick={save} disabled={busy}>
+              {busy ? 'Saving…' : 'Save availability'}
+            </button>
+          </div>
+        </div>
+      )}
+    </Card>
   );
 }

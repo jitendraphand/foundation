@@ -3,10 +3,10 @@ import { api, ApiError } from '../../lib/api';
 import { Alert, Badge, Card, EmptyState, Field, Modal, PageLoader, Spinner, Tabs, formatDate } from '../../components/ui';
 import type { Tag } from '../../lib/types';
 
-type SettingsTab = 'providers' | 'prompts' | 'tags' | 'classes' | 'audit';
+type SettingsTab = 'school' | 'providers' | 'prompts' | 'tags' | 'classes' | 'audit';
 
 export default function AdminSettings() {
-  const [tab, setTab] = useState<SettingsTab>('providers');
+  const [tab, setTab] = useState<SettingsTab>('school');
 
   return (
     <div className="space-y-5">
@@ -14,6 +14,7 @@ export default function AdminSettings() {
 
       <Tabs
         tabs={[
+          { id: 'school', label: 'School' },
           { id: 'providers', label: 'LLM providers' },
           { id: 'prompts', label: 'Prompts' },
           { id: 'tags', label: 'Tags' },
@@ -24,11 +25,103 @@ export default function AdminSettings() {
         onChange={setTab}
       />
 
+      {tab === 'school' && <SchoolSettings />}
       {tab === 'providers' && <Providers />}
       {tab === 'prompts' && <Prompts />}
       {tab === 'tags' && <Tags />}
       {tab === 'classes' && <Classes />}
       {tab === 'audit' && <AuditLog />}
+    </div>
+  );
+}
+
+// --- School ----------------------------------------------------------------
+
+/**
+ * The school's timezone. Every daily availability window on every test is
+ * wall-clock time in this zone; the server itself runs UTC, so getting this
+ * wrong shifts every window by the offset.
+ */
+function SchoolSettings() {
+  const [data, setData] = useState<{ timezone: string; common: string[]; localTimeNow: string; serverTimeUtc: string } | null>(null);
+  const [timezone, setTimezone] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const res = await api.get<{ timezone: string; common: string[]; localTimeNow: string; serverTimeUtc: string }>('/api/admin/timezone');
+      setData(res);
+      setTimezone(res.timezone);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not load the school settings.');
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api.put<{ message: string }>('/api/admin/timezone', { timezone: timezone.trim() });
+      setNotice(res.message);
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not save the timezone.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (!data) return <PageLoader label="Loading" />;
+
+  return (
+    <div className="space-y-4">
+      {error && <Alert tone="error" onDismiss={() => setError(null)}>{error}</Alert>}
+      {notice && <Alert tone="success" onDismiss={() => setNotice(null)}>{notice}</Alert>}
+
+      <Card title="Timezone">
+        <p className="text-xs text-ink-muted mb-3">
+          Used for every daily availability window - &ldquo;only during school hours&rdquo;, &ldquo;paused overnight&rdquo;
+          and so on. The server runs in UTC, so this is what makes 8am mean your 8am.
+        </p>
+
+        <div className="grid sm:grid-cols-2 gap-4">
+          <Field label="School timezone">
+            <input
+              className="input font-mono text-xs"
+              value={timezone}
+              onChange={(e) => setTimezone(e.target.value)}
+              list="tz-list"
+              placeholder="Asia/Kolkata"
+            />
+            <datalist id="tz-list">
+              {data.common.map((tz) => <option key={tz} value={tz} />)}
+            </datalist>
+          </Field>
+
+          <div>
+            <span className="label">Right now</span>
+            <p className="text-sm">
+              <span className="font-medium">{data.localTimeNow}</span>
+              <span className="text-ink-muted"> in {data.timezone}</span>
+            </p>
+            <p className="text-[11px] text-ink-faint mt-0.5">
+              Server clock: {new Date(data.serverTimeUtc).toISOString().slice(11, 16)} UTC
+            </p>
+          </div>
+        </div>
+
+        <div className="flex justify-end mt-3">
+          <button type="button" className="btn-primary btn-sm" onClick={save} disabled={busy || timezone.trim() === data.timezone}>
+            {busy ? <Spinner label="Saving" /> : 'Save timezone'}
+          </button>
+        </div>
+      </Card>
     </div>
   );
 }

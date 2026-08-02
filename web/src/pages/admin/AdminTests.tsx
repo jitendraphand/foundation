@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, ApiError } from '../../lib/api';
 import { Alert, Badge, Card, EmptyState, Field, Modal, PageLoader, formatDate } from '../../components/ui';
+import { WindowEditor, describeWindowValue, type WindowPreset, type WindowValue } from '../../components/WindowEditor';
 
 interface TestRow {
   id: string;
@@ -18,6 +19,11 @@ interface TestRow {
   startsAt: string | null;
   endsAt: string | null;
   createdAt: string;
+  availabilityMode: 'ALWAYS' | 'ALLOW_WINDOW' | 'BLOCK_WINDOW';
+  windowStartMinute: number | null;
+  windowEndMinute: number | null;
+  windowDays: number[];
+  autoSubmitOnClose: boolean;
   resultsReleased: boolean;
   resultsReleasedAt: string | null;
   _count: { questions: number; attempts: number };
@@ -113,6 +119,7 @@ export default function AdminTests() {
                   <th className="text-center">Questions</th>
                   <th className="text-center">Attempts</th>
                   <th>Status</th>
+                  <th>Available</th>
                   <th>Results</th>
                   <th>Created</th>
                   <th />
@@ -143,6 +150,17 @@ export default function AdminTests() {
                       <Badge tone={test.status === 'PUBLISHED' ? 'good' : test.status === 'CLOSED' ? 'neutral' : 'warn'}>
                         {test.status.toLowerCase()}
                       </Badge>
+                    </td>
+                    <td className="text-xs text-ink-muted max-w-[190px]">
+                      {test.availabilityMode === 'ALWAYS'
+                        ? 'any time'
+                        : describeWindowValue({
+                            availabilityMode: test.availabilityMode,
+                            windowStartMinute: test.windowStartMinute,
+                            windowEndMinute: test.windowEndMinute,
+                            windowDays: test.windowDays,
+                            autoSubmitOnClose: test.autoSubmitOnClose,
+                          })}
                     </td>
                     <td>
                       {test.kind === 'PRACTICE' ? (
@@ -209,8 +227,24 @@ function CreateTestModal({ onClose, onCreated }: { onClose: () => void; onCreate
     targetGrades: '',
     targetDivisions: '',
   });
+  const [availability, setAvailability] = useState<WindowValue>({
+    availabilityMode: 'ALWAYS',
+    windowStartMinute: null,
+    windowEndMinute: null,
+    windowDays: [],
+    autoSubmitOnClose: false,
+  });
+  const [tz, setTz] = useState<{ timezone: string; localTimeNow: string; windowPresets: WindowPreset[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    // Only an admin with settings.manage can read this; without it the editor
+    // still works, it just cannot name the timezone.
+    api.get<{ timezone: string; localTimeNow: string; windowPresets: WindowPreset[] }>('/api/admin/timezone')
+      .then(setTz)
+      .catch(() => undefined);
+  }, []);
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -232,6 +266,7 @@ function CreateTestModal({ onClose, onCreated }: { onClose: () => void; onCreate
         showAnswersAfter: form.showAnswersAfter,
         targetGrades: form.targetGrades.split(',').map((s) => s.trim()).filter(Boolean),
         targetDivisions: form.targetDivisions.split(',').map((s) => s.trim()).filter(Boolean),
+        ...availability,
       });
       onCreated();
       onClose();
@@ -283,7 +318,17 @@ function CreateTestModal({ onClose, onCreated }: { onClose: () => void; onCreate
           </Field>
         </div>
 
-        <div className="grid grid-cols-2 gap-2 text-sm">
+        <div className="pt-3 border-t border-line">
+          <WindowEditor
+            value={availability}
+            onChange={setAvailability}
+            presets={tz?.windowPresets ?? []}
+            timezone={tz?.timezone}
+            localTimeNow={tz?.localTimeNow}
+          />
+        </div>
+
+        <div className="grid grid-cols-2 gap-2 text-sm pt-3 border-t border-line">
           {([
             ['shuffleQuestions', 'Shuffle question order'],
             ['shuffleOptions', 'Shuffle option order'],

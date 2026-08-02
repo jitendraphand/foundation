@@ -5,6 +5,8 @@ import { audit } from '../../middleware/auth.js';
 import { encryptSecret, decryptSecret, keyHint } from '../../lib/crypto.js';
 import { PROVIDERS, pingProvider } from '../../llm/providers.js';
 import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_TEMPLATE } from '../../llm/prompts.js';
+import { COMMON_TIMEZONES, WINDOW_PRESETS, isValidTimezone, zonedNow, formatMinute } from '../../lib/availability.js';
+import { getSchoolTimezone, setSchoolTimezone } from '../../services/settings.js';
 
 export default async function adminSettingsRoutes(app: FastifyInstance) {
   // --- LLM API credentials -------------------------------------------------
@@ -297,6 +299,47 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     await prisma.curriculumNode.update({ where: { id }, data: { isActive: false } });
     return { ok: true };
+  });
+
+  // --- School timezone -----------------------------------------------------
+
+  /**
+   * Every daily availability window is wall-clock time in this zone. The
+   * container runs UTC, so without this an "8am" window would fire at the
+   * wrong hour.
+   */
+  app.get('/api/admin/timezone', async () => {
+    const timezone = await getSchoolTimezone();
+    const now = zonedNow(timezone);
+    return {
+      timezone,
+      common: COMMON_TIMEZONES,
+      windowPresets: WINDOW_PRESETS,
+      // Shown back so the admin can confirm at a glance that it is right.
+      localTimeNow: formatMinute(now.minuteOfDay),
+      serverTimeUtc: new Date().toISOString(),
+    };
+  });
+
+  app.put('/api/admin/timezone', async (request, reply) => {
+    const { timezone } = z.object({ timezone: z.string().min(1).max(64) }).parse(request.body);
+
+    if (!isValidTimezone(timezone)) {
+      return reply.code(400).send({
+        error: `"${timezone}" is not a recognised timezone. Use an IANA name such as Asia/Kolkata.`,
+      });
+    }
+
+    await setSchoolTimezone(timezone);
+    await audit(request.user!.sub, 'settings.timezone', { ip: request.ip, detail: { timezone } });
+
+    const now = zonedNow(timezone);
+    return {
+      ok: true,
+      timezone,
+      localTimeNow: formatMinute(now.minuteOfDay),
+      message: `Timezone set to ${timezone}. It is currently ${formatMinute(now.minuteOfDay)} there.`,
+    };
   });
 
   // --- Audit log -----------------------------------------------------------

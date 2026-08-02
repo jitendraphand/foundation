@@ -170,6 +170,7 @@ function LiveTests({ tests }: { tests: LiveTest[] }) {
                   <h3 className="text-sm font-medium truncate">{test.title}</h3>
                   {test.kind === 'PRACTICE' && <Badge tone="info">Practice</Badge>}
                   {test.inProgressAttemptId && <Badge tone="warn">In progress</Badge>}
+                  {!test.isOpenNow && !test.inProgressAttemptId && <Badge tone="warn">Paused</Badge>}
                 </div>
                 <p className="text-xs text-ink-muted mt-1">
                   {test.subject} · {test.questionCount} question{test.questionCount === 1 ? '' : 's'} ·{' '}
@@ -178,6 +179,12 @@ function LiveTests({ tests }: { tests: LiveTest[] }) {
                 </p>
                 {test.endsAt && (
                   <p className="text-[11px] text-ink-faint mt-0.5">Closes {formatDate(test.endsAt, true)}</p>
+                )}
+                {!test.isOpenNow && test.closedReason && (
+                  <p className="text-[11px] text-warn mt-1">{test.closedReason}</p>
+                )}
+                {test.isOpenNow && test.windowLabel && (
+                  <p className="text-[11px] text-ink-faint mt-0.5">Available {test.windowLabel}</p>
                 )}
               </div>
 
@@ -193,7 +200,13 @@ function LiveTests({ tests }: { tests: LiveTest[] }) {
                   disabled={(!test.canAttempt && !test.inProgressAttemptId) || starting === test.id}
                   onClick={() => start(test)}
                 >
-                  {starting === test.id ? 'Opening…' : test.inProgressAttemptId ? 'Resume test' : 'Attempt test'}
+                  {starting === test.id
+                    ? 'Opening…'
+                    : test.inProgressAttemptId
+                      ? 'Resume test'
+                      : !test.isOpenNow
+                        ? 'Paused'
+                        : 'Attempt test'}
                 </button>
               </div>
             </li>

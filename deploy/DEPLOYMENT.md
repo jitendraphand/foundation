@@ -203,6 +203,22 @@ they must change it at first sign-in.
 Grant **Manage administrators** sparingly — a holder can change anybody's
 privileges, including yours. The system will not let you remove the last one.
 
+### Pausing a test outside certain hours
+
+Set the school timezone once under **Admin → Settings → School** — every window
+is wall-clock time in that zone, and the server itself runs UTC.
+
+Then on any test, **Availability** offers:
+
+- *Any time of day* (default)
+- *Only during set hours* — e.g. school hours, Mon–Fri 8am–3pm
+- *Paused during set hours* — e.g. 11pm–5am every night
+
+Presets cover the common cases. A window can be changed on a live test at any
+time; it does not affect anybody's marks. By default a student already writing
+may finish; tick *"Submit papers still in progress when the window closes"* if
+nobody should be writing outside those hours at all.
+
 ### Releasing results after a test
 
 Students never see a score at submit time. Once the class has finished, open

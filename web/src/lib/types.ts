@@ -232,6 +232,10 @@ export interface LiveTest {
   attemptsUsed: number;
   maxAttempts: number;
   canAttempt: boolean;
+  /** False while a daily availability window has the test paused. */
+  isOpenNow: boolean;
+  closedReason: string | null;
+  windowLabel: string | null;
   inProgressAttemptId: string | null;
   lastPercentage: number | null;
 }

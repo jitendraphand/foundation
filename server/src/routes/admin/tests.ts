@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { prisma } from '../../db.js';
 import { audit, requirePermission } from '../../middleware/auth.js';
 
-const testSchema = z.object({
+const testFields = z.object({
   title: z.string().trim().min(1).max(200),
   description: z.string().max(2000).optional().nullable(),
   kind: z.enum(['REGULAR', 'PRACTICE']).default('REGULAR'),
@@ -22,7 +22,31 @@ const testSchema = z.object({
   showAnswersAfter: z.boolean().default(true),
   startsAt: z.string().datetime().optional().nullable(),
   endsAt: z.string().datetime().optional().nullable(),
+
+  // Daily availability window. Minutes from local midnight in the school's
+  // timezone; an end before the start wraps past midnight.
+  availabilityMode: z.enum(['ALWAYS', 'ALLOW_WINDOW', 'BLOCK_WINDOW']).default('ALWAYS'),
+  windowStartMinute: z.number().int().min(0).max(1439).optional().nullable(),
+  windowEndMinute: z.number().int().min(0).max(1439).optional().nullable(),
+  windowDays: z.array(z.number().int().min(0).max(6)).max(7).default([]),
+  autoSubmitOnClose: z.boolean().default(false),
 });
+
+/** A window is only meaningful with both ends set, and they must differ. */
+const windowIsComplete = (t: {
+  availabilityMode?: string;
+  windowStartMinute?: number | null;
+  windowEndMinute?: number | null;
+}) =>
+  !t.availabilityMode ||
+  t.availabilityMode === 'ALWAYS' ||
+  (t.windowStartMinute !== null && t.windowStartMinute !== undefined &&
+   t.windowEndMinute !== null && t.windowEndMinute !== undefined &&
+   t.windowStartMinute !== t.windowEndMinute);
+
+const WINDOW_ERROR = 'A daily window needs a start time and an end time, and they must be different.';
+
+const testSchema = testFields.refine(windowIsComplete, { message: WINDOW_ERROR });
 
 export default async function adminTestRoutes(app: FastifyInstance) {
   app.get('/api/admin/tests', async (request) => {
@@ -100,7 +124,18 @@ export default async function adminTestRoutes(app: FastifyInstance) {
 
   app.patch('/api/admin/tests/:id', { preHandler: requirePermission('tests.manage') }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
-    const body = testSchema.partial().parse(request.body);
+    const body = testFields.partial().parse(request.body);
+
+    // Merged against the stored row, because a PATCH may set only the mode.
+    const existingForWindow = await prisma.test.findFirst({ where: { id, deletedAt: null } });
+    if (!existingForWindow) return reply.code(404).send({ error: 'Test not found.' });
+    if (!windowIsComplete({
+      availabilityMode: body.availabilityMode ?? existingForWindow.availabilityMode,
+      windowStartMinute: body.windowStartMinute ?? existingForWindow.windowStartMinute,
+      windowEndMinute: body.windowEndMinute ?? existingForWindow.windowEndMinute,
+    })) {
+      return reply.code(400).send({ error: WINDOW_ERROR });
+    }
 
     const existing = await prisma.test.findFirst({ where: { id, deletedAt: null }, include: { _count: { select: { attempts: true } } } });
     if (!existing) return reply.code(404).send({ error: 'Test not found.' });

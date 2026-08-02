@@ -33,6 +33,9 @@ CREATE TYPE "GenerationStatus" AS ENUM ('PENDING', 'RUNNING', 'SUCCEEDED', 'FAIL
 -- CreateEnum
 CREATE TYPE "TagAxis" AS ENUM ('DIFFICULTY', 'COGNITIVE', 'SKILL');
 
+-- CreateEnum
+CREATE TYPE "AvailabilityMode" AS ENUM ('ALWAYS', 'ALLOW_WINDOW', 'BLOCK_WINDOW');
+
 -- CreateTable
 CREATE TABLE "User" (
     "id" TEXT NOT NULL,
@@ -253,6 +256,11 @@ CREATE TABLE "Test" (
     "releasedById" TEXT,
     "startsAt" TIMESTAMP(3),
     "endsAt" TIMESTAMP(3),
+    "availabilityMode" "AvailabilityMode" NOT NULL DEFAULT 'ALWAYS',
+    "windowStartMinute" INTEGER,
+    "windowEndMinute" INTEGER,
+    "windowDays" INTEGER[] DEFAULT ARRAY[]::INTEGER[],
+    "autoSubmitOnClose" BOOLEAN NOT NULL DEFAULT false,
     "createdById" TEXT NOT NULL,
     "publishedAt" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
