@@ -159,6 +159,15 @@ export interface WeakArea {
   priority: number;
 }
 
+export interface AwaitingResult {
+  attemptId: string;
+  testId: string;
+  testPublicId: string;
+  title: string;
+  subject: string;
+  submittedAt: string | null;
+}
+
 export interface ResultRow {
   attemptId: string;
   testId: string;

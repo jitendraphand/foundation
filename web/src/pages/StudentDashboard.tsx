@@ -3,7 +3,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { api, ApiError } from '../lib/api';
 import { Alert, Badge, Card, EmptyState, PageLoader, Tabs, formatDate, humanizeTag } from '../components/ui';
 import { AccuracyMeter, BarChart, DataTable, LineChart, StatTile } from '../components/charts';
-import type { LiveTest, ResultRow, WeakArea } from '../lib/types';
+import type { AwaitingResult, LiveTest, ResultRow, WeakArea } from '../lib/types';
 
 interface Summary {
   count: number;
@@ -17,6 +17,7 @@ interface DashboardData {
   liveTests: LiveTest[];
   results: { regular: ResultRow[]; practice: ResultRow[] };
   summary: { regular: Summary; practice: Summary };
+  awaitingResults: AwaitingResult[];
   weakAreas: WeakArea[];
 }
 
@@ -55,6 +56,8 @@ export default function StudentDashboard() {
       </div>
 
       <LiveTests tests={data.liveTests} />
+
+      {data.awaitingResults.length > 0 && <AwaitingResults items={data.awaitingResults} />}
 
       {/* A single number is a stat tile, not a one-bar chart. */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -99,6 +102,33 @@ export default function StudentDashboard() {
 
       {data.weakAreas.length > 0 && <WeakAreas areas={data.weakAreas} />}
     </div>
+  );
+}
+
+// --- Submitted, waiting on the teacher -------------------------------------
+
+function AwaitingResults({ items }: { items: AwaitingResult[] }) {
+  return (
+    <Card title="Submitted - awaiting results" padded={false}>
+      <p className="px-4 pt-3 text-xs text-ink-muted">
+        You have finished {items.length === 1 ? 'this paper' : 'these papers'}. Your teacher releases the results once
+        everyone in the class has sat the test.
+      </p>
+      <ul className="divide-y divide-line mt-2">
+        {items.map((item) => (
+          <li key={item.attemptId} className="px-4 py-3 flex flex-wrap items-center justify-between gap-2">
+            <span className="min-w-0">
+              <span className="text-sm font-medium">{item.title}</span>
+              <span className="block text-xs text-ink-muted mt-0.5">
+                <span className="font-mono">{item.testPublicId}</span> · {item.subject} · submitted{' '}
+                {formatDate(item.submittedAt, true)}
+              </span>
+            </span>
+            <Badge tone="warn">Results not released yet</Badge>
+          </li>
+        ))}
+      </ul>
+    </Card>
   );
 }
 

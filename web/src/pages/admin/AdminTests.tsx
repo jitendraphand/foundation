@@ -18,6 +18,8 @@ interface TestRow {
   startsAt: string | null;
   endsAt: string | null;
   createdAt: string;
+  resultsReleased: boolean;
+  resultsReleasedAt: string | null;
   _count: { questions: number; attempts: number };
   targetUser: { id: string; username: string; firstName: string; lastName: string } | null;
 }
@@ -26,6 +28,7 @@ export default function AdminTests() {
   const [tests, setTests] = useState<TestRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [kind, setKind] = useState<'REGULAR' | 'PRACTICE' | ''>('');
   const [creating, setCreating] = useState(false);
 
@@ -57,6 +60,17 @@ export default function AdminTests() {
     }
   };
 
+  const setReleased = async (id: string, released: boolean) => {
+    setError(null);
+    try {
+      const res = await api.post<{ message: string }>(`/api/admin/tests/${id}/release`, { released });
+      setNotice(res.message);
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not change the release state.');
+    }
+  };
+
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -74,6 +88,7 @@ export default function AdminTests() {
       </div>
 
       {error && <Alert tone="error" onDismiss={() => setError(null)}>{error}</Alert>}
+      {notice && <Alert tone="success" onDismiss={() => setNotice(null)}>{notice}</Alert>}
 
       {loading ? (
         <PageLoader label="Loading tests" />
@@ -98,6 +113,7 @@ export default function AdminTests() {
                   <th className="text-center">Questions</th>
                   <th className="text-center">Attempts</th>
                   <th>Status</th>
+                  <th>Results</th>
                   <th>Created</th>
                   <th />
                 </tr>
@@ -128,6 +144,15 @@ export default function AdminTests() {
                         {test.status.toLowerCase()}
                       </Badge>
                     </td>
+                    <td>
+                      {test.kind === 'PRACTICE' ? (
+                        <span className="text-xs text-ink-faint">immediate</span>
+                      ) : test.resultsReleased ? (
+                        <Badge tone="good">released</Badge>
+                      ) : (
+                        <Badge tone="warn">held</Badge>
+                      )}
+                    </td>
                     <td className="text-xs text-ink-muted whitespace-nowrap">{formatDate(test.createdAt)}</td>
                     <td className="text-right whitespace-nowrap">
                       {test.status === 'DRAFT' && (
@@ -143,6 +168,15 @@ export default function AdminTests() {
                       {test.status === 'CLOSED' && (
                         <button type="button" className="btn-ghost btn-sm" onClick={() => setStatus(test.id, 'PUBLISHED')}>
                           Reopen
+                        </button>
+                      )}
+                      {test.kind !== 'PRACTICE' && test._count.attempts > 0 && (
+                        <button
+                          type="button"
+                          className={test.resultsReleased ? 'btn-ghost btn-sm' : 'btn-secondary btn-sm'}
+                          onClick={() => setReleased(test.id, !test.resultsReleased)}
+                        >
+                          {test.resultsReleased ? 'Withdraw results' : 'Release results'}
                         </button>
                       )}
                     </td>
@@ -171,7 +205,6 @@ function CreateTestModal({ onClose, onCreated }: { onClose: () => void; onCreate
     maxAttempts: 1,
     shuffleQuestions: true,
     shuffleOptions: true,
-    showResultsAfter: true,
     showAnswersAfter: true,
     targetGrades: '',
     targetDivisions: '',
@@ -196,7 +229,6 @@ function CreateTestModal({ onClose, onCreated }: { onClose: () => void; onCreate
         maxAttempts: form.maxAttempts,
         shuffleQuestions: form.shuffleQuestions,
         shuffleOptions: form.shuffleOptions,
-        showResultsAfter: form.showResultsAfter,
         showAnswersAfter: form.showAnswersAfter,
         targetGrades: form.targetGrades.split(',').map((s) => s.trim()).filter(Boolean),
         targetDivisions: form.targetDivisions.split(',').map((s) => s.trim()).filter(Boolean),
@@ -255,8 +287,7 @@ function CreateTestModal({ onClose, onCreated }: { onClose: () => void; onCreate
           {([
             ['shuffleQuestions', 'Shuffle question order'],
             ['shuffleOptions', 'Shuffle option order'],
-            ['showResultsAfter', 'Show score on submit'],
-            ['showAnswersAfter', 'Show correct answers'],
+            ['showAnswersAfter', 'Show correct answers once released'],
           ] as const).map(([key, label]) => (
             <label key={key} className="flex items-center gap-2">
               <input

@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../db.js';
 import { authenticate, requireFreshPassword } from '../middleware/auth.js';
-import { finalizeAttempt, buildLayout, publicQuestion, remainingMs, sweepExpiredAttempts } from '../services/attempt.js';
+import { finalizeAttempt, buildLayout, publicQuestion, remainingMs, resultsAreVisible, sweepExpiredAttempts } from '../services/attempt.js';
 import { findWeakAreas, type Breakdown } from '../lib/analytics.js';
 import { validateResponse } from '../lib/grading.js';
 
@@ -95,13 +95,18 @@ export default async function studentRoutes(app: FastifyInstance) {
       select: {
         id: true, score: true, maxScore: true, percentage: true, submittedAt: true,
         correctCount: true, incorrectCount: true, unansweredCount: true, breakdown: true,
-        test: { select: { id: true, title: true, subject: true, kind: true, passPercentage: true } },
+        test: { select: { id: true, publicId: true, title: true, subject: true, kind: true, passPercentage: true, resultsReleased: true } },
       },
     });
 
+    // A submitted paper whose results have not been released yet must not leak
+    // its score - not in the list, not in the averages, not in the charts.
+    const released = attempts.filter((a) => resultsAreVisible(a.test));
+    const pending = attempts.filter((a) => !resultsAreVisible(a.test));
+
     // Regular and practice results are kept apart everywhere, as specified.
-    const regular = attempts.filter((a) => a.test.kind === 'REGULAR');
-    const practice = attempts.filter((a) => a.test.kind === 'PRACTICE');
+    const regular = released.filter((a) => a.test.kind === 'REGULAR');
+    const practice = released.filter((a) => a.test.kind === 'PRACTICE');
 
     const summary = (list: typeof attempts) => {
       if (list.length === 0) return { count: 0, avgPercentage: 0, bestPercentage: 0, lastPercentage: 0 };
@@ -115,7 +120,7 @@ export default async function studentRoutes(app: FastifyInstance) {
     };
 
     const weakAreas = findWeakAreas(
-      attempts.map((a) => a.breakdown as unknown as Breakdown).filter(Boolean),
+      released.map((a) => a.breakdown as unknown as Breakdown).filter(Boolean),
       { minSample: 3, accuracyThreshold: 0.7, limit: 6 },
     );
 
@@ -127,6 +132,15 @@ export default async function studentRoutes(app: FastifyInstance) {
         practice: practice.map(shapeResult),
       },
       summary: { regular: summary(regular), practice: summary(practice) },
+      // Shown as "submitted, awaiting your teacher" - no score attached.
+      awaitingResults: pending.map((a) => ({
+        attemptId: a.id,
+        testId: a.test.id,
+        testPublicId: a.test.publicId,
+        title: a.test.title,
+        subject: a.test.subject,
+        submittedAt: a.submittedAt,
+      })),
       weakAreas,
     };
   });
@@ -146,6 +160,28 @@ export default async function studentRoutes(app: FastifyInstance) {
     if (!attempt) return reply.code(404).send({ error: 'Result not found.' });
     if (attempt.status === 'IN_PROGRESS') {
       return reply.code(409).send({ error: 'This attempt has not been submitted yet.' });
+    }
+
+    // Not released yet: confirm the paper was received, and nothing else. No
+    // score, no marks, no questions, no answer keys.
+    if (!resultsAreVisible(attempt.test)) {
+      return {
+        released: false,
+        attempt: {
+          id: attempt.id,
+          status: attempt.status,
+          startedAt: attempt.startedAt,
+          submittedAt: attempt.submittedAt,
+        },
+        test: {
+          id: attempt.test.id,
+          publicId: attempt.test.publicId,
+          title: attempt.test.title,
+          subject: attempt.test.subject,
+          kind: attempt.test.kind,
+        },
+        message: 'Your paper has been submitted. Your teacher will release the results for this test.',
+      };
     }
 
     const testQuestions = await prisma.testQuestion.findMany({
@@ -174,6 +210,7 @@ export default async function studentRoutes(app: FastifyInstance) {
       });
 
     return {
+      released: true,
       attempt: {
         id: attempt.id,
         status: attempt.status,
@@ -189,6 +226,7 @@ export default async function studentRoutes(app: FastifyInstance) {
       },
       test: {
         id: attempt.test.id,
+        publicId: attempt.test.publicId,
         title: attempt.test.title,
         subject: attempt.test.subject,
         kind: attempt.test.kind,
@@ -450,14 +488,17 @@ export default async function studentRoutes(app: FastifyInstance) {
     if (attempt.status !== 'IN_PROGRESS') return { ok: true, alreadySubmitted: true, attemptId: attempt.id };
 
     const finished = await finalizeAttempt(attempt.id, false);
+    const visible = resultsAreVisible(finished.test);
 
+    // The score is deliberately omitted unless results are already visible,
+    // so a student cannot read it out of the network response.
     return {
       ok: true,
       attemptId: finished.id,
-      score: finished.score,
-      maxScore: finished.maxScore,
-      percentage: finished.percentage,
-      showResults: finished.test.showResultsAfter,
+      released: visible,
+      ...(visible
+        ? { score: finished.score, maxScore: finished.maxScore, percentage: finished.percentage }
+        : { message: 'Your paper has been submitted. Your teacher will release the results for this test.' }),
     };
   });
 }

@@ -89,6 +89,23 @@ export function remainingMs(attempt: Pick<Attempt, 'expiresAt'>): number {
 }
 
 /**
+ * The single rule for whether a student may see their score.
+ *
+ * Submitting never reveals it. An administrator releases a whole test at once,
+ * normally after every student has finished, so nobody can learn the answers
+ * from a classmate who sat it earlier.
+ *
+ * Practice tests are the deliberate exception: they exist for the student to
+ * learn from, so their results are always immediate.
+ *
+ * Every route that returns a score consults this, so there is no second place
+ * for the rule to drift out of step.
+ */
+export function resultsAreVisible(test: Pick<Test, 'kind' | 'resultsReleased'>): boolean {
+  return test.kind === 'PRACTICE' || test.resultsReleased;
+}
+
+/**
  * Grades and finalises an attempt. Idempotent: re-running on an already
  * submitted attempt returns the stored result rather than double-counting the
  * per-question statistics.

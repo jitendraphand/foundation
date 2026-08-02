@@ -189,6 +189,17 @@ docker compose up -d
 
 Database migrations run automatically on startup. Existing data is preserved.
 
+### Releasing results after a test
+
+Students never see a score at submit time. Once the class has finished, open
+**Admin → Tests**, find the test, and click **Release results** (also available
+inside the test itself). Every student who has submitted can then see their
+score, breakdown and — if the test allows it — the correct answers. Clicking
+**Withdraw results** hides them again.
+
+Practice tests are exempt: their results are always immediate, so the release
+buttons do not appear for them.
+
 ### Backups
 
 From the UI: **Admin → Backups → Generate backup**, then download the archive

@@ -331,7 +331,10 @@ export default function TakeTest() {
             <strong className="text-ink">{paper.questions.length}</strong> questions.
             {answeredCount < paper.questions.length && ' Unanswered questions score zero.'}
           </p>
-          <p className="text-sm text-ink-muted">Once submitted you cannot change your answers.</p>
+          <p className="text-sm text-ink-muted">
+            Once submitted you cannot change your answers.
+            {paper.test.kind !== 'PRACTICE' && ' Your score will be available once your teacher releases the results.'}
+          </p>
 
           <div className="flex gap-2 justify-end">
             <button type="button" className="btn-secondary" onClick={() => setConfirmSubmit(false)}>

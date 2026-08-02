@@ -473,10 +473,24 @@ model Test {
   maxAttempts      Int   @default(1)
   passPercentage   Float @default(35)
 
-  shuffleQuestions   Boolean @default(true)
-  shuffleOptions     Boolean @default(true)
-  showResultsAfter   Boolean @default(true) // score immediately on submit
-  showAnswersAfter   Boolean @default(true) // correct answers + explanations
+  shuffleQuestions Boolean @default(true)
+  shuffleOptions   Boolean @default(true)
+
+  /// Whether the correct answers and explanations appear alongside the score
+  /// once results are released. Turn off to reuse the paper with another class.
+  showAnswersAfter Boolean @default(true)
+
+  // --- Releasing results --------------------------------------------------
+  // Submitting a paper never reveals the score. An administrator releases the
+  // results for a whole test in one action, once everyone has finished.
+  //
+  // PRACTICE tests are exempt: they exist for the student to learn from, so
+  // their results are always visible immediately and the release controls do
+  // not apply to them. `resultsAreVisible` in services/attempt.ts is the single
+  // place that decides.
+  resultsReleased   Boolean   @default(false)
+  resultsReleasedAt DateTime?
+  releasedById      String?
 
   startsAt DateTime?
   endsAt   DateTime?

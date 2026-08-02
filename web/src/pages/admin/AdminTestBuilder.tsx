@@ -22,6 +22,9 @@ interface TestDetail {
   marksPerQuestion: number;
   negativeMarks: number;
   passPercentage: number;
+  showAnswersAfter: boolean;
+  resultsReleased: boolean;
+  resultsReleasedAt: string | null;
   questions: Array<{ id: string; position: number; marks: number; question: BankQuestion }>;
   targetUser: { id: string; username: string; firstName: string; lastName: string } | null;
   _count: { attempts: number };
@@ -32,6 +35,7 @@ export default function AdminTestBuilder() {
   const [tab, setTab] = useState<'questions' | 'results'>('questions');
   const [test, setTest] = useState<TestDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -51,6 +55,18 @@ export default function AdminTestBuilder() {
   if (!test) return <PageLoader label="Loading test" />;
 
   const locked = test._count.attempts > 0;
+  const isPractice = test.kind === 'PRACTICE';
+
+  const setReleased = async (released: boolean) => {
+    setError(null);
+    try {
+      const res = await api.post<{ message: string }>(`/api/admin/tests/${test.id}/release`, { released });
+      setNotice(res.message);
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not change the release state.');
+    }
+  };
 
   return (
     <div className="space-y-5">
@@ -65,10 +81,44 @@ export default function AdminTestBuilder() {
             {test.targetUser && ` · practice for ${test.targetUser.firstName} ${test.targetUser.lastName}`}
           </p>
         </div>
-        <Badge tone={test.status === 'PUBLISHED' ? 'good' : test.status === 'CLOSED' ? 'neutral' : 'warn'}>
-          {test.status.toLowerCase()}
-        </Badge>
+        <div className="flex items-center gap-2 shrink-0">
+          <Badge tone={test.status === 'PUBLISHED' ? 'good' : test.status === 'CLOSED' ? 'neutral' : 'warn'}>
+            {test.status.toLowerCase()}
+          </Badge>
+          {!isPractice && (
+            <Badge tone={test.resultsReleased ? 'good' : 'warn'}>
+              {test.resultsReleased ? 'results released' : 'results held'}
+            </Badge>
+          )}
+        </div>
       </div>
+
+      {notice && <Alert tone="success" onDismiss={() => setNotice(null)}>{notice}</Alert>}
+
+      {/* Releasing is the action that lets students see their score at all. */}
+      {!isPractice && test._count.attempts > 0 && (
+        <Card>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0">
+              <h2 className="text-sm font-semibold">
+                {test.resultsReleased ? 'Results are visible to students' : 'Results are held back'}
+              </h2>
+              <p className="text-xs text-ink-muted mt-1 max-w-xl">
+                {test.resultsReleased
+                  ? `Released ${formatDate(test.resultsReleasedAt, true)}. Students can see their score, their breakdown${test.showAnswersAfter ? ' and the correct answers' : ''}.`
+                  : 'Students have been told their paper was submitted, but cannot see any score. Check the results below, then release them once everyone has finished.'}
+              </p>
+            </div>
+            <button
+              type="button"
+              className={test.resultsReleased ? 'btn-secondary btn-sm shrink-0' : 'btn-primary btn-sm shrink-0'}
+              onClick={() => setReleased(!test.resultsReleased)}
+            >
+              {test.resultsReleased ? 'Withdraw results' : 'Release results'}
+            </button>
+          </div>
+        </Card>
+      )}
 
       {locked && (
         <Alert tone="info">

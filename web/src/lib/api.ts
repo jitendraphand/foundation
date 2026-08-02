@@ -20,11 +20,18 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  // Only declare a JSON content-type when there is actually a JSON body.
+  // Sending `Content-Type: application/json` with an empty body makes Fastify
+  // reject the request with "Body cannot be empty", which would break every
+  // bodyless POST - starting a test, submitting a paper, signing out.
+  const isForm = init.body instanceof FormData;
+  const hasBody = init.body !== undefined && init.body !== null;
+
   let res: Response;
   try {
     res = await fetch(path, {
       credentials: 'include',
-      headers: init.body instanceof FormData ? {} : { 'Content-Type': 'application/json' },
+      headers: !isForm && hasBody ? { 'Content-Type': 'application/json' } : {},
       ...init,
     });
   } catch {

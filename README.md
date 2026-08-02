@@ -23,9 +23,12 @@ ARM)** instance with `docker compose up -d`.
   results stay attached to the right person.
 - Dashboard showing live tests, past scores, a percentage trend chart, a
   per-subject breakdown, and the areas they are weakest in.
-- Timed test runner with a server-authoritative clock, continuous autosave,
-  per-question flagging, and full resume after a dropped connection or a closed
-  laptop.
+- Timed test runner showing **one question at a time**, with a numbered pane to
+  jump straight to any question. Server-authoritative clock, continuous
+  autosave, per-question flagging, and full resume after a dropped connection
+  or a closed laptop.
+- Submitting confirms the paper was received but shows **no score** — results
+  appear only once the teacher releases them (practice tests excepted).
 - Result view with score, per-axis breakdown charts, and (if the test allows)
   correct answers with worked explanations.
 
@@ -39,6 +42,9 @@ ARM)** instance with `docker compose up -d`.
   on a test.
 - **Tests** — choose the final questions, set marks, negative marking, duration,
   shuffling, and audience; publish when ready.
+- **Release results** — one action per test reveals every student's score at
+  once, so nobody learns the answers from a classmate who sat it earlier.
+  Reversible. Practice tests are exempt and always show results immediately.
 - **Analytics** — score distribution, trend over time, per-class and per-subject
   comparison, cohort-wide tag mastery, and a weakest-first student ranking.
 - **Per-student analysis** — mastery grid across all four tag axes, and one
@@ -93,6 +99,22 @@ This is the decision that makes diagrams and future simulations tractable:
 supporting a new kind of content means adding one renderer component and one
 entry in the block schema. **Every question already in the database is
 untouched.**
+
+### Releasing results
+
+Submitting a paper never reveals a score. `resultsAreVisible()` in
+`server/src/services/attempt.ts` is the single rule every route consults:
+
+```ts
+test.kind === 'PRACTICE' || test.resultsReleased
+```
+
+Until an admin releases a regular test, the student sees only a confirmation
+that the paper arrived. The score is withheld from the submit response, the
+result endpoint, the dashboard list, the summary tiles, the trend chart and
+the weak-area analysis — there is nowhere to read it out of the network
+traffic. Practice tests are deliberately exempt: they exist for the student to
+learn from, so their results are immediate.
 
 ### Question types
 

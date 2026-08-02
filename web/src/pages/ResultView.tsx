@@ -6,7 +6,16 @@ import { AccuracyMeter, BarChart, DataTable, StatTile } from '../components/char
 import { ContentRenderer, BlocksRenderer } from '../renderers/BlockRenderer';
 import type { Breakdown, PaperQuestion } from '../lib/types';
 
+/** Returned while the test's results are still held back by the admin. */
+interface PendingResult {
+  released: false;
+  attempt: { id: string; status: string; startedAt: string; submittedAt: string | null };
+  test: { id: string; publicId: string; title: string; subject: string; kind: string };
+  message: string;
+}
+
 interface ResultData {
+  released: true;
   attempt: {
     id: string;
     status: string;
@@ -29,18 +38,21 @@ export default function ResultView() {
   const location = useLocation();
   const state = location.state as { justSubmitted?: boolean; auto?: boolean } | null;
 
-  const [data, setData] = useState<ResultData | null>(null);
+  const [data, setData] = useState<ResultData | PendingResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     api
-      .get<ResultData>(`/api/student/attempts/${attemptId}/result`)
+      .get<ResultData | PendingResult>(`/api/student/attempts/${attemptId}/result`)
       .then(setData)
       .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load this result.'));
   }, [attemptId]);
 
   if (error) return <Alert tone="error">{error}</Alert>;
   if (!data) return <PageLoader label="Loading your result" />;
+
+  // Submitted, but the teacher has not released this test's results yet.
+  if (!data.released) return <AwaitingRelease data={data} justSubmitted={!!state?.justSubmitted} auto={!!state?.auto} />;
 
   const passed = data.attempt.percentage >= data.test.passPercentage;
 
@@ -89,6 +101,44 @@ export default function ResultView() {
             <QuestionReview key={q.id} question={q} index={i} showAnswers={data.test.showAnswersAfter} />
           ))}
         </ul>
+      </Card>
+    </div>
+  );
+}
+
+// --- Awaiting release ------------------------------------------------------
+
+function AwaitingRelease({ data, justSubmitted, auto }: { data: PendingResult; justSubmitted: boolean; auto: boolean }) {
+  return (
+    <div className="max-w-xl mx-auto space-y-4">
+      {justSubmitted && (
+        <Alert tone={auto ? 'warn' : 'success'}>
+          {auto ? 'Time ran out, so your paper was submitted automatically.' : 'Your paper has been submitted.'}
+        </Alert>
+      )}
+
+      <Card>
+        <div className="text-center py-6 px-2">
+          <div className="w-11 h-11 rounded-full bg-surface-sunken border border-line grid place-items-center mx-auto mb-4">
+            <span className="text-xl" aria-hidden>✓</span>
+          </div>
+
+          <h1 className="text-base font-semibold">{data.test.title}</h1>
+          <p className="text-xs text-ink-muted mt-1">
+            <span className="font-mono">{data.test.publicId}</span> · {data.test.subject} · submitted{' '}
+            {formatDate(data.attempt.submittedAt, true)}
+          </p>
+
+          <p className="text-sm text-ink-muted mt-5 max-w-sm mx-auto">{data.message}</p>
+          <p className="text-xs text-ink-faint mt-2 max-w-sm mx-auto">
+            Results are usually held back until everybody in the class has finished. Your dashboard will show the score
+            as soon as it is released.
+          </p>
+
+          <Link to="/dashboard" className="btn-primary btn-sm mt-6 inline-flex">
+            Back to dashboard
+          </Link>
+        </div>
       </Card>
     </div>
   );

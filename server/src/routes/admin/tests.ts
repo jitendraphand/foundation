@@ -19,7 +19,6 @@ const testSchema = z.object({
   passPercentage: z.number().min(0).max(100).default(35),
   shuffleQuestions: z.boolean().default(true),
   shuffleOptions: z.boolean().default(true),
-  showResultsAfter: z.boolean().default(true),
   showAnswersAfter: z.boolean().default(true),
   startsAt: z.string().datetime().optional().nullable(),
   endsAt: z.string().datetime().optional().nullable(),
@@ -212,6 +211,60 @@ export default async function adminTestRoutes(app: FastifyInstance) {
           : status === 'CLOSED'
             ? 'The test is closed. No new attempts can be started.'
             : 'The test has been moved back to draft and is hidden from students.',
+    };
+  });
+
+  /**
+   * Releases (or withdraws) the results for a whole test.
+   *
+   * Submitting never shows a student their score; this is the action that
+   * does. Practice tests are excluded - they are for the student to learn
+   * from, so their results are always immediate.
+   */
+  app.post('/api/admin/tests/:id/release', async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const { released } = z.object({ released: z.boolean() }).parse(request.body);
+
+    const test = await prisma.test.findFirst({
+      where: { id, deletedAt: null },
+      include: { _count: { select: { attempts: true } } },
+    });
+    if (!test) return reply.code(404).send({ error: 'Test not found.' });
+
+    if (test.kind === 'PRACTICE') {
+      return reply.code(400).send({
+        error: 'Practice test results are always visible to the student straight away, so there is nothing to release.',
+      });
+    }
+
+    const inProgress = await prisma.attempt.count({ where: { testId: id, status: 'IN_PROGRESS' } });
+
+    const updated = await prisma.test.update({
+      where: { id },
+      data: {
+        resultsReleased: released,
+        resultsReleasedAt: released ? new Date() : null,
+        releasedById: released ? request.user!.sub : null,
+      },
+    });
+
+    await audit(request.user!.sub, released ? 'test.results_released' : 'test.results_withdrawn', {
+      entity: 'Test', entityId: id, ip: request.ip,
+      detail: { attempts: test._count.attempts, inProgressAtRelease: inProgress },
+    });
+
+    const submitted = test._count.attempts - inProgress;
+
+    return {
+      ok: true,
+      test: updated,
+      inProgress,
+      message: released
+        ? `Results released. ${submitted} student${submitted === 1 ? '' : 's'} can now see their score.` +
+          (inProgress > 0
+            ? ` Note that ${inProgress} student${inProgress === 1 ? ' is' : 's are'} still writing - they will see their result as soon as they submit.`
+            : '')
+        : 'Results withdrawn. Students can no longer see their score for this test.',
     };
   });
 
