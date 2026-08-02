@@ -163,8 +163,16 @@ function SvgBlock({ svg, caption }: { svg: string; caption?: string }) {
 
   return (
     <figure className="my-3">
+      {/*
+        The generator is told to emit a viewBox and no fixed width/height, so
+        the SVG has no intrinsic size. Give it an explicit display width here,
+        capped so a diagram never dominates the page, and let the viewBox scale
+        it. Without this a viewBox-only figure collapses to a few pixels.
+      */}
       <div
-        className="inline-block max-w-full overflow-x-auto rounded-lg border border-line bg-white p-3 [&>svg]:max-w-full [&>svg]:h-auto"
+        className="inline-block max-w-full overflow-x-auto rounded-lg border border-line bg-white p-3
+                   [&>svg]:w-full [&>svg]:h-auto [&>svg]:max-w-[460px] [&>svg]:block"
+        style={{ width: 'min(100%, 486px)' }}
         dangerouslySetInnerHTML={{ __html: safe }}
       />
       {caption && <figcaption className="mt-1 text-xs text-ink-faint">{caption}</figcaption>}

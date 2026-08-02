@@ -290,7 +290,10 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
       blockedIds: blocked,
       ...(blocked.length
         ? {
-            message: `${blocked.length} question${blocked.length === 1 ? '' : 's'} still need${blocked.length === 1 ? 's' : ''} an image before they can be approved. Attach the image first.`,
+            message:
+              blocked.length === 1
+                ? '1 question still needs an image before it can be approved. Attach the image first.'
+                : `${blocked.length} questions still need an image before they can be approved. Attach the images first.`,
           }
         : {}),
     };

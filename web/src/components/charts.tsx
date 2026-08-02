@@ -1,4 +1,4 @@
-import { useId, useMemo, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 
 /**
  * Hand-rolled SVG charts.
@@ -23,6 +23,29 @@ const AXIS = '#d5d4cf';
 const INK_MUTED = '#52514e';
 const INK_FAINT = '#8a8983';
 const SURFACE = '#fcfcfb';
+
+/**
+ * Measures the chart's own container so an SVG fills the card it sits in
+ * rather than stranding empty space on a wide screen. The `width` prop
+ * becomes a fallback for the first paint and a floor for narrow screens.
+ */
+function useContainerWidth(fallback: number, min = 320) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(fallback);
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver((entries) => {
+      const next = Math.round(entries[0].contentRect.width);
+      if (next > 0) setWidth(Math.max(next, min));
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [min]);
+
+  return [ref, width] as const;
+}
 
 export function seriesColor(index: number): string {
   // Never generate a 9th hue - fold into the last slot instead.
@@ -73,14 +96,18 @@ interface ChartFrameProps {
   title?: string;
   caption?: string;
   height?: number;
-  children: React.ReactNode;
+  /** Receives the measured container width so the plot fills its card. */
+  children: (width: number) => React.ReactNode;
+  fallbackWidth?: number;
+  minWidth?: number;
   /** Rendered under a "Show data" toggle; required for accessibility relief. */
   table?: React.ReactNode;
   legend?: Array<{ label: string; color: string }>;
 }
 
-export function ChartFrame({ title, caption, children, table, legend }: ChartFrameProps) {
+export function ChartFrame({ title, caption, children, table, legend, fallbackWidth = 640, minWidth = 320 }: ChartFrameProps) {
   const [showTable, setShowTable] = useState(false);
+  const [ref, width] = useContainerWidth(fallbackWidth, minWidth);
 
   return (
     <figure className="my-2">
@@ -98,7 +125,7 @@ export function ChartFrame({ title, caption, children, table, legend }: ChartFra
         </div>
       )}
 
-      <div className="scroll-x">{children}</div>
+      <div className="scroll-x" ref={ref}>{children(width)}</div>
 
       <div className="flex items-baseline justify-between gap-3 mt-1">
         {caption ? <span className="text-xs text-ink-faint">{caption}</span> : <span />}
@@ -187,9 +214,24 @@ interface LineChartProps {
   table?: React.ReactNode;
 }
 
-export function LineChart({
-  series, width = 640, height = 240, xLabel, yLabel, title, caption,
-  xMin, xMax, yMin, yMax, xTickLabels, showMarkers = true, reference, formatY = formatNumber, table,
+export function LineChart(props: LineChartProps) {
+  const { title, caption, table, series, width = 640 } = props;
+  return (
+    <ChartFrame
+      title={title}
+      caption={caption}
+      table={table}
+      fallbackWidth={width}
+      legend={series.map((s, i) => ({ label: s.name, color: seriesColor(i) }))}
+    >
+      {(measured) => <LinePlot {...props} width={measured} />}
+    </ChartFrame>
+  );
+}
+
+function LinePlot({
+  series, width = 640, height = 240, xLabel, yLabel, title,
+  xMin, xMax, yMin, yMax, xTickLabels, showMarkers = true, reference, formatY = formatNumber,
 }: LineChartProps) {
   const [tip, setTip] = useState<Tooltip | null>(null);
   const [hoverX, setHoverX] = useState<number | null>(null);
@@ -248,20 +290,12 @@ export function LineChart({
   };
 
   return (
-    <ChartFrame
-      title={title}
-      caption={caption}
-      table={table}
-      legend={series.map((s, i) => ({ label: s.name, color: seriesColor(i) }))}
-    >
       <svg
         width={width}
         height={height}
         viewBox={`0 0 ${width} ${height}`}
-        className="max-w-full h-auto"
         role="img"
         aria-label={title ?? 'Line chart'}
-        style={{ minWidth: Math.min(width, 340) }}
       >
         <defs>
           <clipPath id={clipId}>
@@ -345,7 +379,6 @@ export function LineChart({
 
         {tip && <TooltipBox tip={tip} width={width} />}
       </svg>
-    </ChartFrame>
   );
 }
 
@@ -369,9 +402,24 @@ interface BarChartProps {
   showValues?: boolean;
 }
 
-export function BarChart({
-  categories, series, width = 640, height = 260, title, caption, xLabel, yLabel,
-  yMax, horizontal = false, formatValue = formatNumber, reference, table, showValues,
+export function BarChart(props: BarChartProps) {
+  const { title, caption, table, series, width = 640 } = props;
+  return (
+    <ChartFrame
+      title={title}
+      caption={caption}
+      table={table}
+      fallbackWidth={width}
+      legend={series.map((s, i) => ({ label: s.name, color: seriesColor(i) }))}
+    >
+      {(measured) => <BarPlot {...props} width={measured} />}
+    </ChartFrame>
+  );
+}
+
+function BarPlot({
+  categories, series, width = 640, height = 260, title, xLabel, yLabel,
+  yMax, horizontal = false, formatValue = formatNumber, reference, showValues,
 }: BarChartProps) {
   const [tip, setTip] = useState<Tooltip | null>(null);
 
@@ -392,8 +440,7 @@ export function BarChart({
     const plotW = width - labelW - 56;
 
     return (
-      <ChartFrame title={title} caption={caption} table={table} legend={series.map((s, i) => ({ label: s.name, color: seriesColor(i) }))}>
-        <svg width={width} height={h} viewBox={`0 0 ${width} ${h}`} className="max-w-full h-auto" role="img" aria-label={title ?? 'Bar chart'}>
+        <svg width={width} height={h} viewBox={`0 0 ${width} ${h}`} role="img" aria-label={title ?? 'Bar chart'}>
           {ticks.map((t) => (
             <line key={t} x1={labelW + (t / top) * plotW} x2={labelW + (t / top) * plotW} y1={4} y2={h - 26} stroke={GRID} strokeWidth={1} />
           ))}
@@ -439,7 +486,6 @@ export function BarChart({
           <line x1={labelW} x2={labelW} y1={4} y2={h - 26} stroke={AXIS} strokeWidth={1} />
           {tip && <TooltipBox tip={tip} width={width} />}
         </svg>
-      </ChartFrame>
     );
   }
 
@@ -454,12 +500,7 @@ export function BarChart({
   const sy = (v: number) => pad.top + plotH - (v / top) * plotH;
 
   return (
-    <ChartFrame title={title} caption={caption} table={table} legend={series.map((s, i) => ({ label: s.name, color: seriesColor(i) }))}>
-      <svg
-        width={width} height={height} viewBox={`0 0 ${width} ${height}`}
-        className="max-w-full h-auto" role="img" aria-label={title ?? 'Bar chart'}
-        style={{ minWidth: Math.min(width, 340) }}
-      >
+      <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={title ?? 'Bar chart'}>
         {ticks.map((t) => (
           <g key={t}>
             <line x1={pad.left} x2={pad.left + plotW} y1={sy(t)} y2={sy(t)} stroke={GRID} strokeWidth={1} />
@@ -524,19 +565,33 @@ export function BarChart({
 
         {tip && <TooltipBox tip={tip} width={width} />}
       </svg>
-    </ChartFrame>
   );
 }
 
 // --- Scatter ---------------------------------------------------------------
 
-export function ScatterChart({
-  series, width = 560, height = 240, title, caption, xLabel, yLabel, table,
-}: {
+interface ScatterProps {
   series: LineSeries[];
   width?: number; height?: number; title?: string; caption?: string;
   xLabel?: string; yLabel?: string; table?: React.ReactNode;
-}) {
+}
+
+export function ScatterChart(props: ScatterProps) {
+  const { title, caption, table, series, width = 560 } = props;
+  return (
+    <ChartFrame
+      title={title}
+      caption={caption}
+      table={table}
+      fallbackWidth={width}
+      legend={series.slice(0, 3).map((s, i) => ({ label: s.name, color: seriesColor(i) }))}
+    >
+      {(measured) => <ScatterPlot {...props} width={measured} />}
+    </ChartFrame>
+  );
+}
+
+function ScatterPlot({ series, width = 560, height = 240, title, xLabel, yLabel }: ScatterProps) {
   const [tip, setTip] = useState<Tooltip | null>(null);
   const all = series.flatMap((s) => s.points);
   if (all.length === 0) return <EmptyChart title={title} height={height} message="No data yet." />;
@@ -557,8 +612,7 @@ export function ScatterChart({
   const capped = series.slice(0, 3);
 
   return (
-    <ChartFrame title={title} caption={caption} table={table} legend={capped.map((s, i) => ({ label: s.name, color: seriesColor(i) }))}>
-      <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} className="max-w-full h-auto" role="img" aria-label={title ?? 'Scatter plot'}>
+      <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={title ?? 'Scatter plot'}>
         {yTicks.map((t) => (
           <g key={t}>
             <line x1={pad.left} x2={pad.left + plotW} y1={sy(t)} y2={sy(t)} stroke={GRID} strokeWidth={1} />
@@ -587,7 +641,6 @@ export function ScatterChart({
         {xLabel && <text x={pad.left + plotW / 2} y={height - 6} fontSize={11} fill={INK_MUTED} textAnchor="middle">{xLabel}</text>}
         {tip && <TooltipBox tip={tip} width={width} />}
       </svg>
-    </ChartFrame>
   );
 }
 
@@ -628,13 +681,22 @@ export function PieChart({
   });
 
   return (
-    <ChartFrame title={title} caption={caption} table={table} legend={slices.map((s) => ({ label: `${s.label} (${s.pct}%)`, color: s.color }))}>
-      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="max-w-full h-auto" role="img" aria-label={title ?? 'Pie chart'}>
-        {slices.map((s) => (
-          // 2px surface gap between segments rather than a border around them.
-          <path key={s.label} d={s.d} fill={s.color} stroke={SURFACE} strokeWidth={2} />
-        ))}
-      </svg>
+    <ChartFrame
+      title={title}
+      caption={caption}
+      table={table}
+      fallbackWidth={size}
+      minWidth={size}
+      legend={slices.map((s) => ({ label: `${s.label} (${s.pct}%)`, color: s.color }))}
+    >
+      {() => (
+        <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} role="img" aria-label={title ?? 'Pie chart'}>
+          {slices.map((s) => (
+            // 2px surface gap between segments rather than a border around them.
+            <path key={s.label} d={s.d} fill={s.color} stroke={SURFACE} strokeWidth={2} />
+          ))}
+        </svg>
+      )}
     </ChartFrame>
   );
 }
@@ -649,6 +711,21 @@ export function NumberLine({
   intervals?: Array<{ from: number; to: number; label?: string }>;
   width?: number; title?: string; caption?: string;
 }) {
+  return (
+    <ChartFrame title={title} caption={caption} fallbackWidth={width}>
+      {(measured) => <NumberLinePlot xMin={xMin} xMax={xMax} marks={marks} intervals={intervals} width={measured} title={title} />}
+    </ChartFrame>
+  );
+}
+
+function NumberLinePlot({
+  xMin = -10, xMax = 10, marks = [], intervals = [], width = 560, title,
+}: {
+  xMin?: number; xMax?: number;
+  marks?: Array<{ at: number; label?: string; filled?: boolean }>;
+  intervals?: Array<{ from: number; to: number; label?: string }>;
+  width?: number; title?: string;
+}) {
   const height = 76;
   const pad = 26;
   const plotW = width - pad * 2;
@@ -658,8 +735,7 @@ export function NumberLine({
   const ticks = niceTicks(xMin, xMax, 10).filter((t) => t >= xMin && t <= xMax);
 
   return (
-    <ChartFrame title={title} caption={caption}>
-      <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} className="max-w-full h-auto" role="img" aria-label={title ?? 'Number line'}>
+      <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={title ?? 'Number line'}>
         {intervals.map((interval, i) => (
           <rect
             key={i}
@@ -697,7 +773,6 @@ export function NumberLine({
           </g>
         ))}
       </svg>
-    </ChartFrame>
   );
 }
 

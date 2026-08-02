@@ -171,9 +171,13 @@ function QuestionReview({ question, index, showAnswers }: { question: PaperQuest
               {question.marksAwarded ?? 0}/{question.marks}
             </span>
           </span>
-          <span className="block text-sm truncate text-ink-muted">
-            {firstLine(question)}
-          </span>
+          {/* Only a preview while collapsed - the full text renders below once
+              expanded, and showing both reads as the question printed twice. */}
+          {!open && (
+            <span className="block text-sm truncate text-ink-muted">
+              {firstLine(question)}
+            </span>
+          )}
         </span>
         <span className="text-ink-faint text-xs shrink-0 mt-0.5">{open ? 'Hide' : 'Show'}</span>
       </button>

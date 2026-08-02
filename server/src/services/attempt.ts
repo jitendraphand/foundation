@@ -173,16 +173,19 @@ export async function finalizeAttempt(attemptId: string, auto: boolean) {
     }
 
     // Live difficulty statistics, used to spot questions that are badly worded.
+    //
+    // No ::uuid cast on the id: Prisma maps `String @id @default(uuid())` to a
+    // TEXT column unless @db.Uuid is declared, and Postgres has no
+    // text = uuid operator, so casting here fails every submission.
     for (const row of rows) {
       if (!row.answered) continue;
+      const hit = row.isCorrect ? 1 : 0;
       await tx.$executeRaw`
         UPDATE "Question"
         SET "timesServed" = "timesServed" + 1,
-            "timesCorrect" = "timesCorrect" + ${row.isCorrect ? 1 : 0},
-            "observedP" = CASE WHEN ("timesServed" + 1) > 0
-              THEN ("timesCorrect" + ${row.isCorrect ? 1 : 0})::float / ("timesServed" + 1)
-              ELSE 0 END
-        WHERE "id" = ${row.questionId}::uuid`;
+            "timesCorrect" = "timesCorrect" + ${hit},
+            "observedP" = ("timesCorrect" + ${hit})::float / ("timesServed" + 1)
+        WHERE "id" = ${row.questionId}`;
     }
 
     return tx.attempt.update({
