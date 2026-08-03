@@ -59,7 +59,9 @@ export default async function studentRoutes(app: FastifyInstance) {
         durationMinutes: true, marksPerQuestion: true, negativeMarks: true,
         maxAttempts: true, startsAt: true, endsAt: true, passPercentage: true,
         availabilityMode: true, windowStartMinute: true, windowEndMinute: true, windowDays: true,
-        _count: { select: { questions: true } },
+        // Counted the same way the paper is built, so the dashboard cannot
+        // promise 30 questions and then hand over 29.
+        _count: { select: { questions: { where: { question: { deletedAt: null } } } } },
         attempts: {
           where: { userId },
           orderBy: { attemptNumber: 'desc' },
@@ -264,10 +266,36 @@ export default async function studentRoutes(app: FastifyInstance) {
 
     const test = await prisma.test.findFirst({
       where: { id: testId, status: 'PUBLISHED', deletedAt: null },
-      include: { questions: { include: { question: true }, orderBy: { position: 'asc' } } },
+      include: {
+        // Retired questions are dropped here, at the moment a new paper is
+        // built, and nowhere else.
+        //
+        // Deleting a question that is already on a test only retires it
+        // (deletedAt set), because hard-deleting would orphan the answers of
+        // everyone who has already sat it. Without this filter that retired
+        // question kept being handed to students starting a fresh attempt -
+        // the admin was told it was retired, and it was not.
+        //
+        // The filter deliberately does not apply to an attempt already in
+        // progress, nor to grading, nor to a past result: removing a question
+        // from a paper someone is sitting would renumber it underneath them,
+        // and removing it from grading would change scores that have already
+        // been released.
+        questions: {
+          where: { question: { deletedAt: null } },
+          include: { question: true },
+          orderBy: { position: 'asc' },
+        },
+      },
     });
 
     if (!test) return reply.code(404).send({ error: 'That test is not available.' });
+
+    if (test.questions.length === 0) {
+      return reply.code(409).send({
+        error: 'This test has no questions available at the moment. Please tell your teacher.',
+      });
+    }
 
     // Eligibility.
     if (test.kind === 'PRACTICE') {

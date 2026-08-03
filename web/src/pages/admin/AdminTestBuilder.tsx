@@ -255,6 +255,10 @@ function QuestionPicker({ test, locked, onChanged }: { test: TestDetail; locked:
                   <div className="min-w-0 flex-1">
                     <ContentRenderer content={question.content} className="text-sm [&>p]:my-0" />
                     <div className="flex flex-wrap gap-1.5 mt-1.5">
+                      {/* Retired questions stay listed so they can be taken
+                          off, but students starting a new paper never see
+                          them - say so rather than leaving it a mystery. */}
+                      {question.deletedAt && <Badge tone="bad">retired — not served to students</Badge>}
                       <Badge>{humanizeTag(question.difficultyTag)}</Badge>
                       <Badge>{humanizeTag(question.cognitiveTag)}</Badge>
                       {question.skillTags.map((t) => <Badge key={t}>{humanizeTag(t)}</Badge>)}

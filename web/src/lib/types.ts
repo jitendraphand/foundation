@@ -158,6 +158,8 @@ export interface BankQuestion extends Omit<PaperQuestion, 'marks'> {
   timesCorrect: number;
   observedP: number;
   createdAt: string;
+  /** Set when the question has been retired. Kept for papers already sat. */
+  deletedAt?: string | null;
 }
 
 // --- Analytics -------------------------------------------------------------
