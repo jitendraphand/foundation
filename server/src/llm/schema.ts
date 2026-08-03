@@ -72,8 +72,32 @@ export const llmResponseSchema = z.object({
  * Models wrap JSON in prose or fences no matter what you tell them. This pulls
  * the object out rather than failing, which materially raises the success rate.
  */
+/**
+ * Removes a reasoning model's thinking before anything tries to read JSON.
+ *
+ * Reasoning models emit their working first, wrapped in a tag, then the
+ * answer. Providers with a JSON mode strip it for us; NVIDIA NIM and Hugging
+ * Face do not, so the reply arrives as `<think>…</think>{...}`. The widest
+ * balanced-brace search below would then happily pick up a brace from inside
+ * the reasoning and parse nonsense.
+ *
+ * An unterminated block means the model ran out of budget while still
+ * thinking; there is no answer after it, and dropping the lot gives a clearer
+ * failure than half-parsed prose.
+ */
+export function stripReasoning(raw: string): string {
+  let text = raw;
+  for (const tag of ['think', 'thinking', 'reasoning', 'thought', 'scratchpad']) {
+    text = text.replace(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?</${tag}\\s*>`, 'gi'), '');
+    // Unterminated: everything from the opening tag onwards is working, not
+    // an answer.
+    text = text.replace(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*$`, 'i'), '');
+  }
+  return text.trim();
+}
+
 export function extractJson(raw: string): unknown {
-  const text = raw.trim();
+  const text = stripReasoning(raw).trim();
 
   // 1. Straight parse.
   try {

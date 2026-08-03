@@ -24,7 +24,10 @@ const generateSchema = z.object({
     topic: z.string().max(200).optional(),
     subtopic: z.string().max(200).optional(),
     grade: z.string().max(20).optional(),
-    count: z.number().int().min(1).max(30),
+    // Split into batches of ten behind the scenes; see planBatches. The
+    // ceiling is about how long an admin is prepared to wait, not a limit on
+    // what one reply can hold.
+    count: z.number().int().min(1).max(100),
     marksPerQuestion: z.number().min(0.25).max(100).default(1),
     difficultyMix: z.record(z.number().int().min(0)).optional(),
     cognitiveMix: z.record(z.number().int().min(0)).optional(),

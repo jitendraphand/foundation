@@ -64,12 +64,17 @@ export const PROVIDERS: Record<string, ProviderDef> = {
     defaultBaseUrl: 'https://integrate.api.nvidia.com/v1',
     docsUrl: 'https://docs.api.nvidia.com/nim/',
     keyUrl: 'https://build.nvidia.com/',
-    modelHint: 'Format: vendor/model, exactly as shown on build.nvidia.com',
+    modelHint:
+      'Copy the model id exactly as it appears on build.nvidia.com - vendor/model, ' +
+      'e.g. zai-org/glm-4.6 or meta/llama-3.3-70b-instruct. The list below is a ' +
+      'starting point, not a restriction: any id the catalogue offers will work.',
     suggestedModels: [
+      'zai-org/glm-4.6',
+      'zai-org/glm-4.5',
       'meta/llama-3.3-70b-instruct',
       'nvidia/llama-3.1-nemotron-70b-instruct',
-      'qwen/qwen2.5-coder-32b-instruct',
       'deepseek-ai/deepseek-r1',
+      'qwen/qwen2.5-coder-32b-instruct',
       'mistralai/mixtral-8x22b-instruct-v0.1',
     ],
     supportsJsonMode: false,
@@ -196,6 +201,19 @@ export class LlmError extends Error {
 function isReasoningModel(model: string): boolean {
   const name = model.toLowerCase().split('/').pop() ?? '';
   return /^(o\d|gpt-5)/.test(name);
+}
+
+/**
+ * Models that write their working out before the answer.
+ *
+ * They spend output tokens on reasoning that never reaches us, so a budget
+ * sized for the answer alone runs out mid-thought and the reply arrives
+ * truncated - which looks like the model ignoring the format. Give them room.
+ * See stripReasoning in llm/schema.ts for the other half of this.
+ */
+export function emitsReasoning(model: string): boolean {
+  const name = model.toLowerCase();
+  return /(^|\/)(o\d|gpt-5)|deepseek-r1|reasoner|qwq|glm-4\.[5-9]|glm-[5-9]|thinking|magistral/.test(name);
 }
 
 export async function chatComplete(req: ChatRequest): Promise<ChatResponse> {

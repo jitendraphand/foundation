@@ -213,6 +213,22 @@ OpenAI's reasoning models (`o1`/`o3`/`o4`/`gpt-5` lines) are detected
 automatically and sent `max_completion_tokens` with no `temperature`, which is
 what they require; everything else gets the usual parameters.
 
+**Reasoning models generally** — GLM 4.5/4.6, DeepSeek-R1, QwQ and the rest —
+write their working out before the answer. On providers without a JSON mode
+(NVIDIA NIM, Hugging Face) that working arrives in the reply, so it is stripped
+before the JSON is read, and those models are given roughly twice the token
+budget per question so they do not run out mid-thought. Copy the model id
+exactly as build.nvidia.com shows it; the field is free text, so any id in the
+catalogue works whether or not it is in the suggestion list.
+
+**Asking for a lot of questions.** A request is split into calls of ten,
+because one reply cannot hold more than that with worked explanations and
+diagram source — asking for forty in one go used to come back truncated and be
+reported as a format error. Fifty questions is five calls behind one run: allow
+a few minutes, and each later call is told what the earlier ones wrote so they
+do not repeat each other. If one call in a batch fails, the questions from the
+others are kept and the run says which one failed.
+
 Hugging Face routes to whichever backend provider is fastest by default. To pin
 one, append a suffix to the model id — `openai/gpt-oss-120b:groq` — or use
 `:cheapest` / `:fastest`.

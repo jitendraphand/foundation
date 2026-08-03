@@ -293,9 +293,13 @@ export default function AdminGenerate() {
             <Field label="Grade">
               <input className="input" value={form.grade} onChange={(e) => setForm((f) => ({ ...f, grade: e.target.value }))} placeholder="8" />
             </Field>
-            <Field label="Number of questions" required>
+            <Field
+              label="Number of questions"
+              required
+              hint={form.count > 10 ? `Asked for in ${Math.ceil(form.count / 10)} calls — allow a few minutes.` : undefined}
+            >
               <input
-                type="number" min={1} max={30} className="input"
+                type="number" min={1} max={100} className="input"
                 value={form.count}
                 onChange={(e) => setForm((f) => ({ ...f, count: Number(e.target.value) }))}
               />
