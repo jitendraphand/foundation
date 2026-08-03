@@ -233,6 +233,21 @@ Hugging Face routes to whichever backend provider is fastest by default. To pin
 one, append a suffix to the model id — `openai/gpt-oss-120b:groq` — or use
 `:cheapest` / `:fastest`.
 
+### When the provider is unavailable
+
+**Admin → Set test → Import from a file instead.**
+
+Generation depends on somebody else's service being up, in credit and
+reachable. When it is not, and the exam is tomorrow, this takes the same JSON
+the model would have produced — from a file, or pasted straight out of any
+chat assistant, fences and chatter included — and puts it through exactly the
+same validation and the same review queue. Nothing skips approval.
+
+**Download the template** first: it is a worked example of the format, and
+doubles as something to hand to an assistant with "give me twenty more like
+this". Tags must use the codes from **Settings → Tags**; a question with an
+unrecognised tag is skipped with a reason and the rest still load.
+
 **None of these generate images.** When a question needs a real photograph, the
 model flags it and writes an image-generation prompt instead. You copy that
 prompt into any image tool and upload the result from the review screen. See

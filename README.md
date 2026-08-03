@@ -40,6 +40,9 @@ ARM)** instance with `docker compose up -d`.
   Hugging Face Inference Providers, or any other OpenAI-compatible endpoint. Full control of
   the system prompt, the model, the difficulty and cognitive mix, and the exact
   user message (with a preview of precisely what will be sent).
+- **Import** — when the provider is down, out of credit or unreachable, load
+  questions from a JSON file or a pasted reply instead. Same schema, same
+  validation, same review queue; a downloadable template shows the format.
 - **Review** — every draft renders exactly as a student will see it, maths,
   diagrams and all. Edit anything, then approve. Only approved questions can go
   on a test. Rejecting takes a question out of use: off every test that has not

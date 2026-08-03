@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api, ApiError } from '../../lib/api';
 import { Alert, Card, Field, Modal, PageLoader, Spinner, humanizeTag } from '../../components/ui';
@@ -67,6 +67,7 @@ export default function AdminGenerate() {
 
   const [ctx, setCtx] = useState<Context | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
   const [busy, setBusy] = useState(false);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const [preview, setPreview] = useState<{ systemPrompt: string; userPrompt: string } | null>(null);
@@ -196,6 +197,22 @@ export default function AdminGenerate() {
       </div>
 
       {error && <Alert tone="error" onDismiss={() => setError(null)}>{error}</Alert>}
+
+      <div className="flex justify-end">
+        <button type="button" className="btn-secondary btn-sm" onClick={() => setImporting(true)}>
+          Import from a file instead
+        </button>
+      </div>
+
+      {importing && (
+        <ImportQuestionsModal
+          onClose={() => setImporting(false)}
+          onImported={(result) => {
+            setImporting(false);
+            setOutcome(result);
+          }}
+        />
+      )}
 
       {outcome && (
         <Card title="Generation complete">
@@ -521,5 +538,139 @@ export default function AdminGenerate() {
         </div>
       </Modal>
     </div>
+  );
+}
+
+// --- Loading questions without an API --------------------------------------
+
+/**
+ * The offline way in.
+ *
+ * Question generation depends on somebody else's service being up, in credit,
+ * and reachable from the school's connection. When it is not — and the exam is
+ * tomorrow — this takes the same JSON the model would have produced, from
+ * wherever it came from, and puts it through exactly the same validation and
+ * the same review queue.
+ */
+function ImportQuestionsModal({
+  onClose,
+  onImported,
+}: {
+  onClose: () => void;
+  onImported: (outcome: Outcome) => void;
+}) {
+  const [text, setText] = useState('');
+  const [label, setLabel] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notes, setNotes] = useState<string[]>([]);
+  const fileInput = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    api
+      .get<{ notes: string[] }>('/api/admin/questions/import-template')
+      .then((res) => setNotes(res.notes))
+      .catch(() => undefined);
+  }, []);
+
+  const downloadTemplate = async () => {
+    try {
+      const res = await api.get<{ filename: string; template: unknown }>('/api/admin/questions/import-template');
+      const blob = new Blob([JSON.stringify(res.template, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = res.filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not fetch the template.');
+    }
+  };
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const outcome = await api.post<Outcome>('/api/admin/questions/import', {
+        payload: text,
+        sourceLabel: label.trim() || undefined,
+      });
+      onImported(outcome);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not import that file.');
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal open onClose={onClose} title="Import questions from a file" wide>
+      <form onSubmit={submit} className="space-y-4">
+        {error && <Alert tone="error"><span className="whitespace-pre-wrap">{error}</span></Alert>}
+
+        <Alert tone="info">
+          Use this when the provider is down, out of credit, or unreachable. The questions go through the same checks
+          and land as drafts for review, exactly like generated ones.
+        </Alert>
+
+        <div className="flex flex-wrap gap-2">
+          <button type="button" className="btn-secondary btn-sm" onClick={() => void downloadTemplate()}>
+            Download the template
+          </button>
+          <button type="button" className="btn-secondary btn-sm" onClick={() => fileInput.current?.click()}>
+            Choose a .json file
+          </button>
+          <input
+            ref={fileInput}
+            type="file"
+            accept="application/json,.json,.txt"
+            className="hidden"
+            onChange={async (e) => {
+              const file = e.target.files?.[0];
+              e.target.value = '';
+              if (!file) return;
+              setLabel(file.name);
+              setText(await file.text());
+            }}
+          />
+        </div>
+
+        <Field
+          label="Questions"
+          required
+          hint="Paste the JSON, or the whole reply it came in — fences and surrounding chatter are ignored."
+        >
+          <textarea
+            className="input font-mono text-xs"
+            rows={12}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder={'{\n  "questions": [ … ]\n}'}
+            required
+          />
+        </Field>
+
+        <Field label="Where it came from" hint="Optional. Recorded against the batch so you can find it later.">
+          <input className="input" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="questions-week-3.json" />
+        </Field>
+
+        {notes.length > 0 && (
+          <details className="text-xs text-ink-muted">
+            <summary className="cursor-pointer">What the file has to contain</summary>
+            <ul className="mt-2 space-y-1 list-disc pl-4">
+              {notes.map((n) => <li key={n}>{n}</li>)}
+            </ul>
+          </details>
+        )}
+
+        <div className="flex justify-end gap-2">
+          <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
+          <button type="submit" className="btn-primary" disabled={busy || text.trim().length < 2}>
+            {busy ? <Spinner label="Importing" /> : 'Import'}
+          </button>
+        </div>
+      </form>
+    </Modal>
   );
 }

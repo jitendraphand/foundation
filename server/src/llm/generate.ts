@@ -449,3 +449,102 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
 }
 
 export { llmQuestionSchema };
+
+// --- Importing questions from a file ---------------------------------------
+
+export interface ImportOutcome {
+  runId: string;
+  accepted: number;
+  parsed: number;
+  needingImages: number;
+  rejected: Array<{ index: number; reason: string }>;
+  warnings: string[];
+}
+
+/**
+ * Loads questions from a JSON document instead of a model.
+ *
+ * The fallback for the day the API key has run out, the provider is down, or
+ * the school's connection is not working - which, in a building where the
+ * exam is at nine tomorrow, is the day it matters. The document uses exactly
+ * the format the model is asked to produce, so a reply captured from anywhere
+ * can be pasted in, and every question goes through the same validation:
+ * tag vocabulary, answer keys pointing at options that exist, SVG
+ * sanitisation. Nothing skips review - imported questions land as drafts.
+ */
+export async function importQuestions(opts: {
+  requestedById: string;
+  payload: unknown;
+  sourceLabel?: string;
+}): Promise<ImportOutcome> {
+  let parsedResponse: z.infer<typeof llmResponseSchema>;
+  try {
+    parsedResponse = llmResponseSchema.parse(extractJson(
+      typeof opts.payload === 'string' ? opts.payload : JSON.stringify(opts.payload),
+    ));
+  } catch (err) {
+    const detail = err instanceof z.ZodError ? describeIssues(err) : err instanceof Error ? err.message : String(err);
+    throw new LlmError(`That file is not in the expected format.\n${detail}`);
+  }
+
+  const run = await prisma.generationRun.create({
+    data: {
+      status: 'RUNNING',
+      requestedById: opts.requestedById,
+      // Recorded as a run so imported questions are traceable and filterable
+      // in exactly the same way as generated ones.
+      provider: 'import',
+      model: opts.sourceLabel?.slice(0, 200) || 'json-upload',
+      systemPrompt: '',
+      userPrompt: '',
+      requestSpec: { source: 'json-import' } as object,
+      kind: 'REGULAR',
+      questionsRequested: parsedResponse.questions.length,
+    },
+  });
+
+  const validTags = await loadValidTags();
+  const rejected: Array<{ index: number; reason: string }> = [];
+  const rows: ReturnType<typeof toQuestionRow>[] = [];
+
+  parsedResponse.questions.forEach((q, index) => {
+    try {
+      rows.push(toQuestionRow(q, { runId: run.id, model: run.model, validTags }));
+    } catch (err) {
+      rejected.push({ index, reason: err instanceof Error ? err.message : String(err) });
+    }
+  });
+
+  if (rows.length > 0) {
+    await prisma.question.createMany({ data: rows as never });
+  }
+
+  await prisma.generationRun.update({
+    where: { id: run.id },
+    data: {
+      status: rows.length > 0 ? 'SUCCEEDED' : 'FAILED',
+      questionsParsed: parsedResponse.questions.length,
+      questionsAccepted: rows.length,
+      errorMessage: rejected.length ? rejected.map((r) => `Q${r.index + 1}: ${r.reason}`).join('\n') : null,
+      completedAt: new Date(),
+    },
+  });
+
+  if (rows.length === 0) {
+    throw new LlmError(
+      `None of the ${parsedResponse.questions.length} questions could be used:\n` +
+        rejected.map((r) => `Q${r.index + 1}: ${r.reason}`).join('\n'),
+    );
+  }
+
+  return {
+    runId: run.id,
+    accepted: rows.length,
+    parsed: parsedResponse.questions.length,
+    needingImages: rows.filter((r) => r.imageRequired).length,
+    rejected,
+    warnings: rejected.length
+      ? [`${rejected.length} of ${parsedResponse.questions.length} questions were skipped - see the list below.`]
+      : [],
+  };
+}

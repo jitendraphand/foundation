@@ -4,7 +4,8 @@ import { prisma } from '../../db.js';
 import { audit, requirePermission } from '../../middleware/auth.js';
 import { normalizeContent, normalizeBlocks, blocksToText } from '../../lib/content.js';
 import { validateAnswerKey } from '../../lib/grading.js';
-import { runGeneration, buildUserPrompt } from '../../llm/generate.js';
+import { importQuestions, runGeneration, buildUserPrompt } from '../../llm/generate.js';
+import { IMPORT_TEMPLATE } from '../../llm/import-template.js';
 import { LlmError, PROVIDERS } from '../../llm/providers.js';
 import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_TEMPLATE } from '../../llm/prompts.js';
 import { findWeakAreas, weakAreasToPromptHint, type Breakdown } from '../../lib/analytics.js';
@@ -162,6 +163,63 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
       if (err instanceof LlmError) return reply.code(502).send({ error: err.message });
       throw err;
     }
+  });
+
+  /**
+   * Loads questions from a JSON document rather than from a model.
+   *
+   * The offline route in: no key, no credit, no internet, or simply a batch
+   * produced somewhere else. Same schema, same validation, same review queue.
+   */
+  app.post('/api/admin/questions/import', {
+    preHandler: requirePermission('questions.generate'),
+    config: { rateLimit: { max: 30, timeWindow: '10 minutes' } },
+  }, async (request, reply) => {
+    const body = z
+      .object({
+        // Either pasted text or a parsed object; both end up in the same
+        // extractJson path, so a copied reply with fences around it works.
+        payload: z.union([z.string().min(2).max(4_000_000), z.record(z.any())]),
+        sourceLabel: z.string().max(200).optional(),
+      })
+      .parse(request.body);
+
+    try {
+      const outcome = await importQuestions({
+        requestedById: request.user!.sub,
+        payload: body.payload,
+        sourceLabel: body.sourceLabel,
+      });
+
+      await audit(request.user!.sub, 'questions.import', {
+        entity: 'GenerationRun', entityId: outcome.runId, ip: request.ip,
+        detail: { accepted: outcome.accepted, parsed: outcome.parsed, source: body.sourceLabel ?? 'json-upload' },
+      });
+
+      return outcome;
+    } catch (err) {
+      if (err instanceof LlmError) return reply.code(400).send({ error: err.message });
+      throw err;
+    }
+  });
+
+  /**
+   * A worked example of the import format, so nobody has to reverse-engineer
+   * it from the schema. Doubles as the prompt to hand to any chat assistant
+   * when the API is unavailable: paste this, ask for more of the same.
+   */
+  app.get('/api/admin/questions/import-template', async () => {
+    return {
+      filename: 'foundation-questions-template.json',
+      template: IMPORT_TEMPLATE,
+      notes: [
+        'One object with a "questions" array. Every field shown is required unless marked optional.',
+        'difficultyTag, cognitiveTag and skillTags must use codes from Admin > Settings > Tags.',
+        'Blocks may be text, math (LaTeX), svg, mermaid, chart, table, code — the same as a generated question.',
+        'answerKey is { "correctOptionId": "b" } for MCQ_SINGLE, { "correctOptionIds": ["a","c"] } for MCQ_MULTI.',
+        'Imported questions arrive as drafts and still have to be approved.',
+      ],
+    };
   });
 
   /** Generation history, so a bad batch can be diagnosed after the fact. */
