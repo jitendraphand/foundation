@@ -1,0 +1,39 @@
+# Caddy configuration for a trial on your own machine.
+#
+# Used only by docker-compose.local.yml. The production Caddyfile is untouched.
+#
+# The difference from production is the absence of a certificate: a laptop has
+# no public hostname, so there is nothing Let's Encrypt could issue for and
+# nothing to prove ownership of. Everything is served over plain HTTP instead.
+# That is fine on a machine you control and on a school LAN; it is not fine on
+# anything reachable from the internet.
+
+{
+	auto_https off
+	admin off
+}
+
+:80 {
+	encode zstd gzip
+
+	# Same routing as production: /api and /uploads to the Node service,
+	# everything else to the React single-page app.
+	handle /api/* {
+		reverse_proxy api:4000
+	}
+
+	handle /uploads/* {
+		reverse_proxy api:4000
+	}
+
+	handle {
+		reverse_proxy web:80
+	}
+
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+}

@@ -14,6 +14,21 @@ const schema = z.object({
   PUBLIC_HOST: z.string().default('localhost'),
   UPLOAD_DIR: z.string().default('/app/uploads'),
   BACKUP_DIR: z.string().default('/app/backups'),
+
+  /**
+   * Marks the session cookie Secure, so the browser only ever sends it over
+   * HTTPS. Defaults to on in production and must stay on for a real
+   * deployment.
+   *
+   * The one reason to turn it off is a trial over plain HTTP on a laptop or a
+   * classroom LAN: a browser will not store a Secure cookie from
+   * http://192.168.x.x, so nobody can sign in. Never set this to false on a
+   * machine reachable from the internet.
+   */
+  COOKIE_SECURE: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform((v) => (v === undefined ? undefined : v === 'true')),
 });
 
 const parsed = schema.safeParse(process.env);
@@ -28,3 +43,13 @@ if (!parsed.success) {
 
 export const env = parsed.data;
 export const isProd = env.NODE_ENV === 'production';
+
+/** Secure cookies unless explicitly disabled for a plain-HTTP trial. */
+export const cookieSecure = env.COOKIE_SECURE ?? isProd;
+
+if (isProd && env.COOKIE_SECURE === false) {
+  console.warn(
+    '[env] COOKIE_SECURE=false: session cookies will be sent over plain HTTP. ' +
+      'This is only safe on a private machine or LAN - never on a public server.',
+  );
+}

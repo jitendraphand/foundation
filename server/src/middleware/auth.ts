@@ -1,6 +1,6 @@
 import jwt from 'jsonwebtoken';
 import type { FastifyReply, FastifyRequest } from 'fastify';
-import { env, isProd } from '../env.js';
+import { cookieSecure, env } from '../env.js';
 import { prisma } from '../db.js';
 import type { Role } from '@prisma/client';
 import { hasAnyPermission, sanitizePermissions, type Permission } from '../lib/permissions.js';
@@ -26,8 +26,10 @@ export function signSession(claims: SessionClaims): string {
 export function setSessionCookie(reply: FastifyReply, token: string) {
   reply.setCookie(COOKIE_NAME, token, {
     httpOnly: true,
-    // Caddy terminates TLS, so cookies are only marked Secure in production.
-    secure: isProd,
+    // Caddy terminates TLS, so cookies are marked Secure in production. A
+    // plain-HTTP trial can turn that off with COOKIE_SECURE=false, because a
+    // browser will not store a Secure cookie from http://192.168.x.x.
+    secure: cookieSecure,
     sameSite: 'lax',
     path: '/',
     maxAge: env.SESSION_TTL_MINUTES * 60,

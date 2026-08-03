@@ -1,0 +1,22 @@
+# Overrides for trying the system on your own machine, with no domain name and
+# no certificate.
+#
+#   sudo docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+#
+# Then open http://localhost
+#
+# Only two things change: Caddy serves plain HTTP instead of HTTPS, and the
+# session cookie is not marked Secure - a browser refuses to store a Secure
+# cookie from http://192.168.x.x, so without this nobody could sign in from
+# another device on the same Wi-Fi.
+#
+# Everything else - the API, the database, the migrations, the seed, the whole
+# frontend - is byte-for-byte what runs on the server.
+services:
+  api:
+    environment:
+      COOKIE_SECURE: "false"
+
+  caddy:
+    volumes:
+      - ./Caddyfile.local:/etc/caddy/Caddyfile:ro

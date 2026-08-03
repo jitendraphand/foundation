@@ -35,6 +35,64 @@ certificate automatically.
 
 ---
 
+## 0. Trying it on your own machine first
+
+Everything below deploys to a server. If you would rather have a look at it
+first, the same stack runs on an ordinary Ubuntu laptop — same containers, same
+database, same migrations. Nothing about the trial is a different build.
+
+```bash
+sudo apt update && sudo apt install -y docker.io docker-compose-v2 git
+git clone https://github.com/jitendraphand/foundation.git
+cd foundation
+
+cp .env.example .env
+nano .env          # see below - three lines to change
+
+sudo docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+```
+
+In `.env`, set:
+
+```
+PUBLIC_HOST=localhost
+POSTGRES_PASSWORD=<anything, it is only reachable inside docker>
+JWT_SECRET=<paste: openssl rand -base64 48>
+ENCRYPTION_KEY=<paste: openssl rand -base64 48>
+```
+
+The first build takes a few minutes. Then open **http://localhost** and sign in
+as `admin` / `foundation_123`.
+
+To let other devices join the trial — a phone or a second laptop on the same
+Wi-Fi, which is the only way to really try the student side — find your address
+with `hostname -I` and open `http://192.168.x.x` on the other device. Both
+machines must be on the same network.
+
+Useful while trying it:
+
+```bash
+sudo docker compose logs -f api        # watch the API
+sudo docker compose ps                 # what is running
+sudo docker compose down               # stop, keeping all data
+sudo docker compose down -v            # stop and erase everything
+```
+
+**What the trial gives up.** `docker-compose.local.yml` serves plain HTTP
+instead of HTTPS, because a laptop has no public hostname and so no certificate
+can be issued for it. It also sets `COOKIE_SECURE=false`, without which a
+browser would refuse to store the session cookie from an `http://192.168.x.x`
+address and nobody could sign in. Both are fine on a machine you control and on
+a school LAN. **Never use this override on a server reachable from the
+internet** — the real deployment below has HTTPS and secure cookies on by
+default, and needs no flags.
+
+Everything you set up during the trial — users, questions, tests, activities —
+can be carried over with **Admin → Backups → Generate backup** and then
+`./deploy/restore.sh` on the server.
+
+---
+
 ## 1. Create the instance
 
 In the Oracle Cloud console: **Compute → Instances → Create instance**.

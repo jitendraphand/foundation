@@ -341,7 +341,27 @@ later.
 
 ---
 
-## Local development
+## Running it on your own machine
+
+Two ways, depending on what you want.
+
+**A trial that behaves exactly like the server** — same containers, same
+database, same migrations, over plain HTTP with no domain name:
+
+```bash
+cp .env.example .env      # set PUBLIC_HOST=localhost and the two secrets
+sudo docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+```
+
+Then open http://localhost. Other devices on the same Wi-Fi can join at
+`http://<your-ip>` — `hostname -I` will tell you the address. Full walkthrough
+in [deploy/DEPLOYMENT.md](deploy/DEPLOYMENT.md#0-trying-it-on-your-own-machine-first).
+
+The override serves plain HTTP and turns off the Secure cookie flag, because
+neither can work without a certificate. That is fine on your own machine and on
+a school LAN, and must never be used on a public server.
+
+**Development, with hot reload:**
 
 ```bash
 # 1. PostgreSQL
