@@ -25,6 +25,7 @@ export default function TakeTest() {
   const [remainingMs, setRemainingMs] = useState(0);
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const [confirmSubmit, setConfirmSubmit] = useState(false);
+  const [paneOpen, setPaneOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   // Time spent per question, so the analytics can show where a student stalls.
@@ -231,7 +232,7 @@ export default function TakeTest() {
         </div>
       )}
 
-      <main className="flex-1 mx-auto w-full max-w-5xl px-4 py-6 grid lg:grid-cols-[1fr_180px] gap-6 items-start">
+      <main className="flex-1 mx-auto w-full max-w-5xl px-4 py-6 grid lg:grid-cols-[1fr_180px] gap-6 items-start content-start">
         <div className="card p-5 min-w-0">
           <div className="flex items-start justify-between gap-4 mb-4">
             <div>
@@ -283,9 +284,30 @@ export default function TakeTest() {
           </div>
         </div>
 
-        <aside className="card p-4 lg:sticky lg:top-20">
-          <h2 className="text-xs font-medium text-ink-muted mb-3">Questions</h2>
-          <div className="grid grid-cols-6 lg:grid-cols-5 gap-1.5">
+        {/*
+          On a phone this pane comes first and sticks under the header, showing
+          one line until it is tapped. Left where it sits on desktop it ended up
+          below the question card, so switching question meant scrolling past
+          the whole question to reach the numbers - which is the one thing the
+          pane exists to avoid.
+        */}
+        <aside className="card p-4 order-first lg:order-none sticky top-14 lg:top-20 z-20">
+          <button
+            type="button"
+            className="lg:hidden w-full flex items-center justify-between gap-3 text-left min-h-[40px]"
+            onClick={() => setPaneOpen((v) => !v)}
+            aria-expanded={paneOpen}
+          >
+            <span className="text-xs font-medium text-ink-muted">
+              Question {index + 1} of {paper.questions.length}
+              <span className="text-ink-faint"> · {answeredCount} answered</span>
+            </span>
+            <span className="text-xs text-series-1 font-medium">{paneOpen ? 'Hide' : 'All questions'}</span>
+          </button>
+
+          <h2 className="hidden lg:block text-xs font-medium text-ink-muted mb-3">Questions</h2>
+
+          <div className={`${paneOpen ? 'grid mt-3' : 'hidden lg:grid'} grid-cols-6 lg:grid-cols-5 gap-1.5`}>
             {paper.questions.map((q, i) => {
               const answered = answers[q.id] !== null && answers[q.id] !== undefined;
               const flagged = flags[q.id];
@@ -293,7 +315,10 @@ export default function TakeTest() {
                 <button
                   key={q.id}
                   type="button"
-                  onClick={() => goTo(i)}
+                  onClick={() => {
+                    goTo(i);
+                    setPaneOpen(false);
+                  }}
                   aria-label={`Question ${i + 1}${answered ? ', answered' : ''}${flagged ? ', marked for review' : ''}`}
                   className={`aspect-square rounded-md text-xs font-medium border transition-colors ${
                     i === index
@@ -311,7 +336,7 @@ export default function TakeTest() {
             })}
           </div>
 
-          <dl className="mt-4 space-y-1 text-[11px] text-ink-muted">
+          <dl className={`${paneOpen ? 'block' : 'hidden lg:block'} mt-4 space-y-1 text-[11px] text-ink-muted`}>
             <div className="flex justify-between">
               <dt>Answered</dt>
               <dd className="tabular-nums">{answeredCount}/{paper.questions.length}</dd>

@@ -118,3 +118,35 @@
 
 /* The dot that marks each accent in the admin's colour picker. */
 .accent-dot { background: var(--accent); @apply w-6 h-6 rounded-full border border-black/10; }
+
+/* --- Touch targets ---------------------------------------------------------
+ * A finger needs roughly 44px; btn-sm is 28px, which is right for a mouse and
+ * fiddly for a student tapping "Next" thirty times on a phone.
+ *
+ * Keyed on pointer: coarse rather than a width breakpoint, so it follows the
+ * input device rather than the window: a narrow browser window on a laptop
+ * keeps its compact controls, and a large tablet gets the bigger ones. Only
+ * the vertical padding grows, so nothing reflows and no text changes size.
+ */
+@media (pointer: coarse) {
+  .btn {
+    min-height: 44px;
+  }
+
+  .btn-sm {
+    min-height: 40px;
+    padding-top: 0.5rem;
+    padding-bottom: 0.5rem;
+  }
+
+  .input {
+    min-height: 44px;
+  }
+
+  /* Bare text links that act as buttons need a hit area of their own. */
+  .tap-link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 40px;
+  }
+}

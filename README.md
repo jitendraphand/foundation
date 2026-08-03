@@ -24,7 +24,8 @@ ARM)** instance with `docker compose up -d`.
 - Dashboard showing live tests, past scores, a percentage trend chart, a
   per-subject breakdown, and the areas they are weakest in.
 - Timed test runner showing **one question at a time**, with a numbered pane to
-  jump straight to any question. Server-authoritative clock, continuous
+  jump straight to any question — a sidebar on a laptop, a one-line bar under
+  the header on a phone that opens the grid where a thumb can reach it. Server-authoritative clock, continuous
   autosave, per-question flagging, and full resume after a dropped connection
   or a closed laptop.
 - Submitting confirms the paper was received but shows **no score** — results
@@ -424,6 +425,29 @@ web/             React frontend
 docs/            GitHub Pages landing page (the "Enter" button)
 deploy/          bootstrap.sh, backup.sh, restore.sh, DEPLOYMENT.md
 ```
+
+---
+
+## On a phone
+
+Students sit papers on whatever they have, so the student side is built for a
+390px screen first: no horizontal scrolling anywhere, and every control a
+student taps during an exam is at least 40px tall.
+
+The touch sizing keys on `@media (pointer: coarse)` rather than a width
+breakpoint, so it follows the input device rather than the window — a narrow
+browser window on a laptop keeps its compact controls, and a large tablet gets
+the bigger ones.
+
+The one layout that genuinely differs is the test runner's question pane: a
+sticky sidebar on a laptop, and on a phone a one-line bar directly under the
+header that expands into the grid and closes again when a question is picked.
+Left where the sidebar sits, it landed below the question card — so switching
+question meant scrolling past the whole question to reach the numbers, which is
+the one thing the pane exists to avoid.
+
+Admin tables scroll inside their own card rather than the page, so the admin
+screens are usable on a phone even though they are meant for a desk.
 
 ---
 

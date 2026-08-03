@@ -9,7 +9,7 @@ export default function AppShell() {
     <div className="min-h-full flex flex-col">
       <header className="sticky top-0 z-30 bg-surface/90 backdrop-blur border-b border-line">
         <div className="mx-auto max-w-6xl px-4 h-14 flex items-center justify-between gap-4">
-          <Link to="/dashboard" className="flex items-center gap-2 shrink-0">
+          <Link to="/dashboard" className="tap-link flex items-center gap-2 shrink-0">
             <span className="w-7 h-7 rounded-lg bg-series-1 text-white text-sm font-semibold grid place-items-center">F</span>
             <span className="font-semibold text-sm">Foundation</span>
           </Link>
@@ -18,13 +18,13 @@ export default function AppShell() {
             <NavLink
               to="/dashboard"
               className={({ isActive }) =>
-                `px-3 py-1.5 rounded-lg ${isActive ? 'bg-surface-sunken text-ink font-medium' : 'text-ink-muted hover:text-ink'}`
+                `tap-link px-3 py-1.5 rounded-lg ${isActive ? 'bg-surface-sunken text-ink font-medium' : 'text-ink-muted hover:text-ink'}`
               }
             >
               Dashboard
             </NavLink>
             {user?.role === 'ADMIN' && (
-              <NavLink to="/admin" className="px-3 py-1.5 rounded-lg text-ink-muted hover:text-ink">
+              <NavLink to="/admin" className="tap-link px-3 py-1.5 rounded-lg text-ink-muted hover:text-ink">
                 Admin
               </NavLink>
             )}
@@ -56,7 +56,7 @@ export default function AppShell() {
       <footer className="border-t border-line py-4">
         <div className="mx-auto max-w-6xl px-4 text-xs text-ink-faint flex items-center justify-between gap-4">
           <span>Foundation Exam System</span>
-          <Link to="/change-password" className="hover:text-ink-muted">Change password</Link>
+          <Link to="/change-password" className="tap-link hover:text-ink-muted">Change password</Link>
         </div>
       </footer>
     </div>
