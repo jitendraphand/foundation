@@ -72,10 +72,17 @@ export default function AdminQuestions() {
         '/api/admin/questions/bulk-status',
         { ids, status: next },
       );
+
+      const n = res.updated;
+      const plural = n === 1 ? '' : 's';
       setNotice(
-        next === 'APPROVED' && res.updated > 0
-          ? `${res.updated} question${res.updated === 1 ? '' : 's'} approved — still selected, ready to go on a test.`
-          : `${res.updated} question${res.updated === 1 ? '' : 's'} marked ${next.toLowerCase()}.`,
+        next === 'APPROVED' && n > 0
+          ? `${n} question${plural} approved — still selected, ready to go on a test.`
+          : next === 'REJECTED' && n > 0
+            ? `${n} question${plural} rejected and taken out of use. ${res.message ?? ''}`.trim()
+            : next === 'DRAFT' && n > 0
+              ? `${n} question${plural} put back to draft.`
+              : `${n} question${plural} marked ${next.toLowerCase()}.`,
       );
       // Questions still waiting for a picture are skipped rather than approved.
       if (res.blocked > 0 && res.message) setError(res.message);
@@ -120,7 +127,7 @@ export default function AdminQuestions() {
           >
             <option value="DRAFT">Drafts awaiting review</option>
             <option value="APPROVED">Approved</option>
-            <option value="REJECTED">Rejected</option>
+            <option value="REJECTED">Rejected (out of use)</option>
           </select>
 
           {runId && (
@@ -141,6 +148,14 @@ export default function AdminQuestions() {
 
       {error && <Alert tone="error" onDismiss={() => setError(null)}>{error}</Alert>}
       {notice && <Alert tone="success" onDismiss={() => setNotice(null)}>{notice}</Alert>}
+
+      {status === 'REJECTED' && (
+        <Alert tone="info">
+          Rejected questions are out of use: taken off every test that has not been sat yet, and never given to a
+          student starting a new paper. They stay here so a mistake can be undone — select and choose
+          “Back to draft”. A test students have already sat keeps its copy, so their results do not change.
+        </Alert>
+      )}
 
       {selected.size > 0 && (
         <div className="sticky top-[104px] z-20 card px-4 py-2 flex flex-wrap items-center justify-between gap-3 shadow-pop">

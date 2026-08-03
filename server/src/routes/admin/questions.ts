@@ -216,7 +216,9 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
       .parse(request.query);
 
     const where = {
-      deletedAt: null,
+      // The Rejected view is the bin - it deliberately shows retired rows, so
+      // a rejection can be undone. Every other view hides them.
+      ...(q.status === 'REJECTED' ? {} : { deletedAt: null }),
       ...(q.status ? { status: q.status } : {}),
       // Case-insensitive: a test called "Maths" must still find questions
       // filed under "maths". An exact match here silently returned nothing
@@ -251,7 +253,10 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
     // rather than leaving the admin to guess why a filter found nothing.
     const subjectRows = await prisma.question.groupBy({
       by: ['subject'],
-      where: { deletedAt: null, ...(q.status ? { status: q.status } : {}) },
+      where: {
+        ...(q.status === 'REJECTED' ? {} : { deletedAt: null }),
+        ...(q.status ? { status: q.status } : {}),
+      },
       _count: { _all: true },
       orderBy: { subject: 'asc' },
     });
@@ -296,22 +301,68 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
       ids = body.ids.filter((id) => !blocked.includes(id));
     }
 
+    /**
+     * Rejecting takes the question out of circulation, not just out of the
+     * approved list.
+     *
+     * It is retired (deletedAt set), which is what keeps it off any paper a
+     * student starts from now on, and it is unlinked from every test that can
+     * still be changed. Tests students have already sat keep their link,
+     * because grading and past results are computed from it - unlinking there
+     * would silently rescore papers that may already have been released.
+     *
+     * Rejected questions stay visible under the Rejected filter, so a
+     * mis-click can be undone by putting one back to draft.
+     */
+    let unlinkedFrom = 0;
+    let keptOnSatTests = 0;
+
+    if (body.status === 'REJECTED' && ids.length) {
+      const links = await prisma.testQuestion.findMany({
+        where: { questionId: { in: ids } },
+        select: { id: true, testId: true, test: { select: { _count: { select: { attempts: true } } } } },
+      });
+
+      const removable = links.filter((l) => l.test._count.attempts === 0).map((l) => l.id);
+      keptOnSatTests = links.length - removable.length;
+
+      if (removable.length) {
+        const removed = await prisma.testQuestion.deleteMany({ where: { id: { in: removable } } });
+        unlinkedFrom = removed.count;
+      }
+    }
+
     const result = ids.length
       ? await prisma.question.updateMany({
-          where: { id: { in: ids }, deletedAt: null },
-          data: { status: body.status, ...(body.reviewNote ? { reviewNote: body.reviewNote } : {}) },
+          where: { id: { in: ids } },
+          data: {
+            status: body.status,
+            ...(body.reviewNote ? { reviewNote: body.reviewNote } : {}),
+            // Rejecting retires it; putting one back to draft brings it back.
+            ...(body.status === 'REJECTED' ? { deletedAt: new Date() } : { deletedAt: null }),
+          },
         })
       : { count: 0 };
 
     await audit(request.user!.sub, 'question.bulk_status', {
-      entity: 'Question', ip: request.ip, detail: { count: result.count, status: body.status, blocked: blocked.length },
+      entity: 'Question', ip: request.ip,
+      detail: { count: result.count, status: body.status, blocked: blocked.length, unlinkedFrom, keptOnSatTests },
     });
+
+    const notes = [
+      unlinkedFrom > 0 ? `Removed from ${unlinkedFrom} test${unlinkedFrom === 1 ? '' : 's'}.` : null,
+      keptOnSatTests > 0
+        ? `Left on ${keptOnSatTests} test${keptOnSatTests === 1 ? '' : 's'} that students have already sat, so their results are unaffected — no new attempt will include it.`
+        : null,
+    ].filter(Boolean);
 
     return {
       ok: true,
       updated: result.count,
       blocked: blocked.length,
       blockedIds: blocked,
+      unlinkedFrom,
+      keptOnSatTests,
       ...(blocked.length
         ? {
             message:
@@ -319,7 +370,9 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
                 ? '1 question still needs an image before it can be approved. Attach the image first.'
                 : `${blocked.length} questions still need an image before they can be approved. Attach the images first.`,
           }
-        : {}),
+        : notes.length
+          ? { message: notes.join(' ') }
+          : {}),
     };
   });
 

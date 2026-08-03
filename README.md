@@ -42,7 +42,9 @@ ARM)** instance with `docker compose up -d`.
   user message (with a preview of precisely what will be sent).
 - **Review** — every draft renders exactly as a student will see it, maths,
   diagrams and all. Edit anything, then approve. Only approved questions can go
-  on a test. Approving keeps them selected and offers **Put on a test** on the
+  on a test. Rejecting takes a question out of use: off every test that has not
+  been sat, and never served to a new attempt. It stays in the Rejected view so
+  a mistake can be put back to draft. Approving keeps them selected and offers **Put on a test** on the
   spot: add them to an existing paper, or create one there and then and land in
   its builder.
 - **Tests** — choose the final questions, set marks, negative marking, duration,
