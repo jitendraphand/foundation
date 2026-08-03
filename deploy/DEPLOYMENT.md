@@ -284,8 +284,15 @@ cards, a video, or both, and pick the audience (grades and divisions; leave
 both blank for the whole school).
 
 - **Cards** are written one at a time. Each card holds one or more pieces of
-  content, chosen from the dropdown: text, maths, a table, an SVG or Mermaid
-  diagram, or code. *Preview* shows exactly what the student will see.
+  content, chosen from the dropdown: text, maths, a **picture** you upload, a
+  table, an SVG or Mermaid diagram, or code. *Preview* shows exactly what the
+  student will see.
+- **Colour.** Each card takes one of seven colours from the swatches beside its
+  heading — new cards cycle through the palette, so a stack is colourful
+  without any work. There is also a small line above the heading for something
+  like *Remember this* or *Step 2 of 4*.
+- **A picture on its own** is a perfectly good activity: one card, one picture,
+  nothing else. PNG, JPEG, WebP or GIF up to 4 MB.
 - **Video** takes any link. YouTube and Vimeo play inside the page; anything
   else becomes a button that opens the video in a new tab.
 - **Minimum time** is the number of seconds a student must have the activity
@@ -302,6 +309,26 @@ what you want after correcting a card half the class has read.
 
 To take an activity down, **Unpublish** it (returns it to draft) or **Archive**
 it, which keeps the record of who completed it.
+
+### Putting approved questions on a test
+
+Two ways, whichever suits the moment:
+
+- **From the question bank.** Tick the questions, press **Approve**; they stay
+  selected and a **Put on a test** button appears. Choose a paper that already
+  exists, or fill in a title and duration to create one right there. Either way
+  you land in the test builder with the questions on the paper.
+- **From the test builder.** Open a test and pick from the approved list at the
+  bottom.
+
+The builder's list is filtered by the test's subject to begin with, but that is
+only a starting point — the **Subject** dropdown beside it shows every subject
+with a count, including *All subjects*. This matters because subjects are free
+text: a test called "Maths" and questions filed under "Mathematics" are two
+different subjects, and the picker will say so rather than appearing empty.
+
+Only approved questions can go on a paper, and a test students have already
+attempted is locked — make a new one instead.
 
 ### Releasing results after a test
 

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api, ApiError } from '../../lib/api';
-import { Alert, Badge, Card, EmptyState, Modal, PageLoader, Spinner, humanizeTag } from '../../components/ui';
+import { Alert, Badge, Card, EmptyState, Field, Modal, PageLoader, Spinner, humanizeTag } from '../../components/ui';
 import { ContentRenderer, BlocksRenderer } from '../../renderers/BlockRenderer';
 import type { BankQuestion, Tag } from '../../lib/types';
 
@@ -22,6 +22,11 @@ export default function AdminQuestions() {
   const [notice, setNotice] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [editing, setEditing] = useState<BankQuestion | null>(null);
+  const [allocating, setAllocating] = useState(false);
+  // Approving reloads the list, which normally clears the selection. These
+  // ids are re-selected once they reappear under "Approved", so the admin can
+  // put them straight on a paper instead of hunting for them again.
+  const carryOver = useRef<string[] | null>(null);
 
   const status = params.get('status') ?? 'DRAFT';
   const subject = params.get('subject') ?? '';
@@ -37,7 +42,10 @@ export default function AdminQuestions() {
 
       const res = await api.get<{ questions: BankQuestion[] }>(`/api/admin/questions?${query}`);
       setQuestions(res.questions);
-      setSelected(new Set());
+
+      const keep = carryOver.current;
+      carryOver.current = null;
+      setSelected(keep ? new Set(keep.filter((id) => res.questions.some((q) => q.id === id))) : new Set());
       setError(null);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not load questions.');
@@ -64,9 +72,22 @@ export default function AdminQuestions() {
         '/api/admin/questions/bulk-status',
         { ids, status: next },
       );
-      setNotice(`${res.updated} question${res.updated === 1 ? '' : 's'} marked ${next.toLowerCase()}.`);
+      setNotice(
+        next === 'APPROVED' && res.updated > 0
+          ? `${res.updated} question${res.updated === 1 ? '' : 's'} approved — still selected, ready to go on a test.`
+          : `${res.updated} question${res.updated === 1 ? '' : 's'} marked ${next.toLowerCase()}.`,
+      );
       // Questions still waiting for a picture are skipped rather than approved.
       if (res.blocked > 0 && res.message) setError(res.message);
+
+      // Approving is not the end of the job, so land where the next step is.
+      if (next === 'APPROVED' && res.updated > 0 && status !== 'APPROVED') {
+        carryOver.current = ids;
+        const params2 = new URLSearchParams(params);
+        params2.set('status', 'APPROVED');
+        setParams(params2);
+        return; // the filter change reloads the list
+      }
       await load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not update those questions.');
@@ -125,12 +146,28 @@ export default function AdminQuestions() {
         <div className="sticky top-[104px] z-20 card px-4 py-2 flex flex-wrap items-center justify-between gap-3 shadow-pop">
           <span className="text-sm">{selected.size} selected</span>
           <div className="flex gap-2">
-            <button type="button" className="btn-primary btn-sm" onClick={() => setStatus([...selected], 'APPROVED')}>
-              Approve
-            </button>
-            <button type="button" className="btn-secondary btn-sm" onClick={() => setStatus([...selected], 'REJECTED')}>
-              Reject
-            </button>
+            {/* Approving used to be the end of the road here: the admin then
+                had to go to Tests, make one, and hope its subject matched.
+                Putting them on a paper belongs at the moment of approval. */}
+            {status === 'APPROVED' ? (
+              <button type="button" className="btn-primary btn-sm" onClick={() => setAllocating(true)}>
+                Put on a test
+              </button>
+            ) : (
+              <button type="button" className="btn-primary btn-sm" onClick={() => setStatus([...selected], 'APPROVED')}>
+                Approve
+              </button>
+            )}
+            {status !== 'REJECTED' && (
+              <button type="button" className="btn-secondary btn-sm" onClick={() => setStatus([...selected], 'REJECTED')}>
+                Reject
+              </button>
+            )}
+            {status === 'REJECTED' && (
+              <button type="button" className="btn-secondary btn-sm" onClick={() => setStatus([...selected], 'DRAFT')}>
+                Back to draft
+              </button>
+            )}
             <button type="button" className="btn-ghost btn-sm" onClick={() => setSelected(new Set())}>
               Clear
             </button>
@@ -174,6 +211,19 @@ export default function AdminQuestions() {
             ))}
           </ul>
         </>
+      )}
+
+      {allocating && (
+        <AddToTestModal
+          questionIds={[...selected]}
+          defaultSubject={questions.find((q) => selected.has(q.id))?.subject ?? ''}
+          onClose={() => setAllocating(false)}
+          onDone={(message) => {
+            setAllocating(false);
+            setSelected(new Set());
+            setNotice(message);
+          }}
+        />
       )}
 
       {editing && tags && (
@@ -589,6 +639,246 @@ function EditQuestionModal({
           </button>
         </div>
       </div>
+    </Modal>
+  );
+}
+
+// --- Putting approved questions on a paper ---------------------------------
+
+interface TestOption {
+  id: string;
+  publicId: string;
+  title: string;
+  subject: string;
+  kind: 'REGULAR' | 'PRACTICE';
+  status: 'DRAFT' | 'PUBLISHED' | 'CLOSED';
+  marksPerQuestion: number;
+  _count: { questions: number; attempts: number };
+}
+
+/**
+ * The step that used to be missing.
+ *
+ * Approving a question left the admin on this screen with nothing to do next;
+ * allocating it meant going to Tests, creating a paper, opening the builder
+ * and hoping its subject string matched. Both halves of that now happen here:
+ * add to a paper that already exists, or make one on the spot.
+ */
+function AddToTestModal({
+  questionIds,
+  defaultSubject,
+  onClose,
+  onDone,
+}: {
+  questionIds: string[];
+  defaultSubject: string;
+  onClose: () => void;
+  onDone: (message: string) => void;
+}) {
+  const navigate = useNavigate();
+  const [tests, setTests] = useState<TestOption[] | null>(null);
+  const [mode, setMode] = useState<'existing' | 'new'>('existing');
+  const [testId, setTestId] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [form, setForm] = useState({
+    title: '',
+    subject: defaultSubject,
+    durationMinutes: 30,
+    marksPerQuestion: 1,
+    negativeMarks: 0,
+    targetGrades: '',
+    targetDivisions: '',
+  });
+
+  useEffect(() => {
+    api
+      .get<{ tests: TestOption[] }>('/api/admin/tests?pageSize=100')
+      .then((res) => {
+        // A paper students have already sat cannot take new questions.
+        const open = res.tests.filter((t) => t._count.attempts === 0);
+        setTests(open);
+        // Prefer one on the same subject; otherwise leave it to the admin.
+        const match = open.find((t) => t.subject.toLowerCase() === defaultSubject.toLowerCase());
+        setTestId(match?.id ?? open[0]?.id ?? '');
+        if (open.length === 0) setMode('new');
+      })
+      .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load the list of tests.'));
+  }, [defaultSubject]);
+
+  const addTo = async (id: string, title: string) => {
+    const res = await api.post<{ message: string }>(`/api/admin/tests/${id}/questions/add`, { questionIds });
+    onDone(res.message);
+    // Straight into the builder, which is where they will want to be next.
+    navigate(`/admin/tests/${id}`);
+    return title;
+  };
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      if (mode === 'existing') {
+        const target = tests?.find((t) => t.id === testId);
+        if (!target) throw new ApiError('Choose a test first.', 400);
+        await addTo(target.id, target.title);
+      } else {
+        const created = await api.post<{ test: { id: string; title: string } }>('/api/admin/tests', {
+          title: form.title.trim(),
+          subject: form.subject.trim(),
+          kind: 'REGULAR',
+          durationMinutes: form.durationMinutes,
+          marksPerQuestion: form.marksPerQuestion,
+          negativeMarks: form.negativeMarks,
+          targetGrades: form.targetGrades.split(',').map((x) => x.trim()).filter(Boolean),
+          targetDivisions: form.targetDivisions.split(',').map((x) => x.trim()).filter(Boolean),
+        });
+        await addTo(created.test.id, created.test.title);
+      }
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not put the questions on a test.');
+      setBusy(false);
+    }
+  };
+
+  const count = questionIds.length;
+
+  return (
+    <Modal open onClose={onClose} title={`Put ${count} question${count === 1 ? '' : 's'} on a test`}>
+      <form onSubmit={submit} className="space-y-4">
+        {error && <Alert tone="error">{error}</Alert>}
+
+        {tests === null ? (
+          <PageLoader label="Loading tests" />
+        ) : (
+          <>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                className={mode === 'existing' ? 'btn-primary btn-sm' : 'btn-secondary btn-sm'}
+                onClick={() => setMode('existing')}
+                disabled={tests.length === 0}
+              >
+                An existing test
+              </button>
+              <button
+                type="button"
+                className={mode === 'new' ? 'btn-primary btn-sm' : 'btn-secondary btn-sm'}
+                onClick={() => setMode('new')}
+              >
+                A new test
+              </button>
+            </div>
+
+            {mode === 'existing' ? (
+              tests.length === 0 ? (
+                <Alert tone="info">
+                  There is no test that can still take questions. Papers students have already attempted are locked, so
+                  make a new one.
+                </Alert>
+              ) : (
+                <Field label="Test">
+                  <select className="input" value={testId} onChange={(e) => setTestId(e.target.value)}>
+                    {tests.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.publicId} · {t.title} — {t.subject} · {t._count.questions} question
+                        {t._count.questions === 1 ? '' : 's'}
+                        {t.status === 'PUBLISHED' ? ' · live' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+              )
+            ) : (
+              <>
+                <Field label="Title" required>
+                  <input
+                    className="input"
+                    value={form.title}
+                    onChange={(e) => setForm((f) => ({ ...f, title: e.target.value }))}
+                    placeholder="Science — Unit 1"
+                    required
+                    autoFocus
+                  />
+                </Field>
+
+                <Field label="Subject" required hint="Prefilled from the questions you picked.">
+                  <input
+                    className="input"
+                    value={form.subject}
+                    onChange={(e) => setForm((f) => ({ ...f, subject: e.target.value }))}
+                    required
+                  />
+                </Field>
+
+                <div className="grid grid-cols-3 gap-3">
+                  <Field label="Duration (min)">
+                    <input
+                      type="number"
+                      min={1}
+                      className="input"
+                      value={form.durationMinutes}
+                      onChange={(e) => setForm((f) => ({ ...f, durationMinutes: Number(e.target.value) }))}
+                    />
+                  </Field>
+                  <Field label="Marks / question">
+                    <input
+                      type="number"
+                      min={0.25}
+                      step={0.25}
+                      className="input"
+                      value={form.marksPerQuestion}
+                      onChange={(e) => setForm((f) => ({ ...f, marksPerQuestion: Number(e.target.value) }))}
+                    />
+                  </Field>
+                  <Field label="Negative marks">
+                    <input
+                      type="number"
+                      min={0}
+                      step={0.25}
+                      className="input"
+                      value={form.negativeMarks}
+                      onChange={(e) => setForm((f) => ({ ...f, negativeMarks: Number(e.target.value) }))}
+                    />
+                  </Field>
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="Grades" hint="Comma separated. Empty = everyone.">
+                    <input
+                      className="input"
+                      value={form.targetGrades}
+                      onChange={(e) => setForm((f) => ({ ...f, targetGrades: e.target.value }))}
+                      placeholder="8, 9"
+                    />
+                  </Field>
+                  <Field label="Divisions" hint="Comma separated. Empty = everyone.">
+                    <input
+                      className="input"
+                      value={form.targetDivisions}
+                      onChange={(e) => setForm((f) => ({ ...f, targetDivisions: e.target.value }))}
+                      placeholder="A, B"
+                    />
+                  </Field>
+                </div>
+
+                <p className="text-[11px] text-ink-faint">
+                  It is created as a draft. You will land on the builder, where you can set the timing, the daily
+                  window and everything else before publishing.
+                </p>
+              </>
+            )}
+
+            <div className="flex justify-end gap-2 pt-2">
+              <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
+              <button type="submit" className="btn-primary" disabled={busy || (mode === 'existing' && !testId)}>
+                {busy ? 'Adding…' : mode === 'existing' ? `Add ${count}` : `Create and add ${count}`}
+              </button>
+            </div>
+          </>
+        )}
+      </form>
     </Modal>
   );
 }

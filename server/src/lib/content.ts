@@ -219,9 +219,22 @@ export const EMPTY_CONTENT: Content = { version: CONTENT_VERSION, blocks: [] };
  * That is deliberate: an admin explaining a formula gets KaTeX, an admin
  * explaining a circuit gets SVG, and neither needed a new content pipeline.
  */
+/**
+ * Card accents.
+ *
+ * A vocabulary rather than a colour value, so the palette can be restyled once
+ * in CSS without rewriting stored cards - and so a card can never carry an
+ * arbitrary colour string into the page.
+ */
+export const CARD_ACCENTS = ['slate', 'blue', 'green', 'amber', 'rose', 'violet', 'teal'] as const;
+export type CardAccent = (typeof CARD_ACCENTS)[number];
+
 export const activityCardSchema = z.object({
   id: z.string().min(1).max(40),
   title: z.string().max(200).optional(),
+  accent: z.enum(CARD_ACCENTS).default('slate'),
+  /// A short line under the title - "Remember this", "Step 2 of 4".
+  eyebrow: z.string().max(80).optional(),
   blocks: z.array(blockSchema).min(1).max(20),
 });
 

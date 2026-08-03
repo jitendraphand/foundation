@@ -124,7 +124,8 @@ await adminArea(['tests.manage', 'results.release'], adminTestRoutes);
 await adminArea('analytics.view', adminAnalyticsRoutes);
 await adminArea('settings.manage', adminSettingsRoutes);
 await adminArea('backups.manage', adminBackupRoutes);
-await adminArea('questions.review', adminAssetRoutes);
+// Images are attached to questions and to activity cards alike.
+await adminArea(['questions.review', 'activities.manage'], adminAssetRoutes);
 await adminArea('activities.manage', adminActivityRoutes);
 
 await fs.mkdir(env.UPLOAD_DIR, { recursive: true }).catch(() => undefined);

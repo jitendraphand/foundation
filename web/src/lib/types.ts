@@ -256,10 +256,18 @@ export interface Tag {
 export type ActivityKind = 'FLASHCARD' | 'VIDEO' | 'MIXED';
 export type ActivityStatus = 'DRAFT' | 'PUBLISHED' | 'ARCHIVED';
 
+/** The card colour vocabulary. Mirrors CARD_ACCENTS on the server. */
+export const CARD_ACCENTS = ['slate', 'blue', 'green', 'amber', 'rose', 'violet', 'teal'] as const;
+export type CardAccent = (typeof CARD_ACCENTS)[number];
+
 /** A flashcard is a titled stack of the same blocks a question is made of. */
 export interface ActivityCard {
   id: string;
   title?: string;
+  /** Colour scheme. See .accent-* in index.css. */
+  accent?: CardAccent;
+  /** A short line above the title — "Remember this", "Step 2 of 4". */
+  eyebrow?: string;
   blocks: Block[];
 }
 

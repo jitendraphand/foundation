@@ -216,6 +216,94 @@ export default async function adminTestRoutes(app: FastifyInstance) {
     return { ok: true, count: body.questionIds.length };
   });
 
+  /**
+   * Appends questions to a test, keeping what is already there.
+   *
+   * The PUT above replaces the whole paper, which is right when the builder
+   * owns the list. This exists for the other direction: an admin who has just
+   * approved a batch in the question bank and wants them on a paper without
+   * leaving that screen.
+   */
+  app.post('/api/admin/tests/:id/questions/add', { preHandler: requirePermission('tests.manage') }, async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const body = z.object({ questionIds: z.array(z.string().uuid()).min(1).max(200) }).parse(request.body);
+
+    const test = await prisma.test.findFirst({
+      where: { id, deletedAt: null },
+      include: { _count: { select: { attempts: true } }, questions: { select: { questionId: true, position: true } } },
+    });
+    if (!test) return reply.code(404).send({ error: 'Test not found.' });
+    if (test._count.attempts > 0) {
+      return reply.code(409).send({ error: 'Students have already attempted this test, so its questions can no longer be changed.' });
+    }
+
+    const already = new Set(test.questions.map((q) => q.questionId));
+    const wanted = [...new Set(body.questionIds)];
+    const toAdd = wanted.filter((qid) => !already.has(qid));
+    const skippedDuplicate = wanted.length - toAdd.length;
+
+    const found = await prisma.question.findMany({
+      where: { id: { in: toAdd }, deletedAt: null },
+      select: { id: true, status: true, subject: true },
+    });
+
+    const missing = toAdd.filter((qid) => !found.some((f) => f.id === qid));
+    const notApproved = found.filter((f) => f.status !== 'APPROVED');
+    const approved = found.filter((f) => f.status === 'APPROVED');
+
+    if (approved.length === 0) {
+      return reply.code(400).send({
+        error:
+          notApproved.length > 0
+            ? `None of those questions are approved yet. Approve them first, then add them to a test.`
+            : skippedDuplicate > 0
+              ? 'Those questions are already on this test.'
+              : 'Those questions no longer exist.',
+      });
+    }
+
+    // Appended in the order they were selected, after whatever is on the paper.
+    const nextPosition = test.questions.reduce((max, q) => Math.max(max, q.position + 1), 0);
+    const ordered = toAdd.filter((qid) => approved.some((a) => a.id === qid));
+
+    await prisma.testQuestion.createMany({
+      data: ordered.map((qid, i) => ({
+        testId: id,
+        questionId: qid,
+        position: nextPosition + i,
+        marks: test.marksPerQuestion,
+      })),
+    });
+
+    await audit(request.user!.sub, 'test.add_questions', {
+      entity: 'Test', entityId: id, ip: request.ip, detail: { added: ordered.length },
+    });
+
+    const total = test.questions.length + ordered.length;
+    const notes = [
+      skippedDuplicate > 0 ? `${skippedDuplicate} already on the paper` : null,
+      notApproved.length > 0 ? `${notApproved.length} not approved yet` : null,
+      missing.length > 0 ? `${missing.length} no longer exist` : null,
+    ].filter(Boolean);
+
+    // A question from another subject is allowed - a revision paper may well
+    // mix them - but it is worth saying out loud rather than doing it silently.
+    const otherSubject = approved.filter((a) => a.subject.toLowerCase() !== test.subject.toLowerCase()).length;
+
+    return {
+      ok: true,
+      added: ordered.length,
+      total,
+      message:
+        `${ordered.length} question${ordered.length === 1 ? '' : 's'} added to ${test.title}. ` +
+        `The paper now has ${total}.` +
+        (notes.length ? ` Skipped: ${notes.join(', ')}.` : '') +
+        (otherSubject > 0
+          ? ` Note that ${otherSubject} ${otherSubject === 1 ? 'is' : 'are'} filed under a different subject to this test.`
+          : ''),
+    };
+  });
+
   app.post('/api/admin/tests/:id/publish', { preHandler: requirePermission('tests.manage') }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const { status } = z.object({ status: z.enum(['DRAFT', 'PUBLISHED', 'CLOSED']) }).parse(request.body);

@@ -75,3 +75,46 @@
 
 /* Mermaid renders into a div; keep it from overflowing its card. */
 .mermaid-host svg { max-width: 100%; height: auto; }
+
+/* --- Activity flashcards ---------------------------------------------------
+ * Cards are read, not filled in, so they get more colour and more air than the
+ * rest of the admin chrome.
+ *
+ * Each accent is a static class carrying four custom properties. Static,
+ * because Tailwind only keeps class names it can literally see in the source -
+ * a composed `bg-${accent}-50` would be purged out of the build and the card
+ * would render colourless. The ink value is chosen to clear 4.5:1 against its
+ * own soft background.
+ */
+.accent-slate  { --accent: #52514e; --accent-soft: #f6f6f4; --accent-line: #e2e1dc; --accent-ink: #2b2a28; }
+.accent-blue   { --accent: #2a78d6; --accent-soft: #eff6fe; --accent-line: #cfe3f9; --accent-ink: #14508f; }
+.accent-green  { --accent: #1baf7a; --accent-soft: #edfaf4; --accent-line: #c6ecdc; --accent-ink: #0e6b4b; }
+.accent-amber  { --accent: #eda100; --accent-soft: #fff8e8; --accent-line: #f5e3b8; --accent-ink: #8a5c00; }
+.accent-rose   { --accent: #e87ba4; --accent-soft: #fdf0f4; --accent-line: #f7d4e0; --accent-ink: #a13358; }
+.accent-violet { --accent: #4a3aa7; --accent-soft: #f2f0fc; --accent-line: #dcd7f5; --accent-ink: #392c85; }
+.accent-teal   { --accent: #0e8f92; --accent-soft: #ecf9f9; --accent-line: #c6e8e9; --accent-ink: #0a5f61; }
+
+.flashcard {
+  background: var(--accent-soft, #ffffff);
+  border: 1px solid var(--accent-line, #e6e5e1);
+  @apply rounded-2xl overflow-hidden shadow-card;
+}
+.flashcard-bar { background: var(--accent, #52514e); @apply h-1.5 w-full; }
+.flashcard-body { @apply p-6 sm:p-8; font-size: 1.0625rem; line-height: 1.65; }
+.flashcard-eyebrow {
+  color: var(--accent-ink, #52514e);
+  @apply text-[11px] font-semibold uppercase tracking-[0.09em] mb-1;
+}
+.flashcard-title { color: var(--accent-ink, #0b0b0b); @apply text-xl sm:text-2xl font-semibold tracking-[-0.01em] mb-4; }
+
+/* Content inside a card gets room to breathe, and its own accents. */
+.flashcard-body > * + * { @apply mt-4; }
+.flashcard-body table { background: #ffffff; @apply rounded-lg overflow-hidden; }
+.flashcard-body th { color: var(--accent-ink, #52514e); }
+.flashcard-body img { @apply rounded-xl mx-auto; }
+.flashcard-body figure > svg,
+.flashcard-body .mermaid-host { background: #ffffff; @apply rounded-xl p-3; }
+.flashcard-body pre { background: #ffffff; @apply rounded-xl; }
+
+/* The dot that marks each accent in the admin's colour picker. */
+.accent-dot { background: var(--accent); @apply w-6 h-6 rounded-full border border-black/10; }

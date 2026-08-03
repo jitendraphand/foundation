@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError } from '../../lib/api';
 import { Alert, Badge, Card, EmptyState, Field, Modal, PageLoader, formatDate } from '../../components/ui';
 import { BlocksRenderer } from '../../renderers/BlockRenderer';
+import { CARD_ACCENTS, type CardAccent } from '../../lib/types';
 import type {
   ActivityCard,
   ActivityCompletionRow,
@@ -264,7 +265,7 @@ function ActivityEditor({
     isMandatory: activity?.isMandatory ?? true,
     targetGrades: (activity?.targetGrades ?? []).join(', '),
     targetDivisions: (activity?.targetDivisions ?? []).join(', '),
-    cards: activity?.content?.cards ?? [newCard()],
+    cards: activity?.content?.cards ?? [newCard(0)],
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -404,7 +405,7 @@ function ActivityEditor({
                 <button
                   type="button"
                   className="btn-secondary btn-sm"
-                  onClick={() => setForm((f) => ({ ...f, cards: [...f.cards, newCard()] }))}
+                  onClick={() => setForm((f) => ({ ...f, cards: [...f.cards, newCard(f.cards.length)] }))}
                 >
                   Add card
                 </button>
@@ -414,11 +415,19 @@ function ActivityEditor({
             {preview ? (
               <div className="space-y-3">
                 {form.cards.map((c, i) => (
-                  <article key={c.id} className="card p-4">
-                    <p className="text-[11px] text-ink-faint mb-2">Card {i + 1} of {form.cards.length}</p>
-                    {c.title && <h4 className="text-sm font-semibold mb-2">{c.title}</h4>}
-                    <BlocksRenderer blocks={c.blocks.filter(isNonEmptyBlock)} className="space-y-3" />
-                  </article>
+                  <div key={c.id}>
+                    <p className="text-[11px] text-ink-faint mb-1.5">Card {i + 1} of {form.cards.length}</p>
+                    {/* Exactly the markup the student gets, so the preview is
+                        a preview rather than an approximation. */}
+                    <article className={`flashcard accent-${c.accent ?? 'slate'}`}>
+                      <div className="flashcard-bar" />
+                      <div className="flashcard-body">
+                        {c.eyebrow && <p className="flashcard-eyebrow">{c.eyebrow}</p>}
+                        {c.title && <h4 className="flashcard-title">{c.title}</h4>}
+                        <BlocksRenderer blocks={c.blocks.filter(isNonEmptyBlock)} />
+                      </div>
+                    </article>
+                  </div>
                 ))}
               </div>
             ) : (
@@ -481,10 +490,12 @@ function CardEditor({
   const setBlock = (i: number, block: Block) =>
     onChange({ ...card, blocks: card.blocks.map((b, j) => (j === i ? block : b)) });
 
+  const accent = card.accent ?? 'slate';
+
   return (
-    <div className="rounded-lg border border-line bg-surface-sunken p-3 space-y-2">
+    <div className={`accent-${accent} rounded-xl border p-3 space-y-2`} style={{ borderColor: 'var(--accent-line)', background: 'var(--accent-soft)' }}>
       <div className="flex items-center gap-2">
-        <span className="text-[11px] text-ink-faint w-12 shrink-0">Card {index + 1}</span>
+        <span className="text-[11px] w-12 shrink-0 font-medium" style={{ color: 'var(--accent-ink)' }}>Card {index + 1}</span>
         <input
           className="input flex-1 py-1.5 text-sm"
           placeholder="Card heading (optional)"
@@ -494,6 +505,30 @@ function CardEditor({
         <button type="button" className="btn-ghost btn-sm" disabled={index === 0} onClick={() => onMove(-1)} aria-label="Move up">↑</button>
         <button type="button" className="btn-ghost btn-sm" disabled={index === total - 1} onClick={() => onMove(1)} aria-label="Move down">↓</button>
         <button type="button" className="btn-ghost btn-sm text-bad" disabled={total === 1} onClick={onRemove} aria-label="Remove card">×</button>
+      </div>
+
+      <div className="flex items-center gap-2 flex-wrap">
+        <input
+          className="input flex-1 min-w-[10rem] py-1.5 text-xs"
+          placeholder="Small line above the heading, e.g. Remember this"
+          value={card.eyebrow ?? ''}
+          onChange={(e) => onChange({ ...card, eyebrow: e.target.value })}
+          aria-label="Line above the heading"
+        />
+        <div className="flex items-center gap-1" role="radiogroup" aria-label="Card colour">
+          {CARD_ACCENTS.map((name) => (
+            <button
+              key={name}
+              type="button"
+              role="radio"
+              aria-checked={accent === name}
+              aria-label={name}
+              title={name}
+              onClick={() => onChange({ ...card, accent: name })}
+              className={`accent-${name} accent-dot ${accent === name ? 'ring-2 ring-offset-1 ring-ink/40' : ''}`}
+            />
+          ))}
+        </div>
       </div>
 
       {card.blocks.map((block, i) => (
@@ -506,6 +541,7 @@ function CardEditor({
             <option value="text">Text</option>
             <option value="math">Maths</option>
             <option value="table">Table</option>
+            <option value="image">Picture</option>
             <option value="svg">Diagram (SVG)</option>
             <option value="mermaid">Diagram (Mermaid)</option>
             <option value="code">Code</option>
@@ -605,9 +641,97 @@ function BlockInput({ block, onChange }: { block: Block; onChange: (next: Block)
           }}
         />
       );
+    case 'image':
+      return <ImageBlockInput block={block} onChange={onChange} />;
     default:
       return <div className="flex-1 text-xs text-ink-faint py-2">This content type is edited elsewhere.</div>;
   }
+}
+
+/**
+ * Uploading a picture for a card.
+ *
+ * Images are stored as assets and referenced by id, exactly as a question's
+ * figure is - so a picture used on a card and a picture used in a question are
+ * the same thing, backed up the same way and served from the same route.
+ */
+function ImageBlockInput({
+  block,
+  onChange,
+}: {
+  block: Extract<Block, { type: 'image' }>;
+  onChange: (next: Block) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const input = useRef<HTMLInputElement>(null);
+
+  const upload = async (file: File) => {
+    setBusy(true);
+    setError(null);
+    try {
+      const form = new FormData();
+      form.append('file', file);
+      form.append('altText', block.alt ?? '');
+      const res = await api.upload<{ asset: { id: string } }>('/api/admin/assets', form);
+      onChange({ ...block, assetId: res.asset.id });
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not upload that picture.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex-1 space-y-2">
+      <div className="flex items-start gap-3">
+        {block.assetId ? (
+          <img
+            src={`/uploads/${block.assetId}`}
+            alt=""
+            className="w-24 h-24 object-contain rounded-lg border border-line bg-white shrink-0"
+          />
+        ) : (
+          <div className="w-24 h-24 rounded-lg border border-dashed border-line bg-surface grid place-items-center text-[11px] text-ink-faint shrink-0">
+            No picture
+          </div>
+        )}
+
+        <div className="flex-1 space-y-2 min-w-0">
+          <input
+            ref={input}
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/gif"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) void upload(file);
+              e.target.value = '';
+            }}
+          />
+          <button type="button" className="btn-secondary btn-sm" onClick={() => input.current?.click()} disabled={busy}>
+            {busy ? 'Uploading…' : block.assetId ? 'Replace picture' : 'Choose a picture'}
+          </button>
+          <input
+            className="input py-1.5 text-xs"
+            placeholder="Describe the picture, for a student who cannot see it"
+            value={block.alt ?? ''}
+            onChange={(e) => onChange({ ...block, alt: e.target.value })}
+            aria-label="Picture description"
+          />
+          <input
+            className="input py-1.5 text-xs"
+            placeholder="Caption (optional)"
+            value={block.caption ?? ''}
+            onChange={(e) => onChange({ ...block, caption: e.target.value })}
+            aria-label="Picture caption"
+          />
+        </div>
+      </div>
+      {error && <p className="text-[11px] text-bad">{error}</p>}
+      <p className="text-[11px] text-ink-faint">PNG, JPEG, WebP or GIF, up to 4 MB.</p>
+    </div>
+  );
 }
 
 // --- Completions -----------------------------------------------------------
@@ -724,8 +848,14 @@ function CompletionsModal({
 
 // --- Helpers ---------------------------------------------------------------
 
-function newCard(): ActivityCard {
-  return { id: `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`, title: '', blocks: [blankBlock('text')] };
+/** Cards cycle through the palette, so a new stack is colourful by default. */
+function newCard(index = 0): ActivityCard {
+  return {
+    id: `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+    title: '',
+    accent: CARD_ACCENTS[index % CARD_ACCENTS.length],
+    blocks: [blankBlock('text')],
+  };
 }
 
 function blankBlock(type: Block['type']): Block {
@@ -750,6 +880,9 @@ function isNonEmptyBlock(block: Block): boolean {
     case 'mermaid': return block.code.trim().length > 0;
     case 'code': return block.value.trim().length > 0;
     case 'table': return block.headers.some((h) => h.trim()) || block.rows.length > 0;
+    // An image block with nothing uploaded yet would fail the server's uuid
+    // check; drop it rather than making the admin hunt for the reason.
+    case 'image': return !!block.assetId;
     default: return true;
   }
 }

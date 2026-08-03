@@ -153,20 +153,34 @@ export default function AdminTestBuilder() {
 
 function QuestionPicker({ test, locked, onChanged }: { test: TestDetail; locked: boolean; onChanged: () => void }) {
   const [pool, setPool] = useState<BankQuestion[]>([]);
+  const [subjects, setSubjects] = useState<Array<{ subject: string; count: number }>>([]);
   const [chosen, setChosen] = useState<string[]>(() => test.questions.sort((a, b) => a.position - b.position).map((tq) => tq.question.id));
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // The test's own subject is the sensible default, but only a default. It
+  // used to be a hard filter, so a test called "Maths" could not see questions
+  // filed as "Mathematics" and the bank looked empty for no stated reason.
+  const [subjectFilter, setSubjectFilter] = useState<string>(test.subject);
+  const [search, setSearch] = useState('');
+
   useEffect(() => {
-    const query = new URLSearchParams({ status: 'APPROVED', pageSize: '100', subject: test.subject });
+    setLoading(true);
+    const query = new URLSearchParams({ status: 'APPROVED', pageSize: '100' });
+    if (subjectFilter) query.set('subject', subjectFilter);
     api
-      .get<{ questions: BankQuestion[] }>(`/api/admin/questions?${query}`)
-      .then((res) => setPool(res.questions))
+      .get<{ questions: BankQuestion[]; subjects: Array<{ subject: string; count: number }> }>(
+        `/api/admin/questions?${query}`,
+      )
+      .then((res) => {
+        setPool(res.questions);
+        setSubjects(res.subjects ?? []);
+      })
       .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load approved questions.'))
       .finally(() => setLoading(false));
-  }, [test.subject]);
+  }, [subjectFilter]);
 
   const toggle = (id: string) => {
     setChosen((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
@@ -200,9 +214,13 @@ function QuestionPicker({ test, locked, onChanged }: { test: TestDetail; locked:
   for (const q of pool) byId.set(q.id, q);
   for (const tq of test.questions) byId.set(tq.question.id, tq.question);
 
-  if (loading) return <PageLoader label="Loading approved questions" />;
+  const approvedEverywhere = subjects.reduce((sum, x) => sum + x.count, 0);
+  const matchesSearch = (q: BankQuestion) =>
+    !search.trim() ||
+    JSON.stringify(q.content).toLowerCase().includes(search.trim().toLowerCase()) ||
+    (q.topic ?? '').toLowerCase().includes(search.trim().toLowerCase());
 
-  const available = pool.filter((q) => !chosen.includes(q.id));
+  const available = pool.filter((q) => !chosen.includes(q.id)).filter(matchesSearch);
 
   return (
     <div className="space-y-4">
@@ -257,12 +275,66 @@ function QuestionPicker({ test, locked, onChanged }: { test: TestDetail; locked:
       </Card>
 
       {!locked && (
-        <Card title={`Approved questions in ${test.subject}`} padded={false}>
-          {available.length === 0 ? (
+        <Card
+          title="Approved questions"
+          padded={false}
+          action={
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                className="input w-auto py-1.5 text-xs"
+                placeholder="Search…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                aria-label="Search approved questions"
+              />
+              <select
+                className="input w-auto py-1.5 text-xs"
+                value={subjectFilter}
+                onChange={(e) => setSubjectFilter(e.target.value)}
+                aria-label="Subject"
+              >
+                <option value="">All subjects ({approvedEverywhere})</option>
+                {subjects.map((x) => (
+                  <option key={x.subject} value={x.subject}>
+                    {x.subject} ({x.count})
+                  </option>
+                ))}
+                {/* The test's subject may have no approved questions at all;
+                    it still belongs in the list so the filter looks honest. */}
+                {!subjects.some((x) => x.subject.toLowerCase() === test.subject.toLowerCase()) && (
+                  <option value={test.subject}>{test.subject} (0)</option>
+                )}
+              </select>
+            </div>
+          }
+        >
+          {loading ? (
+            <div className="p-6"><PageLoader label="Loading approved questions" /></div>
+          ) : available.length === 0 ? (
             <EmptyState
-              title="No more approved questions in this subject"
-              hint="Generate and approve more questions from the Set test screen."
-              action={<Link to="/admin/generate" className="btn-primary btn-sm">Generate questions</Link>}
+              title={
+                search.trim()
+                  ? 'Nothing matches that search'
+                  : subjectFilter
+                    ? `No approved questions filed under "${subjectFilter}"`
+                    : 'No approved questions yet'
+              }
+              hint={
+                search.trim()
+                  ? 'Clear the search to see the rest.'
+                  : subjectFilter && approvedEverywhere > 0
+                    ? `There ${approvedEverywhere === 1 ? 'is' : 'are'} ${approvedEverywhere} approved question${approvedEverywhere === 1 ? '' : 's'} under other subjects — switch to "All subjects" above to use them. Subjects are free text, so "Maths" and "Mathematics" are different.`
+                    : 'Generate questions, then approve them in the question bank. Only approved questions can go on a paper.'
+              }
+              action={
+                subjectFilter && approvedEverywhere > 0 ? (
+                  <button type="button" className="btn-primary btn-sm" onClick={() => { setSubjectFilter(''); setSearch(''); }}>
+                    Show all subjects
+                  </button>
+                ) : (
+                  <Link to="/admin/generate" className="btn-primary btn-sm">Generate questions</Link>
+                )
+              }
             />
           ) : (
             <ul className="divide-y divide-line max-h-[520px] overflow-y-auto">

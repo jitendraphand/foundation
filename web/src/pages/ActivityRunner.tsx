@@ -195,10 +195,13 @@ export default function ActivityRunner() {
           </div>
         </div>
         {total > 0 && (
-          <div className="h-0.5 bg-line">
+          <div className={`h-1 bg-line accent-${cards[index]?.accent ?? 'slate'}`}>
             <div
-              className="h-full bg-series-1 transition-all"
-              style={{ width: `${Math.round((Math.min(furthest.current, total) / total) * 100)}%` }}
+              className="h-full transition-all"
+              style={{
+                width: `${Math.round((Math.min(furthest.current, total) / total) * 100)}%`,
+                background: 'var(--accent)',
+              }}
             />
           </div>
         )}
@@ -220,9 +223,13 @@ export default function ActivityRunner() {
         {needsVideo && <VideoPanel activity={activity} opened={videoOpened} onOpen={openVideo} />}
 
         {card && (
-          <article className="card p-5 sm:p-6 min-h-[220px]">
-            {card.title && <h2 className="text-base font-semibold mb-3">{card.title}</h2>}
-            <BlocksRenderer blocks={card.blocks} className="prose-block space-y-3" />
+          <article className={`flashcard accent-${card.accent ?? 'slate'} min-h-[240px]`}>
+            <div className="flashcard-bar" />
+            <div className="flashcard-body">
+              {card.eyebrow && <p className="flashcard-eyebrow">{card.eyebrow}</p>}
+              {card.title && <h2 className="flashcard-title">{card.title}</h2>}
+              <BlocksRenderer blocks={card.blocks} />
+            </div>
           </article>
         )}
 
@@ -236,13 +243,21 @@ export default function ActivityRunner() {
                   type="button"
                   onClick={() => goTo(i)}
                   aria-current={i === index}
-                  className={`w-8 h-8 rounded-lg text-xs border ${
+                  aria-label={`Card ${i + 1}${c.title ? `: ${c.title}` : ''}`}
+                  className={`accent-${c.accent ?? 'slate'} w-9 h-9 rounded-lg text-xs border transition-colors ${
                     i === index
-                      ? 'border-series-1 bg-series-1 text-white font-medium'
+                      ? 'text-white font-semibold border-transparent'
                       : seen
-                        ? 'border-line bg-surface text-ink-muted'
-                        : 'border-dashed border-line bg-surface-sunken text-ink-faint'
+                        ? 'font-medium'
+                        : 'border-dashed text-ink-faint bg-surface-sunken'
                   }`}
+                  style={
+                    i === index
+                      ? { background: 'var(--accent)' }
+                      : seen
+                        ? { background: 'var(--accent-soft)', borderColor: 'var(--accent-line)', color: 'var(--accent-ink)' }
+                        : undefined
+                  }
                 >
                   {i + 1}
                 </button>

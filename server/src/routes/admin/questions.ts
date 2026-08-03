@@ -215,8 +215,11 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
     const where = {
       deletedAt: null,
       ...(q.status ? { status: q.status } : {}),
-      ...(q.subject ? { subject: q.subject } : {}),
-      ...(q.topic ? { topic: q.topic } : {}),
+      // Case-insensitive: a test called "Maths" must still find questions
+      // filed under "maths". An exact match here silently returned nothing
+      // and looked like the question bank was empty.
+      ...(q.subject ? { subject: { equals: q.subject, mode: 'insensitive' as const } } : {}),
+      ...(q.topic ? { topic: { equals: q.topic, mode: 'insensitive' as const } } : {}),
       ...(q.difficultyTag ? { difficultyTag: q.difficultyTag } : {}),
       ...(q.cognitiveTag ? { cognitiveTag: q.cognitiveTag } : {}),
       ...(q.skillTag ? { skillTags: { has: q.skillTag } } : {}),
@@ -241,7 +244,22 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
         )
       : questions;
 
-    return { total, page: q.page, pageSize: q.pageSize, questions: filtered };
+    // Which subjects exist at this status, so the UI can offer a real choice
+    // rather than leaving the admin to guess why a filter found nothing.
+    const subjectRows = await prisma.question.groupBy({
+      by: ['subject'],
+      where: { deletedAt: null, ...(q.status ? { status: q.status } : {}) },
+      _count: { _all: true },
+      orderBy: { subject: 'asc' },
+    });
+
+    return {
+      total,
+      page: q.page,
+      pageSize: q.pageSize,
+      questions: filtered,
+      subjects: subjectRows.map((r) => ({ subject: r.subject, count: r._count._all })),
+    };
   });
 
   app.get('/api/admin/questions/:id', async (request, reply) => {

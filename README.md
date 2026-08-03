@@ -42,7 +42,9 @@ ARM)** instance with `docker compose up -d`.
   user message (with a preview of precisely what will be sent).
 - **Review** — every draft renders exactly as a student will see it, maths,
   diagrams and all. Edit anything, then approve. Only approved questions can go
-  on a test.
+  on a test. Approving keeps them selected and offers **Put on a test** on the
+  spot: add them to an existing paper, or create one there and then and land in
+  its builder.
 - **Tests** — choose the final questions, set marks, negative marking, duration,
   shuffling, and audience; publish when ready.
 - **Release results** — one action per test reveals every student's score at
@@ -51,9 +53,10 @@ ARM)** instance with `docker compose up -d`.
 - **Daily availability windows** — pause a test outside set hours: "only during
   school hours, Mon–Fri" or "paused between 11pm and 5am". Editable on a live
   test without disturbing anyone's score.
-- **Activities** — put a notice, a revision card or a video in front of a class
-  and require it before anything else. Cards use the same content blocks as
-  questions, so they can carry maths, diagrams, charts and tables. YouTube and
+- **Activities** — put a notice, a revision card, a picture or a video in front
+  of a class and require it before anything else. Cards use the same content
+  blocks as questions, so they can carry maths, diagrams, charts, tables and
+  uploaded pictures, and each card takes one of seven colours. YouTube and
   Vimeo play inside the page; any other link opens in a new tab. A per-activity
   roster shows who has done it, who is part way through and who has not
   started, with a one-click "make them do it again".
@@ -171,6 +174,16 @@ Time spent is **credited by the server** from the gap between heartbeats,
 capped at two minutes per beat, so a tab left open overnight is not counted as
 engagement and `{"secondsSpent": 9999}` from a crafted request buys nothing.
 Finishing needs every card seen *and* the minimum time met.
+
+Cards are coloured from a fixed vocabulary — `slate`, `blue`, `green`,
+`amber`, `rose`, `violet`, `teal` — stored as a name, never a colour value, so
+the palette can be restyled once in CSS without touching stored cards and a
+card can never carry an arbitrary colour string into the page. Each accent's
+title colour clears 4.5:1 against its own background.
+
+Pictures on cards are ordinary assets: the same upload, the same content
+addressing, the same `/uploads/:id` route and the same backup as a figure
+attached to a question.
 
 Video links go through `server/src/lib/video.ts` before they are stored. Only
 YouTube and Vimeo are ever framed, and only on their own player origins —
