@@ -222,9 +222,23 @@ model flags it and writes an image-generation prompt instead. You copy that
 prompt into any image tool and upload the result from the review screen. See
 [Images](../README.md#images) in the README.
 
+**Copy the key when you create it.** Every provider shows a new key in full
+exactly once, and from then on displays a shortened version — `sk-or-v1-…`.
+That shortened form is not a key. Pasting it saves cleanly, looks right in the
+table, and then fails with the provider's own wording (OpenRouter says
+*"Missing Authentication header"*), which reads as if the site is broken. The
+key box now refuses anything containing `...`, spaces or quotes, and warns when
+a key does not start the way that provider's keys usually do.
+
+**Model ids are exact.** There is no model called `openrouter/free` — free
+models are ordinary ids with a `:free` suffix, and `openrouter/auto` lets
+OpenRouter choose. A wrong id comes back as *"… is not a valid model ID"* and
+is unrelated to the key.
+
 Keys are encrypted with AES-256-GCM before they touch the database and are
 never displayed again. Use **Test connection** to confirm one works before
-spending a real generation call.
+spending a real generation call — it names the problem when the saved key
+itself cannot work, rather than passing the provider's error through.
 
 ---
 

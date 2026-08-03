@@ -144,6 +144,9 @@ interface ProviderDef {
   label: string;
   defaultBaseUrl: string;
   docsUrl: string;
+  keyUrl?: string;
+  /** Shown under the model box; says what a model id looks like here. */
+  modelHint?: string;
   suggestedModels: string[];
   supportsJsonMode: boolean;
 }
@@ -261,14 +264,18 @@ function Providers() {
         <AddCredentialModal
           providers={providers}
           onClose={() => setAdding(false)}
-          onAdded={async () => { setAdding(false); await load(); }}
+          onAdded={async (warning) => {
+            setAdding(false);
+            setNotice(warning ?? 'Credential saved. Use "Test connection" to check it works.');
+            await load();
+          }}
         />
       )}
     </div>
   );
 }
 
-function AddCredentialModal({ providers, onClose, onAdded }: { providers: ProviderDef[]; onClose: () => void; onAdded: () => void }) {
+function AddCredentialModal({ providers, onClose, onAdded }: { providers: ProviderDef[]; onClose: () => void; onAdded: (warning?: string) => void }) {
   const [provider, setProvider] = useState(providers[0]?.id ?? 'openrouter');
   const [label, setLabel] = useState('');
   const [apiKey, setApiKey] = useState('');
@@ -290,14 +297,14 @@ function AddCredentialModal({ providers, onClose, onAdded }: { providers: Provid
     setBusy(true);
     setError(null);
     try {
-      await api.post('/api/admin/credentials', {
+      const res = await api.post<{ warning?: string }>('/api/admin/credentials', {
         provider,
         label: label.trim(),
         apiKey: apiKey.trim(),
         baseUrl: baseUrl.trim() || undefined,
         defaultModel: defaultModel.trim() || undefined,
       });
-      onAdded();
+      onAdded(res.warning);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not save that credential.');
     } finally {
@@ -320,7 +327,14 @@ function AddCredentialModal({ providers, onClose, onAdded }: { providers: Provid
           <input className="input" value={label} onChange={(e) => setLabel(e.target.value)} required />
         </Field>
 
-        <Field label="API key" required hint="Encrypted before it is stored. It is never displayed again.">
+        <Field
+          label="API key"
+          required
+          hint={
+            'Paste the whole key. Providers show it in full only once, then display a shortened version ' +
+            'like sk-or-v1-… — that shortened form is not a key and will not work. Encrypted before it is stored.'
+          }
+        >
           <input className="input font-mono text-xs" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} required minLength={8} autoComplete="off" />
         </Field>
 
@@ -328,7 +342,7 @@ function AddCredentialModal({ providers, onClose, onAdded }: { providers: Provid
           <input className="input font-mono text-xs" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://openrouter.ai/api/v1" />
         </Field>
 
-        <Field label="Default model">
+        <Field label="Default model" hint={def?.modelHint}>
           <input className="input font-mono text-xs" value={defaultModel} onChange={(e) => setDefaultModel(e.target.value)} list="provider-models" />
           <datalist id="provider-models">
             {def?.suggestedModels.map((m) => <option key={m} value={m} />)}

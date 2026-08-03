@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { prisma } from '../../db.js';
 import { audit } from '../../middleware/auth.js';
 import { encryptSecret, decryptSecret, keyHint } from '../../lib/crypto.js';
-import { PROVIDERS, pingProvider } from '../../llm/providers.js';
+import { PROVIDERS, describeKeyProblem, pingProvider } from '../../llm/providers.js';
 import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_TEMPLATE } from '../../llm/prompts.js';
 import { COMMON_TIMEZONES, WINDOW_PRESETS, isValidTimezone, zonedNow, formatMinute } from '../../lib/availability.js';
 import { getSchoolTimezone, setSchoolTimezone } from '../../services/settings.js';
@@ -40,6 +40,10 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: 'A base URL is required for a custom provider.' });
     }
 
+    // Caught here rather than three screens later as a 401 from the provider.
+    const keyProblem = describeKeyProblem(body.provider, body.apiKey);
+    if (keyProblem.error) return reply.code(400).send({ error: keyProblem.error });
+
     const credential = await prisma.apiCredential.create({
       data: {
         provider: body.provider,
@@ -57,7 +61,7 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
       detail: { provider: body.provider, label: body.label }, // never the key
     });
 
-    return reply.code(201).send({ ok: true, credential });
+    return reply.code(201).send({ ok: true, credential, warning: keyProblem.warning });
   });
 
   app.patch('/api/admin/credentials/:id', async (request, reply) => {
@@ -75,6 +79,9 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
     const existing = await prisma.apiCredential.findUnique({ where: { id } });
     if (!existing) return reply.code(404).send({ error: 'Credential not found.' });
 
+    const keyProblem = body.apiKey ? describeKeyProblem(existing.provider, body.apiKey) : {};
+    if (keyProblem.error) return reply.code(400).send({ error: keyProblem.error });
+
     const credential = await prisma.apiCredential.update({
       where: { id },
       data: {
@@ -88,7 +95,7 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
     });
 
     await audit(request.user!.sub, 'credential.update', { entity: 'ApiCredential', entityId: id, ip: request.ip });
-    return { ok: true, credential };
+    return { ok: true, credential, warning: keyProblem.warning };
   });
 
   app.delete('/api/admin/credentials/:id', async (request) => {
@@ -116,7 +123,15 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
       return reply.code(500).send({ error: err instanceof Error ? err.message : 'Could not read the stored key.' });
     }
 
-    return pingProvider(credential.baseUrl, apiKey, model);
+    // Say what is wrong with the stored key rather than letting the provider
+    // answer "missing authentication header", which sounds like our bug.
+    const stored = describeKeyProblem(credential.provider, apiKey);
+    if (stored.error) {
+      return { ok: false, message: `The saved key cannot work. ${stored.error}` };
+    }
+
+    const result = await pingProvider(credential.baseUrl, apiKey, model);
+    return stored.warning && !result.ok ? { ...result, message: `${result.message} ${stored.warning}` } : result;
   });
 
   // --- Prompt templates ----------------------------------------------------

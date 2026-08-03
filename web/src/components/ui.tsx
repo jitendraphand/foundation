@@ -1,5 +1,5 @@
-import { cloneElement, isValidElement, useEffect, useId, useRef } from 'react';
-import type { ReactElement } from 'react';
+import { Children, Fragment, cloneElement, isValidElement, useEffect, useId, useRef } from 'react';
+import type { ReactElement, ReactNode } from 'react';
 
 export function Spinner({ label = 'Loading' }: { label?: string }) {
   return (
@@ -74,6 +74,46 @@ export function Card({
 
 const LABELABLE = new Set(['input', 'select', 'textarea']);
 
+/**
+ * Finds the form control a Field is naming and gives it an id.
+ *
+ * Not always the direct child: a field often renders `<><input list=… />
+ * <datalist>…</datalist></>`, and the control that needs the label is inside
+ * the fragment. Anything that is not a form control - a group of checkboxes,
+ * a custom picker - is returned untouched and gets no `htmlFor`, since a label
+ * pointing at a div names nothing.
+ */
+function wireControl(node: ReactNode, id: string): { node: ReactNode; controlId?: string } {
+  // Several children arrive as a plain array, not a fragment - which is the
+  // usual shape when an input is followed by its <datalist>.
+  if (Array.isArray(node)) return wireList(Children.toArray(node), id);
+
+  if (!isValidElement(node)) return { node };
+  const element = node as ReactElement<{ id?: string; children?: ReactNode }>;
+
+  if (typeof element.type === 'string' && LABELABLE.has(element.type)) {
+    if (element.props.id) return { node, controlId: element.props.id };
+    return { node: cloneElement(element, { id }), controlId: id };
+  }
+
+  if (element.type === Fragment) return wireList(Children.toArray(element.props.children), id);
+
+  return { node };
+}
+
+/** Wires the first labelable element in a list, leaving the rest alone. */
+function wireList(kids: ReactNode[], id: string): { node: ReactNode; controlId?: string } {
+  for (let i = 0; i < kids.length; i++) {
+    const found = wireControl(kids[i], id);
+    if (found.controlId) {
+      const next: ReactNode[] = [...kids];
+      next[i] = found.node;
+      return { node: <>{next}</>, controlId: found.controlId };
+    }
+  }
+  return { node: <>{kids}</> };
+}
+
 export function Field({
   label,
   hint,
@@ -91,12 +131,8 @@ export function Field({
 
   // Tie the label to the control it names. Without this the label is only
   // text sitting above a box: a screen reader announces an unnamed field, and
-  // clicking the label does nothing. Only real form controls are wired up -
-  // a Field wrapping a group of checkboxes is left alone.
-  const element = isValidElement(children) ? (children as ReactElement<{ id?: string }>) : null;
-  const wire = !!element && typeof element.type === 'string' && LABELABLE.has(element.type);
-  const controlId = wire ? (element.props.id ?? autoId) : undefined;
-  const control = wire && !element.props.id ? cloneElement(element, { id: autoId }) : children;
+  // clicking the label does nothing.
+  const { node: control, controlId } = wireControl(children, autoId);
 
   return (
     <div>

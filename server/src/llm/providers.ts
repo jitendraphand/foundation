@@ -43,14 +43,17 @@ export const PROVIDERS: Record<string, ProviderDef> = {
     defaultBaseUrl: 'https://openrouter.ai/api/v1',
     docsUrl: 'https://openrouter.ai/docs',
     keyUrl: 'https://openrouter.ai/keys',
-    modelHint: 'Format: vendor/model, e.g. anthropic/claude-sonnet-4.5',
+    modelHint:
+      'Format: vendor/model, e.g. anthropic/claude-sonnet-4.5. There is no ' +
+      'model called "openrouter/free" - free models are ordinary ids with a ' +
+      ':free suffix, and openrouter/auto picks one for you.',
     suggestedModels: [
       'anthropic/claude-sonnet-4.5',
       'google/gemini-2.5-pro',
       'openai/gpt-4.1',
       'deepseek/deepseek-chat',
-      'qwen/qwen-2.5-72b-instruct',
       'meta-llama/llama-3.3-70b-instruct',
+      'openrouter/auto',
     ],
     supportsJsonMode: true,
   },
@@ -105,6 +108,55 @@ export const PROVIDERS: Record<string, ProviderDef> = {
     supportsJsonMode: false,
   },
 };
+
+/**
+ * Is this string actually a key?
+ *
+ * Every provider shows a new key once and then displays an elided version -
+ * `sk-or-v1-...`. Pasting that is an easy mistake to make, it is long enough
+ * to pass any length check, and the failure surfaces much later as a 401 from
+ * the provider that reads like the key is wrong rather than truncated.
+ *
+ * `error` means it cannot possibly work and is refused. `warning` means it
+ * looks unusual but is saved anyway - provider prefixes do change, and being
+ * wrong about that must not stop someone using their own key.
+ */
+export function describeKeyProblem(provider: string, key: string): { error?: string; warning?: string } {
+  if (/\.\.\.|…/.test(key)) {
+    return {
+      error:
+        'That looks like the shortened key the provider displays after creating it, not the key itself. ' +
+        'A key is only shown in full once - create a new one and copy it straight away.',
+    };
+  }
+  if (/\s/.test(key)) {
+    return { error: 'That key contains a space or a line break. Copy it again without any surrounding text.' };
+  }
+  if (/^["'`<]|["'`>]$/.test(key)) {
+    return { error: 'That key has quotes or angle brackets around it. Paste just the key itself.' };
+  }
+  if (/^(your|my|paste|enter|xxx|test)[-_ ]?(api)?[-_ ]?key/i.test(key)) {
+    return { error: 'That is the placeholder text, not a key.' };
+  }
+
+  const expected: Record<string, { prefix: string; example: string }> = {
+    openai: { prefix: 'sk-', example: 'sk-proj-…' },
+    openrouter: { prefix: 'sk-or-', example: 'sk-or-v1-…' },
+    huggingface: { prefix: 'hf_', example: 'hf_…' },
+    nvidia: { prefix: 'nvapi-', example: 'nvapi-…' },
+  };
+
+  const want = expected[provider];
+  if (want && !key.startsWith(want.prefix)) {
+    return {
+      warning:
+        `${PROVIDERS[provider]?.label ?? provider} keys normally start with "${want.prefix}" (${want.example}). ` +
+        'Saved anyway - test the connection to check it works.',
+    };
+  }
+
+  return {};
+}
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
@@ -207,6 +259,7 @@ export async function chatComplete(req: ChatRequest): Promise<ChatResponse> {
     }
     const hint =
       res.status === 401 ? ' (check the API key in Admin > Settings)' :
+      res.status === 400 && /model/i.test(detail) ? ' (check the model name is exactly right for this provider)' :
       res.status === 402 ? ' (the provider account is out of credit)' :
       res.status === 403 ? ' (the key is valid but not allowed to use this model)' :
       res.status === 404 ? ' (check the model name is exactly right for this provider)' :
