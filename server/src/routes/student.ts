@@ -9,6 +9,22 @@ import { evaluateAvailability } from '../lib/availability.js';
 import { getSchoolTimezone } from '../services/settings.js';
 import { validateResponse } from '../lib/grading.js';
 
+/**
+ * Ceilings for the exam routes.
+ *
+ * Nothing here is a security boundary - every route already checks that the
+ * attempt belongs to the caller. This is a brake on a runaway client: a retry
+ * loop in a tab left open, or a script hammering autosave, should not be able
+ * to take the database down for the rest of the class mid-paper.
+ *
+ * Set well above what the real client does. It saves on answer changes and
+ * heartbeats every 20 seconds, so a student sits at a handful of requests a
+ * minute; these limits are an order of magnitude above that and will not be
+ * felt by anyone actually writing a paper.
+ */
+const EXAM_LIMIT = { rateLimit: { max: 240, timeWindow: '1 minute' } };
+const START_LIMIT = { rateLimit: { max: 20, timeWindow: '5 minutes' } };
+
 export default async function studentRoutes(app: FastifyInstance) {
   app.addHook('preHandler', authenticate);
   app.addHook('preHandler', requireFreshPassword);
@@ -255,7 +271,7 @@ export default async function studentRoutes(app: FastifyInstance) {
   // --- Taking a test -------------------------------------------------------
 
   /** Starts a new attempt, or resumes the one already in progress. */
-  app.post('/api/student/tests/:id/start', async (request, reply) => {
+  app.post('/api/student/tests/:id/start', { config: START_LIMIT }, async (request, reply) => {
     const { id: testId } = z.object({ id: z.string().uuid() }).parse(request.params);
     const userId = request.user!.sub;
 
@@ -373,7 +389,7 @@ export default async function studentRoutes(app: FastifyInstance) {
   });
 
   /** The live paper. Answer keys are never included. */
-  app.get('/api/student/attempts/:id', async (request, reply) => {
+  app.get('/api/student/attempts/:id', { config: EXAM_LIMIT }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
 
     const attempt = await prisma.attempt.findFirst({
@@ -439,7 +455,7 @@ export default async function studentRoutes(app: FastifyInstance) {
    * reject a legitimate answer. Returns the authoritative remaining time so
    * the client's countdown re-syncs continuously.
    */
-  app.post('/api/student/attempts/:id/answer', async (request, reply) => {
+  app.post('/api/student/attempts/:id/answer', { config: EXAM_LIMIT }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = z
       .object({
@@ -515,7 +531,7 @@ export default async function studentRoutes(app: FastifyInstance) {
   });
 
   /** Heartbeat so the countdown stays honest across sleep/reconnect. */
-  app.get('/api/student/attempts/:id/tick', async (request, reply) => {
+  app.get('/api/student/attempts/:id/tick', { config: EXAM_LIMIT }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const attempt = await prisma.attempt.findFirst({
       where: { id, userId: request.user!.sub },
@@ -533,7 +549,7 @@ export default async function studentRoutes(app: FastifyInstance) {
     };
   });
 
-  app.post('/api/student/attempts/:id/submit', async (request, reply) => {
+  app.post('/api/student/attempts/:id/submit', { config: EXAM_LIMIT }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
 
     const attempt = await prisma.attempt.findFirst({

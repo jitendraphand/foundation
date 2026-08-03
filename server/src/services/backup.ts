@@ -28,8 +28,8 @@ import { prisma } from '../db.js';
  * private folder rather than a shared or public one.
  */
 
-export const SCHEMA_VERSION = 3;
-export const APP_VERSION = '1.2.0';
+export const SCHEMA_VERSION = 4;
+export const APP_VERSION = '1.3.0';
 
 function run(cmd: string, args: string[], opts: { env?: NodeJS.ProcessEnv; cwd?: string } = {}): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -79,6 +79,38 @@ function pgEnv(): NodeJS.ProcessEnv {
   };
 }
 
+/**
+ * Rows to hold in memory at once while writing the JSON copy.
+ *
+ * The tables that grow without limit are attempts and answers - a year of a
+ * whole school - and loading all of them at once is the one path in the system
+ * whose memory use is unbounded. They are streamed in pages instead.
+ */
+const EXPORT_PAGE = 2_000;
+
+/** Reads a whole table in pages, so its size does not decide the heap size. */
+async function pagedFindMany<T extends { id: string }>(
+  findMany: (args: { take: number; skip: number; cursor?: { id: string }; orderBy: { id: 'asc' } }) => Promise<T[]>,
+): Promise<T[]> {
+  const all: T[] = [];
+  let cursor: string | undefined;
+
+  for (;;) {
+    const page: T[] = await findMany({
+      take: EXPORT_PAGE,
+      skip: cursor ? 1 : 0,
+      ...(cursor ? { cursor: { id: cursor } } : {}),
+      orderBy: { id: 'asc' },
+    });
+    if (page.length === 0) break;
+    all.push(...page);
+    if (page.length < EXPORT_PAGE) break;
+    cursor = page[page.length - 1].id;
+  }
+
+  return all;
+}
+
 /** Every table, as JSON. The engine-independent copy of the data. */
 async function exportJson(): Promise<Record<string, unknown>> {
   const [
@@ -97,11 +129,16 @@ async function exportJson(): Promise<Record<string, unknown>> {
     prisma.apiCredential.findMany(),
     prisma.test.findMany(),
     prisma.testQuestion.findMany(),
-    prisma.attempt.findMany(),
-    prisma.answer.findMany(),
+    // The two that grow with every paper sat, so they are read in pages.
+    pagedFindMany((args) => prisma.attempt.findMany(args)),
+    pagedFindMany((args) => prisma.answer.findMany(args)),
     prisma.setting.findMany(),
     prisma.activity.findMany(),
     prisma.activityCompletion.findMany(),
+    // Session rows are deliberately not exported. They are live sign-ins, not
+    // data: restoring them would resurrect sessions from whenever the backup
+    // was taken. pg_dump carries them for an exact restore; the portable copy
+    // is about what the school would lose, and a login is not that.
   ]);
 
   return {

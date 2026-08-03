@@ -425,6 +425,30 @@ Nightly at 02:30 — `crontab -e`:
 30 2 * * * cd /home/ubuntu/foundation && ./deploy/backup.sh >> /home/ubuntu/backup.log 2>&1
 ```
 
+### Keeping an eye on things
+
+```bash
+sudo docker compose ps          # every service reports healthy/unhealthy
+sudo docker compose logs -f api
+df -h                           # backups and uploads share the host disk
+```
+
+`docker compose ps` shows a health column for all four services. Note that
+plain Compose does **not** restart a container because its healthcheck fails —
+that is a Swarm/Kubernetes behaviour. `restart: unless-stopped` covers the
+process exiting, which is the failure that actually happens; the healthcheck is
+for you and for the startup ordering.
+
+Backups and uploads are separate volumes but live on the same disk. Old local
+archives are pruned nightly (`BACKUP_RETENTION_DAYS`), and downloaded copies
+are untouched — but a disk with no room left will fail a backup and an image
+upload alike, so keep an eye on `df -h`.
+
+`DB_POOL_SIZE` (default 20) is how many database connections the API may hold.
+Prisma's own default is `cpus × 2 + 1` — five on a two-core box — which a whole
+class starting a paper at the same moment will queue behind and then fail with
+a pool timeout. Raise it only alongside PostgreSQL's `max_connections`.
+
 ### Restoring
 
 ```bash
