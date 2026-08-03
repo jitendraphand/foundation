@@ -266,6 +266,26 @@ docker compose up -d
 
 Database migrations run automatically on startup. Existing data is preserved.
 
+### Sessions: idle timeout and one device per account
+
+Two settings in `.env`, both on by default:
+
+- `IDLE_TIMEOUT_MINUTES=30` — a session with no requests at all for half an
+  hour ends, and the next click returns to the sign-in page saying so. A
+  student writing a paper sends a heartbeat every 20 seconds, so **an exam in
+  progress can never time out**; this catches the shared computer somebody
+  walked away from. Set it to `0` to disable.
+- `SINGLE_DEVICE_LOGIN=true` — signing in ends any other session for that
+  account, so one username and password cannot be used on two devices at once.
+  The newest sign-in wins and the older device is told exactly why it was
+  signed out. Deliberately not the other way round: refusing the new sign-in
+  would lock a student out of their own account after a browser crash, until
+  their old session happened to expire.
+
+Signing out now genuinely ends the session rather than only clearing the
+cookie, and a password change — whether the user does it or an administrator
+resets it — signs that account out everywhere.
+
 ### Adding colleagues
 
 **Admin → Administrators → New administrator.** Tick the privileges they need,

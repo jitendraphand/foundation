@@ -26,6 +26,7 @@ import adminActivityRoutes from './routes/admin/activities.js';
 
 import { sweepExpiredAttempts } from './services/attempt.js';
 import { pruneBackups } from './services/backup.js';
+import { pruneSessions } from './services/sessions.js';
 
 /**
  * Pretty logs are a development nicety, not a requirement. Production ships
@@ -139,6 +140,7 @@ const sweepTimer = setInterval(() => {
 // Nightly prune of old local archives. Downloaded copies are unaffected.
 const pruneTimer = setInterval(() => {
   pruneBackups().catch((err) => app.log.error({ err }, 'backup prune failed'));
+  pruneSessions().catch((err) => app.log.error({ err }, 'session prune failed'));
 }, 24 * 60 * 60_000);
 
 const shutdown = async (signal: string) => {

@@ -1,6 +1,7 @@
 import jwt from 'jsonwebtoken';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { cookieSecure, env } from '../env.js';
+import { touchSession } from '../services/sessions.js';
 import { prisma } from '../db.js';
 import type { Role } from '@prisma/client';
 import { hasAnyPermission, sanitizePermissions, type Permission } from '../lib/permissions.js';
@@ -11,6 +12,12 @@ export interface SessionClaims {
   sub: string;
   username: string;
   role: Role;
+  /**
+   * The Session row backing this token. Without it a JWT can only be waited
+   * out; with it, signing out, an idle timeout and "one account, one device"
+   * all become possible.
+   */
+  sid?: string;
 }
 
 declare module 'fastify' {
@@ -57,6 +64,20 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
     return reply.code(401).send({ error: 'Your session has expired. Please sign in again.' });
   }
 
+  // The session row decides whether this token is still good, and rolls its
+  // idle clock forward. A token issued before sessions existed has no sid and
+  // is simply retired, which costs one re-login.
+  if (!claims.sid) {
+    clearSessionCookie(reply);
+    return reply.code(401).send({ error: 'Please sign in again.', code: 'SESSION_ENDED' });
+  }
+
+  const check = await touchSession(claims.sid);
+  if (!check.ok) {
+    clearSessionCookie(reply);
+    return reply.code(401).send({ error: check.message ?? 'Your session has ended.', code: 'SESSION_ENDED', reason: check.reason });
+  }
+
   // Privileges are read from the row on every request, never from the token,
   // so revoking one takes effect immediately rather than when it expires.
   const user = await prisma.user.findUnique({
@@ -80,6 +101,7 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
     sub: user.id,
     username: user.username,
     role: user.role,
+    sid: claims.sid,
     mustChangePassword: user.mustChangePassword,
     permissions: sanitizePermissions(user.permissions),
   };

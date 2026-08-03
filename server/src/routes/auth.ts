@@ -4,7 +4,10 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../db.js';
 import { checkPassword, hashPassword, verifyPassword } from '../lib/password.js';
 import { allocateUsername } from '../lib/username.js';
-import { audit, authenticate, clearSessionCookie, setSessionCookie, signSession } from '../middleware/auth.js';
+import jwt from 'jsonwebtoken';
+import { env } from '../env.js';
+import { COOKIE_NAME, audit, authenticate, clearSessionCookie, setSessionCookie, signSession } from '../middleware/auth.js';
+import { createSession, revokeAllSessions, revokeSession } from '../services/sessions.js';
 
 const MAX_FAILED = 8;
 const LOCK_MINUTES = 15;
@@ -88,7 +91,12 @@ export default async function authRoutes(app: FastifyInstance) {
 
         await audit(user.id, 'user.signup', { entity: 'User', entityId: user.id, ip: request.ip });
 
-        const token = signSession({ sub: user.id, username: user.username, role: user.role });
+        const session = await createSession(user.id, {
+          ip: request.ip,
+          userAgent: request.headers['user-agent'],
+          singleDevice: env.SINGLE_DEVICE_LOGIN,
+        });
+        const token = signSession({ sub: user.id, username: user.username, role: user.role, sid: session.id });
         setSessionCookie(reply, token);
 
         return reply.code(201).send({
@@ -160,9 +168,18 @@ export default async function authRoutes(app: FastifyInstance) {
     });
     await audit(user.id, 'auth.login', { entity: 'User', entityId: user.id, ip: request.ip });
 
-    setSessionCookie(reply, signSession({ sub: user.id, username: user.username, role: user.role }));
+    // One account, one device: this ends any session already running for it.
+    const session = await createSession(user.id, {
+      ip: request.ip,
+      userAgent: request.headers['user-agent'],
+      singleDevice: env.SINGLE_DEVICE_LOGIN,
+    });
+    setSessionCookie(reply, signSession({ sub: user.id, username: user.username, role: user.role, sid: session.id }));
 
     return {
+      // Worth saying out loud: if this account was open elsewhere, that
+      // session has just been ended, and the person using it will be told why.
+      displacedOtherDevice: session.supersededCount > 0,
       user: {
         id: user.id,
         publicId: user.publicId,
@@ -177,6 +194,18 @@ export default async function authRoutes(app: FastifyInstance) {
   });
 
   app.post('/api/auth/logout', async (request, reply) => {
+    // Clearing the cookie only stops this browser sending the token; the token
+    // itself stays valid until it expires. Ending the session is what makes
+    // signing out mean something.
+    const token = request.cookies?.[COOKIE_NAME];
+    if (token) {
+      try {
+        const claims = jwt.verify(token, env.JWT_SECRET) as { sid?: string };
+        if (claims.sid) await revokeSession(claims.sid, 'signed_out');
+      } catch {
+        // An expired or forged token has nothing to revoke.
+      }
+    }
     clearSessionCookie(reply);
     return { ok: true };
   });
@@ -222,8 +251,18 @@ export default async function authRoutes(app: FastifyInstance) {
         passwordSetAt: new Date(),
       },
     });
-    await audit(user.id, 'auth.password_changed', { entity: 'User', entityId: user.id, ip: request.ip });
+    // A password change should log out anywhere the old one was used.
+    const endedElsewhere = await revokeAllSessions(user.id, 'password_changed', request.user!.sid);
 
-    return { ok: true, message: 'Your password has been updated.' };
+    await audit(user.id, 'auth.password_changed', {
+      entity: 'User', entityId: user.id, ip: request.ip, detail: { endedElsewhere },
+    });
+
+    return {
+      ok: true,
+      message:
+        'Your password has been updated.' +
+        (endedElsewhere > 0 ? ' Any other device signed in with the old password has been signed out.' : ''),
+    };
   });
 }

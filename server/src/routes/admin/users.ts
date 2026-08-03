@@ -6,6 +6,7 @@ import { checkPassword, hashPassword } from '../../lib/password.js';
 import { allocateUsername } from '../../lib/username.js';
 import { audit, requirePermission } from '../../middleware/auth.js';
 import { ALL_PERMISSIONS, PERMISSIONS, PRESETS, sanitizePermissions, type Permission } from '../../lib/permissions.js';
+import { revokeAllSessions } from '../../services/sessions.js';
 
 export default async function adminUserRoutes(app: FastifyInstance) {
   /** Paginated, searchable user list. */
@@ -256,6 +257,11 @@ export default async function adminUserRoutes(app: FastifyInstance) {
     }
 
     await prisma.user.update({ where: { id }, data: { isActive } });
+    // authenticate already refuses a deactivated account on the next request;
+    // ending the session as well means the browser is told to sign in again
+    // rather than sitting on a dead page.
+    if (!isActive) await revokeAllSessions(id, 'revoked');
+
     await audit(request.user!.sub, isActive ? 'user.activate' : 'user.deactivate', {
       entity: 'User', entityId: id, ip: request.ip,
     });
@@ -286,11 +292,20 @@ export default async function adminUserRoutes(app: FastifyInstance) {
         passwordSetAt: new Date(),
       },
     });
-    await audit(request.user!.sub, 'user.password_reset', { entity: 'User', entityId: id, ip: request.ip });
+    // The old password must stop working everywhere it is signed in, or
+    // resetting it for a student who has lost control of their account would
+    // achieve nothing until their session happened to expire.
+    const endedSessions = await revokeAllSessions(id, 'password_changed');
+
+    await audit(request.user!.sub, 'user.password_reset', {
+      entity: 'User', entityId: id, ip: request.ip, detail: { endedSessions },
+    });
 
     return {
       ok: true,
-      message: `Temporary password set for ${user.username}. They will be asked to choose a new one when they sign in.`,
+      message:
+        `Temporary password set for ${user.username}. They will be asked to choose a new one when they sign in.` +
+        (endedSessions > 0 ? ' They have been signed out of every device.' : ''),
     };
   });
 
@@ -337,6 +352,7 @@ export default async function adminUserRoutes(app: FastifyInstance) {
         rollNo: `${user.rollNo}.deleted.${Date.now().toString(36)}`.slice(0, 20),
       },
     });
+    await revokeAllSessions(id, 'revoked');
     await audit(request.user!.sub, 'user.delete_soft', {
       entity: 'User', entityId: id, ip: request.ip, detail: { username: user.username },
     });

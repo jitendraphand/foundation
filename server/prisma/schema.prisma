@@ -30,7 +30,7 @@
 // ---------------------------------------------------------------------------
 
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
   // Both targets so the image builds on x86 laptops and arm64 servers alike.
   binaryTargets = ["native", "linux-arm64-openssl-3.0.x", "debian-openssl-3.0.x"]
 }
@@ -151,6 +151,8 @@ model User {
   /// grant access.
   permissions String[] @default([])
 
+  sessions Session[]
+
   lastLoginAt   DateTime?
   failedLogins  Int       @default(0)
   lockedUntil   DateTime?
@@ -162,14 +164,14 @@ model User {
 
   meta Json @default("{}")
 
-  attempts        Attempt[]
-  generationRuns  GenerationRun[] @relation("RunRequestedBy")
-  practiceTests   Test[]          @relation("PracticeTarget")
-  createdTests    Test[]          @relation("TestCreatedBy")
-  auditLogs       AuditLog[]
-  backups         BackupArchive[]
-  activities      Activity[]           @relation("ActivityCreatedBy")
-  targetedActivities Activity[]        @relation("ActivityTarget")
+  attempts            Attempt[]
+  generationRuns      GenerationRun[]      @relation("RunRequestedBy")
+  practiceTests       Test[]               @relation("PracticeTarget")
+  createdTests        Test[]               @relation("TestCreatedBy")
+  auditLogs           AuditLog[]
+  backups             BackupArchive[]
+  activities          Activity[]           @relation("ActivityCreatedBy")
+  targetedActivities  Activity[]           @relation("ActivityTarget")
   activityCompletions ActivityCompletion[]
 
   // A roll number is unique inside a class, not globally.
@@ -200,7 +202,7 @@ model SchoolClass {
 /// Self-referencing tree: Subject -> Topic -> Subtopic. Arbitrary depth, so a
 /// future "unit" or "chapter" level slots in without a migration.
 model CurriculumNode {
-  id       String  @id @default(uuid())
+  id       String           @id @default(uuid())
   parentId String?
   parent   CurriculumNode?  @relation("NodeTree", fields: [parentId], references: [id], onDelete: Cascade)
   children CurriculumNode[] @relation("NodeTree")
@@ -335,9 +337,9 @@ model Question {
   timesCorrect Int   @default(0)
   observedP    Float @default(0) // timesCorrect / timesServed
 
-  contentVersion Int      @default(1)
-  createdAt      DateTime @default(now())
-  updatedAt      DateTime @updatedAt
+  contentVersion Int       @default(1)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
   deletedAt      DateTime?
 
   meta Json @default("{}")
@@ -358,7 +360,7 @@ model Question {
 /// Content-addressed by SHA-256 so identical images are stored once and a
 /// restore can verify integrity.
 model Asset {
-  id         String   @id @default(uuid())
+  id         String  @id @default(uuid())
   kind       String // "IMAGE" | "RENDERED_DIAGRAM"
   mimeType   String
   byteSize   Int
@@ -562,7 +564,7 @@ model Test {
 }
 
 model TestQuestion {
-  id         String @id @default(uuid())
+  id         String   @id @default(uuid())
   testId     String
   test       Test     @relation(fields: [testId], references: [id], onDelete: Cascade)
   questionId String
@@ -602,8 +604,8 @@ model Attempt {
   maxScore   Float @default(0)
   percentage Float @default(0)
 
-  correctCount   Int @default(0)
-  incorrectCount Int @default(0)
+  correctCount    Int @default(0)
+  incorrectCount  Int @default(0)
   unansweredCount Int @default(0)
 
   /// Per-axis breakdown computed once at submit, so the student dashboard and
@@ -636,11 +638,11 @@ model Answer {
   ///   { optionId: "b" } | { optionIds: [...] } | { value: true } | { value: 3.14 }
   response Json?
 
-  isCorrect     Boolean?
-  marksAwarded  Float    @default(0)
-  timeSpentMs   Int      @default(0)
-  visitCount    Int      @default(0)
-  isMarkedForReview Boolean @default(false)
+  isCorrect         Boolean?
+  marksAwarded      Float    @default(0)
+  timeSpentMs       Int      @default(0)
+  visitCount        Int      @default(0)
+  isMarkedForReview Boolean  @default(false)
 
   answeredAt DateTime?
   updatedAt  DateTime  @updatedAt
@@ -653,16 +655,16 @@ model Answer {
 // --- Operations ------------------------------------------------------------
 
 model BackupArchive {
-  id       String @id @default(uuid())
-  filename String
-  byteSize Int
-  sha256   String
+  id             String  @id @default(uuid())
+  filename       String
+  byteSize       Int
+  sha256         String
   /// Archives are plain .tar.gz. Keep them somewhere private - they contain
   /// password hashes and LLM API keys.
   isEncrypted    Boolean @default(false)
   includesAssets Boolean @default(true)
   /// { schemaVersion, appVersion, tableCounts: {...}, createdAtUtc }
-  manifest    Json     @default("{}")
+  manifest       Json    @default("{}")
 
   createdById String?
   createdBy   User?   @relation(fields: [createdById], references: [id], onDelete: SetNull)
@@ -675,15 +677,15 @@ model BackupArchive {
 }
 
 model AuditLog {
-  id       String  @id @default(uuid())
-  actorId  String?
-  actor    User?   @relation(fields: [actorId], references: [id], onDelete: SetNull)
-  action   String // "user.deactivate", "test.publish", "backup.create", ...
-  entity   String?
-  entityId String?
-  ip       String?
+  id        String   @id @default(uuid())
+  actorId   String?
+  actor     User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  action    String // "user.deactivate", "test.publish", "backup.create", ...
+  entity    String?
+  entityId  String?
+  ip        String?
   /// Before/after snapshot for anything the admin changed.
-  detail   Json     @default("{}")
+  detail    Json     @default("{}")
   createdAt DateTime @default(now())
 
   @@index([actorId, createdAt])
@@ -777,9 +779,9 @@ model ActivityCompletion {
   lastBeatAt DateTime @default(now())
 
   /// Accumulated on the server from heartbeats, not trusted from the client.
-  secondsSpent Int @default(0)
+  secondsSpent Int     @default(0)
   /// How far through the cards they got, so a half-finished pass is visible.
-  cardsSeen    Int @default(0)
+  cardsSeen    Int     @default(0)
   videoOpened  Boolean @default(false)
 
   meta Json @default("{}")
@@ -787,4 +789,40 @@ model ActivityCompletion {
   @@unique([activityId, userId])
   @@index([userId, completedAt])
   @@index([activityId, completedAt])
+}
+
+/// A signed-in session.
+///
+/// The JWT carries only a `jti` pointing here, so a session can actually be
+/// ended: signing out, an idle timeout, an administrator resetting a password,
+/// or the same account signing in somewhere else all revoke the row and the
+/// token stops working on the very next request. A JWT on its own can only be
+/// waited out.
+model Session {
+  id String @id @default(uuid())
+
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Rolls forward on every request, throttled - this is what an idle timeout
+  /// is measured from.
+  lastSeenAt DateTime @default(now())
+  /// The absolute deadline, regardless of activity.
+  expiresAt  DateTime
+
+  revokedAt     DateTime?
+  /// Why it ended, so "you were signed out" can say something useful:
+  /// signed_out | idle | superseded | password_changed | revoked
+  revokedReason String?
+
+  /// Recorded to tell the student which device took their place.
+  ip        String?
+  userAgent String?
+
+  createdAt DateTime @default(now())
+
+  meta Json @default("{}")
+
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
 }

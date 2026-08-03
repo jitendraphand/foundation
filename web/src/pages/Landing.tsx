@@ -18,6 +18,7 @@ type Mode = 'choose' | 'login' | 'signup';
 
 export default function Landing() {
   const [mode, setMode] = useState<Mode>('choose');
+  const { endedReason, clearEndedReason } = useAuth();
 
   return (
     <main className="min-h-full flex flex-col items-center justify-center px-4 py-12">
@@ -29,6 +30,13 @@ export default function Landing() {
           <h1 className="text-xl font-semibold">Foundation</h1>
           <p className="text-sm text-ink-muted mt-1">Online examinations</p>
         </header>
+
+        {/* Why they are back here, when they did not ask to be. */}
+        {endedReason && (
+          <div className="mb-4">
+            <Alert tone="warn" onDismiss={clearEndedReason}>{endedReason}</Alert>
+          </div>
+        )}
 
         {mode === 'choose' && (
           <div className="card p-6 space-y-3">

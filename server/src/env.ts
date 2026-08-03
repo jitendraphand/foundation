@@ -9,6 +9,25 @@ const schema = z.object({
   ADMIN_USERNAME: z.string().default('admin'),
   ADMIN_PASSWORD: z.string().default('foundation_123'),
   SESSION_TTL_MINUTES: z.coerce.number().default(720),
+
+  /**
+   * Minutes of no requests at all before a session ends. 0 disables it.
+   *
+   * Separate from SESSION_TTL_MINUTES, which is the absolute lifetime. A
+   * student writing a paper heartbeats every 20 seconds, so an exam in
+   * progress can never go idle; this catches the shared library computer
+   * somebody walked away from.
+   */
+  IDLE_TIMEOUT_MINUTES: z.coerce.number().min(0).default(30),
+
+  /**
+   * One account, one device. Signing in ends any other live session for that
+   * account, so credentials cannot be shared around a classroom.
+   */
+  SINGLE_DEVICE_LOGIN: z
+    .enum(['true', 'false'])
+    .default('true')
+    .transform((v) => v === 'true'),
   BACKUP_RETENTION_DAYS: z.coerce.number().default(7),
   LLM_TIMEOUT_MS: z.coerce.number().default(180_000),
   PUBLIC_HOST: z.string().default('localhost'),

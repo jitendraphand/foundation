@@ -26,6 +26,15 @@ export class ApiError extends Error {
   get needsActivity() {
     return this.body?.code === 'ACTIVITY_REQUIRED';
   }
+
+  /**
+   * Set when the session was ended rather than merely absent - signed out
+   * elsewhere, idle too long, password changed. Carries a message worth
+   * showing, unlike a plain "not signed in".
+   */
+  get sessionEnded() {
+    return this.body?.code === 'SESSION_ENDED';
+  }
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -59,6 +68,15 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
   if (!res.ok) {
     const message = (body?.error as string) || `Request failed (${res.status}).`;
+
+    // A session ended underneath us - signed in elsewhere, idle too long,
+    // password changed. Announce it once, centrally, so whichever screen the
+    // user happens to be on gives way to the sign-in page with an explanation
+    // instead of showing a bare error it cannot do anything about.
+    if (body?.code === 'SESSION_ENDED') {
+      window.dispatchEvent(new CustomEvent('foundation:session-ended', { detail: { message } }));
+    }
+
     throw new ApiError(message, res.status, body);
   }
 
