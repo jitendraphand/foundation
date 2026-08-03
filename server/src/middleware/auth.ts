@@ -126,6 +126,42 @@ export async function requireFreshPassword(request: FastifyRequest, reply: Fasti
   }
 }
 
+/**
+ * Stops a student at the door until every mandatory activity is done.
+ *
+ * Applied to the student routes only. The activity routes themselves, sign-in
+ * and the password change are deliberately outside it - blocking the very
+ * screens needed to clear the block would leave nowhere to go.
+ *
+ * Administrators are never held; the check in pendingActivitiesFor short
+ * circuits for them.
+ *
+ * A student already writing a paper is not held either. An activity published
+ * during a test would otherwise throw the whole class out of it, and - because
+ * the exam clock is server-side and keeps running - they could not even submit
+ * what they had written. Same reasoning as an availability window closing
+ * mid-attempt: the gate applies to what they do next, not to the paper in
+ * front of them. It resumes the moment they submit.
+ */
+export async function requireActivitiesComplete(request: FastifyRequest, reply: FastifyReply) {
+  if (!request.user || request.user.role !== 'STUDENT') return;
+
+  const writing = await prisma.attempt.count({
+    where: { userId: request.user.sub, status: 'IN_PROGRESS' },
+  });
+  if (writing > 0) return;
+
+  const { hasPendingActivity } = await import('../services/activities.js');
+  const pending = await hasPendingActivity(request.user.sub);
+  if (!pending) return;
+
+  return reply.code(428).send({
+    error: `Please complete "${pending.title}" before continuing.`,
+    code: 'ACTIVITY_REQUIRED',
+    activity: pending,
+  });
+}
+
 export async function audit(
   actorId: string | null,
   action: string,

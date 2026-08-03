@@ -1,4 +1,5 @@
-import { useEffect, useRef } from 'react';
+import { cloneElement, isValidElement, useEffect, useId, useRef } from 'react';
+import type { ReactElement } from 'react';
 
 export function Spinner({ label = 'Loading' }: { label?: string }) {
   return (
@@ -71,6 +72,8 @@ export function Card({
   );
 }
 
+const LABELABLE = new Set(['input', 'select', 'textarea']);
+
 export function Field({
   label,
   hint,
@@ -84,13 +87,24 @@ export function Field({
   children: React.ReactNode;
   required?: boolean;
 }) {
+  const autoId = useId();
+
+  // Tie the label to the control it names. Without this the label is only
+  // text sitting above a box: a screen reader announces an unnamed field, and
+  // clicking the label does nothing. Only real form controls are wired up -
+  // a Field wrapping a group of checkboxes is left alone.
+  const element = isValidElement(children) ? (children as ReactElement<{ id?: string }>) : null;
+  const wire = !!element && typeof element.type === 'string' && LABELABLE.has(element.type);
+  const controlId = wire ? (element.props.id ?? autoId) : undefined;
+  const control = wire && !element.props.id ? cloneElement(element, { id: autoId }) : children;
+
   return (
     <div>
-      <label className="label">
+      <label className="label" htmlFor={controlId}>
         {label}
         {required && <span className="text-bad ml-0.5">*</span>}
       </label>
-      {children}
+      {control}
       {hint && !error && <p className="mt-1 text-[11px] text-ink-faint">{hint}</p>}
       {error && <p className="mt-1 text-[11px] text-bad">{error}</p>}
     </div>

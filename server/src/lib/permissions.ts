@@ -56,6 +56,13 @@ export const PERMISSIONS = [
     description: 'Reveal or withhold the results of a test for the whole class.',
   },
   {
+    code: 'activities.manage',
+    label: 'Manage activities',
+    group: 'Questions',
+    description:
+      'Create flashcard and video activities, and decide whether students must complete them before doing anything else.',
+  },
+  {
     code: 'analytics.view',
     label: 'View analytics',
     group: 'Reporting',
@@ -104,7 +111,7 @@ export function hasAnyPermission(granted: readonly string[], required: readonly 
 
 /**
  * Ready-made bundles for the common jobs, so an admin does not have to reason
- * about nine checkboxes to add a colleague. The UI ticks the boxes and the
+ * about every checkbox to add a colleague. The UI ticks the boxes and the
  * admin can then adjust any of them.
  */
 export const PRESETS: Array<{ code: string; label: string; description: string; permissions: Permission[] }> = [
@@ -118,13 +125,13 @@ export const PRESETS: Array<{ code: string; label: string; description: string; 
     code: 'teacher',
     label: 'Teacher',
     description: 'Set and run tests, review questions, release results and see how the class is doing.',
-    permissions: ['questions.generate', 'questions.review', 'tests.manage', 'results.release', 'analytics.view'],
+    permissions: ['questions.generate', 'questions.review', 'activities.manage', 'tests.manage', 'results.release', 'analytics.view'],
   },
   {
     code: 'question_setter',
     label: 'Question setter',
     description: 'Write and review questions only. Cannot publish tests or see student data.',
-    permissions: ['questions.generate', 'questions.review'],
+    permissions: ['questions.generate', 'questions.review', 'activities.manage'],
   },
   {
     code: 'invigilator',

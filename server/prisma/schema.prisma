@@ -91,6 +91,18 @@ enum TagAxis {
   SKILL
 }
 
+enum ActivityKind {
+  FLASHCARD // cards only
+  VIDEO // a video only
+  MIXED // cards and a video
+}
+
+enum ActivityStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
 /// How a daily availability window is interpreted. See lib/availability.ts.
 enum AvailabilityMode {
   ALWAYS // no daily restriction
@@ -156,6 +168,9 @@ model User {
   createdTests    Test[]          @relation("TestCreatedBy")
   auditLogs       AuditLog[]
   backups         BackupArchive[]
+  activities      Activity[]           @relation("ActivityCreatedBy")
+  targetedActivities Activity[]        @relation("ActivityTarget")
+  activityCompletions ActivityCompletion[]
 
   // A roll number is unique inside a class, not globally.
   @@unique([grade, division, rollNo], name: "roll_in_class")
@@ -681,4 +696,95 @@ model Setting {
   key       String   @id
   value     Json
   updatedAt DateTime @updatedAt
+}
+
+// --- Activities ------------------------------------------------------------
+
+/// A short piece of learning an administrator can put in front of students:
+/// a set of flashcards, a video, or both. When `isMandatory` is set, a
+/// targeted student is stopped at the door until they have been through it.
+model Activity {
+  id String @id @default(uuid())
+
+  /// Stable ACT-0001 identifier, like tests and users.
+  publicId String @unique @default(dbgenerated("('ACT-'::text || lpad((nextval('activity_public_id_seq'::regclass))::text, 4, '0'::text))"))
+
+  title       String
+  description String? @db.Text
+
+  kind   ActivityKind   @default(FLASHCARD)
+  status ActivityStatus @default(DRAFT)
+
+  /// Flashcards, reusing the very same block format as questions, so a card
+  /// can hold maths, an SVG diagram, a chart or a table - not just text:
+  ///   { version: 1, cards: [ { id, title?, blocks: [Block, ...] } ] }
+  content Json @default("{\"version\":1,\"cards\":[]}")
+
+  /// Normalised by lib/video.ts. `videoEmbedUrl` is only ever set for
+  /// YouTube/Vimeo; anything else opens in a new tab instead of being framed.
+  videoUrl      String?
+  videoEmbedUrl String?
+  videoProvider String?
+
+  /// Seconds the student must spend before it can be marked done. 0 = none.
+  /// A crude but honest guard against clicking straight past it.
+  minSeconds Int @default(0)
+
+  /// The point of the feature: block everything else until it is done.
+  isMandatory Boolean @default(true)
+
+  // Audience, exactly as for tests. Empty arrays mean everyone.
+  targetGrades    String[] @default([])
+  targetDivisions String[] @default([])
+  targetUserId    String?
+  targetUser      User?    @relation("ActivityTarget", fields: [targetUserId], references: [id], onDelete: Cascade)
+
+  startsAt DateTime?
+  endsAt   DateTime?
+
+  createdById String
+  createdBy   User   @relation("ActivityCreatedBy", fields: [createdById], references: [id])
+
+  publishedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  meta Json @default("{}")
+
+  completions ActivityCompletion[]
+
+  @@index([status, isMandatory])
+  @@index([targetUserId])
+  @@index([createdById])
+}
+
+/// One student's progress through one activity. Created when they open it,
+/// completed when they reach the end and the minimum time has elapsed.
+model ActivityCompletion {
+  id String @id @default(uuid())
+
+  activityId String
+  activity   Activity @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  /// When the last heartbeat arrived. Time is credited from the gap between
+  /// beats, so the client never gets to declare how long it spent.
+  lastBeatAt DateTime @default(now())
+
+  /// Accumulated on the server from heartbeats, not trusted from the client.
+  secondsSpent Int @default(0)
+  /// How far through the cards they got, so a half-finished pass is visible.
+  cardsSeen    Int @default(0)
+  videoOpened  Boolean @default(false)
+
+  meta Json @default("{}")
+
+  @@unique([activityId, userId])
+  @@index([userId, completedAt])
+  @@index([activityId, completedAt])
 }

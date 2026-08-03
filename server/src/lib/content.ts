@@ -212,6 +212,42 @@ export function normalizeBlocks(raw: unknown): Block[] {
 
 export const EMPTY_CONTENT: Content = { version: CONTENT_VERSION, blocks: [] };
 
+// --- Activity flashcards ---------------------------------------------------
+
+/**
+ * A flashcard is a titled stack of the very same blocks a question is made of.
+ * That is deliberate: an admin explaining a formula gets KaTeX, an admin
+ * explaining a circuit gets SVG, and neither needed a new content pipeline.
+ */
+export const activityCardSchema = z.object({
+  id: z.string().min(1).max(40),
+  title: z.string().max(200).optional(),
+  blocks: z.array(blockSchema).min(1).max(20),
+});
+
+export type ActivityCard = z.infer<typeof activityCardSchema>;
+
+export const activityContentSchema = z.object({
+  version: z.number().int().default(CONTENT_VERSION),
+  cards: z.array(activityCardSchema).max(50).default([]),
+});
+
+export type ActivityContent = z.infer<typeof activityContentSchema>;
+
+/** Same contract as normalizeContent: SVG is sanitised on the way in. */
+export function normalizeActivityContent(raw: unknown): ActivityContent {
+  const parsed = activityContentSchema.parse(raw);
+  return {
+    version: CONTENT_VERSION,
+    cards: parsed.cards.map((card) => ({
+      ...card,
+      blocks: card.blocks.map((b) => (b.type === 'svg' ? { ...b, svg: sanitizeSvg(b.svg) } : b)),
+    })),
+  };
+}
+
+export const EMPTY_ACTIVITY_CONTENT: ActivityContent = { version: CONTENT_VERSION, cards: [] };
+
 /** Flattens blocks to plain text, for search and for CSV export. */
 export function blocksToText(blocks: Block[]): string {
   return blocks

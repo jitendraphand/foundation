@@ -5,6 +5,7 @@ import rateLimit from '@fastify/rate-limit';
 import multipart from '@fastify/multipart';
 import { ZodError } from 'zod';
 import fs from 'node:fs/promises';
+import { createRequire } from 'node:module';
 
 import { env, isProd } from './env.js';
 import { prisma } from './db.js';
@@ -13,6 +14,7 @@ import type { Permission } from './lib/permissions.js';
 
 import authRoutes from './routes/auth.js';
 import studentRoutes from './routes/student.js';
+import activityRoutes from './routes/activity.js';
 import adminUserRoutes from './routes/admin/users.js';
 import adminQuestionRoutes from './routes/admin/questions.js';
 import adminTestRoutes from './routes/admin/tests.js';
@@ -20,14 +22,30 @@ import adminAnalyticsRoutes from './routes/admin/analytics.js';
 import adminSettingsRoutes from './routes/admin/settings.js';
 import adminBackupRoutes from './routes/admin/backup.js';
 import adminAssetRoutes, { assetReadRoutes } from './routes/admin/assets.js';
+import adminActivityRoutes from './routes/admin/activities.js';
 
 import { sweepExpiredAttempts } from './services/attempt.js';
 import { pruneBackups } from './services/backup.js';
 
+/**
+ * Pretty logs are a development nicety, not a requirement. Production ships
+ * without pino-pretty, so resolve it before asking pino to load it - otherwise
+ * a NODE_ENV=development run against the production image dies at startup.
+ */
+const prettyTransport = (() => {
+  if (isProd) return undefined;
+  try {
+    createRequire(import.meta.url).resolve('pino-pretty');
+    return { target: 'pino-pretty' };
+  } catch {
+    return undefined;
+  }
+})();
+
 const app = Fastify({
   logger: {
     level: isProd ? 'info' : 'debug',
-    transport: isProd ? undefined : { target: 'pino-pretty' },
+    transport: prettyTransport,
   },
   // Caddy is the only thing in front of us, so its X-Forwarded-For is
   // trustworthy and gives real client IPs for rate limiting.
@@ -76,6 +94,8 @@ app.get('/api/health', async () => {
 
 await app.register(authRoutes);
 await app.register(studentRoutes);
+// Registered outside the student gate: these are the routes used to clear it.
+await app.register(activityRoutes);
 await app.register(assetReadRoutes);
 
 /**
@@ -105,6 +125,7 @@ await adminArea('analytics.view', adminAnalyticsRoutes);
 await adminArea('settings.manage', adminSettingsRoutes);
 await adminArea('backups.manage', adminBackupRoutes);
 await adminArea('questions.review', adminAssetRoutes);
+await adminArea('activities.manage', adminActivityRoutes);
 
 await fs.mkdir(env.UPLOAD_DIR, { recursive: true }).catch(() => undefined);
 await fs.mkdir(env.BACKUP_DIR, { recursive: true }).catch(() => undefined);

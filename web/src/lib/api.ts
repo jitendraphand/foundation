@@ -13,9 +13,18 @@ export class ApiError extends Error {
     this.name = 'ApiError';
   }
 
-  /** Set when the server demands a password change before anything else. */
+  /**
+   * The server answers 428 for anything the user must clear before carrying
+   * on, and says which in `code` — so these two are distinguished by the code
+   * rather than by the status alone.
+   */
   get needsPasswordChange() {
-    return this.status === 428 || this.body?.code === 'PASSWORD_CHANGE_REQUIRED';
+    return this.body?.code === 'PASSWORD_CHANGE_REQUIRED';
+  }
+
+  /** Set when a mandatory activity is standing in the way. */
+  get needsActivity() {
+    return this.body?.code === 'ACTIVITY_REQUIRED';
   }
 }
 

@@ -1,13 +1,14 @@
 -- Sequences backing the stable, human-readable identifiers.
 --
---   User.publicId -> USR-00001, USR-00002, ...
---   Test.publicId -> TST-0001,  TST-0002,  ...
+--   User.publicId     -> USR-00001, USR-00002, ...
+--   Test.publicId     -> TST-0001,  TST-0002,  ...
+--   Activity.publicId -> ACT-0001,  ACT-0002,  ...
 --
--- These are assigned by the database at INSERT time and are never updated, so
--- a student keeps the same identity through any number of spelling
--- corrections, username changes or class moves.
+-- Assigned by the database at INSERT time and never updated, so a student
+-- keeps the same identity through any number of corrections.
 CREATE SEQUENCE IF NOT EXISTS "user_public_id_seq" START WITH 1 INCREMENT BY 1;
 CREATE SEQUENCE IF NOT EXISTS "test_public_id_seq" START WITH 1 INCREMENT BY 1;
+CREATE SEQUENCE IF NOT EXISTS "activity_public_id_seq" START WITH 1 INCREMENT BY 1;
 
 -- CreateEnum
 CREATE TYPE "Role" AS ENUM ('STUDENT', 'ADMIN');
@@ -32,6 +33,12 @@ CREATE TYPE "GenerationStatus" AS ENUM ('PENDING', 'RUNNING', 'SUCCEEDED', 'FAIL
 
 -- CreateEnum
 CREATE TYPE "TagAxis" AS ENUM ('DIFFICULTY', 'COGNITIVE', 'SKILL');
+
+-- CreateEnum
+CREATE TYPE "ActivityKind" AS ENUM ('FLASHCARD', 'VIDEO', 'MIXED');
+
+-- CreateEnum
+CREATE TYPE "ActivityStatus" AS ENUM ('DRAFT', 'PUBLISHED', 'ARCHIVED');
 
 -- CreateEnum
 CREATE TYPE "AvailabilityMode" AS ENUM ('ALWAYS', 'ALLOW_WINDOW', 'BLOCK_WINDOW');
@@ -366,6 +373,51 @@ CREATE TABLE "Setting" (
     CONSTRAINT "Setting_pkey" PRIMARY KEY ("key")
 );
 
+-- CreateTable
+CREATE TABLE "Activity" (
+    "id" TEXT NOT NULL,
+    "publicId" TEXT NOT NULL DEFAULT ('ACT-'::text || lpad((nextval('activity_public_id_seq'::regclass))::text, 4, '0'::text)),
+    "title" TEXT NOT NULL,
+    "description" TEXT,
+    "kind" "ActivityKind" NOT NULL DEFAULT 'FLASHCARD',
+    "status" "ActivityStatus" NOT NULL DEFAULT 'DRAFT',
+    "content" JSONB NOT NULL DEFAULT '{"version":1,"cards":[]}',
+    "videoUrl" TEXT,
+    "videoEmbedUrl" TEXT,
+    "videoProvider" TEXT,
+    "minSeconds" INTEGER NOT NULL DEFAULT 0,
+    "isMandatory" BOOLEAN NOT NULL DEFAULT true,
+    "targetGrades" TEXT[] DEFAULT ARRAY[]::TEXT[],
+    "targetDivisions" TEXT[] DEFAULT ARRAY[]::TEXT[],
+    "targetUserId" TEXT,
+    "startsAt" TIMESTAMP(3),
+    "endsAt" TIMESTAMP(3),
+    "createdById" TEXT NOT NULL,
+    "publishedAt" TIMESTAMP(3),
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
+    "deletedAt" TIMESTAMP(3),
+    "meta" JSONB NOT NULL DEFAULT '{}',
+
+    CONSTRAINT "Activity_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "ActivityCompletion" (
+    "id" TEXT NOT NULL,
+    "activityId" TEXT NOT NULL,
+    "userId" TEXT NOT NULL,
+    "startedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "completedAt" TIMESTAMP(3),
+    "lastBeatAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "secondsSpent" INTEGER NOT NULL DEFAULT 0,
+    "cardsSeen" INTEGER NOT NULL DEFAULT 0,
+    "videoOpened" BOOLEAN NOT NULL DEFAULT false,
+    "meta" JSONB NOT NULL DEFAULT '{}',
+
+    CONSTRAINT "ActivityCompletion_pkey" PRIMARY KEY ("id")
+);
+
 -- CreateIndex
 CREATE UNIQUE INDEX "User_publicId_key" ON "User"("publicId");
 
@@ -489,6 +541,27 @@ CREATE INDEX "AuditLog_actorId_createdAt_idx" ON "AuditLog"("actorId", "createdA
 -- CreateIndex
 CREATE INDEX "AuditLog_action_createdAt_idx" ON "AuditLog"("action", "createdAt");
 
+-- CreateIndex
+CREATE UNIQUE INDEX "Activity_publicId_key" ON "Activity"("publicId");
+
+-- CreateIndex
+CREATE INDEX "Activity_status_isMandatory_idx" ON "Activity"("status", "isMandatory");
+
+-- CreateIndex
+CREATE INDEX "Activity_targetUserId_idx" ON "Activity"("targetUserId");
+
+-- CreateIndex
+CREATE INDEX "Activity_createdById_idx" ON "Activity"("createdById");
+
+-- CreateIndex
+CREATE INDEX "ActivityCompletion_userId_completedAt_idx" ON "ActivityCompletion"("userId", "completedAt");
+
+-- CreateIndex
+CREATE INDEX "ActivityCompletion_activityId_completedAt_idx" ON "ActivityCompletion"("activityId", "completedAt");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "ActivityCompletion_activityId_userId_key" ON "ActivityCompletion"("activityId", "userId");
+
 -- AddForeignKey
 ALTER TABLE "CurriculumNode" ADD CONSTRAINT "CurriculumNode_parentId_fkey" FOREIGN KEY ("parentId") REFERENCES "CurriculumNode"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
@@ -536,4 +609,16 @@ ALTER TABLE "BackupArchive" ADD CONSTRAINT "BackupArchive_createdById_fkey" FORE
 
 -- AddForeignKey
 ALTER TABLE "AuditLog" ADD CONSTRAINT "AuditLog_actorId_fkey" FOREIGN KEY ("actorId") REFERENCES "User"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "Activity" ADD CONSTRAINT "Activity_targetUserId_fkey" FOREIGN KEY ("targetUserId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "Activity" ADD CONSTRAINT "Activity_createdById_fkey" FOREIGN KEY ("createdById") REFERENCES "User"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "ActivityCompletion" ADD CONSTRAINT "ActivityCompletion_activityId_fkey" FOREIGN KEY ("activityId") REFERENCES "Activity"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "ActivityCompletion" ADD CONSTRAINT "ActivityCompletion_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 

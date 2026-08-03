@@ -28,8 +28,8 @@ import { prisma } from '../db.js';
  * private folder rather than a shared or public one.
  */
 
-export const SCHEMA_VERSION = 2;
-export const APP_VERSION = '1.1.0';
+export const SCHEMA_VERSION = 3;
+export const APP_VERSION = '1.2.0';
 
 function run(cmd: string, args: string[], opts: { env?: NodeJS.ProcessEnv; cwd?: string } = {}): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -46,12 +46,45 @@ function run(cmd: string, args: string[], opts: { env?: NodeJS.ProcessEnv; cwd?:
   });
 }
 
+/**
+ * Connection settings for pg_dump.
+ *
+ * DATABASE_URL is the one place the database is configured, so derive the
+ * PG* variables from it rather than requiring the same details to be entered
+ * twice. Explicit PG* variables still win, which is what a deployment with a
+ * separate backup role would set.
+ */
+function pgEnv(): NodeJS.ProcessEnv {
+  let fromUrl: { host?: string; port?: string; user?: string; password?: string; database?: string } = {};
+  try {
+    const url = new URL(env.DATABASE_URL);
+    fromUrl = {
+      host: url.hostname || undefined,
+      port: url.port || undefined,
+      user: decodeURIComponent(url.username) || undefined,
+      password: decodeURIComponent(url.password) || undefined,
+      database: url.pathname.slice(1) || undefined,
+    };
+  } catch {
+    // A connection string we cannot parse; fall back to whatever is in the
+    // environment and let pg_dump report the problem.
+  }
+
+  return {
+    PGHOST: process.env.PGHOST ?? fromUrl.host ?? 'db',
+    PGPORT: process.env.PGPORT ?? fromUrl.port ?? '5432',
+    PGUSER: process.env.PGUSER ?? fromUrl.user ?? '',
+    PGPASSWORD: process.env.PGPASSWORD ?? fromUrl.password ?? '',
+    PGDATABASE: process.env.PGDATABASE ?? fromUrl.database ?? '',
+  };
+}
+
 /** Every table, as JSON. The engine-independent copy of the data. */
 async function exportJson(): Promise<Record<string, unknown>> {
   const [
     users, schoolClasses, curriculumNodes, tags, questions, assets,
     promptTemplates, generationRuns, apiCredentials, tests, testQuestions,
-    attempts, answers, settings,
+    attempts, answers, settings, activities, activityCompletions,
   ] = await Promise.all([
     prisma.user.findMany(),
     prisma.schoolClass.findMany(),
@@ -67,6 +100,8 @@ async function exportJson(): Promise<Record<string, unknown>> {
     prisma.attempt.findMany(),
     prisma.answer.findMany(),
     prisma.setting.findMany(),
+    prisma.activity.findMany(),
+    prisma.activityCompletion.findMany(),
   ]);
 
   return {
@@ -78,7 +113,7 @@ async function exportJson(): Promise<Record<string, unknown>> {
     tables: {
       users, schoolClasses, curriculumNodes, tags, questions, assets,
       promptTemplates, generationRuns, apiCredentials, tests, testQuestions,
-      attempts, answers, settings,
+      attempts, answers, settings, activities, activityCompletions,
     },
   };
 }
@@ -104,12 +139,7 @@ export async function createBackup(opts: { createdById?: string; includeAssets?:
   try {
     // 1. Native dump.
     await run('pg_dump', ['--format=custom', '--no-owner', '--no-privileges', '--file', path.join(workDir, 'db.dump')], {
-      env: {
-        PGHOST: process.env.PGHOST ?? 'db',
-        PGUSER: process.env.PGUSER ?? '',
-        PGPASSWORD: process.env.PGPASSWORD ?? '',
-        PGDATABASE: process.env.PGDATABASE ?? '',
-      },
+      env: pgEnv(),
     });
 
     // 2. Portable JSON copy.

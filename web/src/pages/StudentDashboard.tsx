@@ -3,7 +3,7 @@ import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { api, ApiError } from '../lib/api';
 import { Alert, Badge, Card, EmptyState, PageLoader, Tabs, formatDate, humanizeTag } from '../components/ui';
 import { AccuracyMeter, BarChart, DataTable, LineChart, StatTile } from '../components/charts';
-import type { AwaitingResult, LiveTest, ResultRow, WeakArea } from '../lib/types';
+import type { ActivitySummary, AwaitingResult, LiveTest, ResultRow, WeakArea } from '../lib/types';
 
 interface Summary {
   count: number;
@@ -25,6 +25,7 @@ export default function StudentDashboard() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<'regular' | 'practice'>('regular');
+  const [activities, setActivities] = useState<ActivitySummary[]>([]);
   const location = useLocation();
   const welcome = (location.state as { welcome?: string } | null)?.welcome;
 
@@ -33,6 +34,13 @@ export default function StudentDashboard() {
       .get<DashboardData>('/api/student/dashboard')
       .then(setData)
       .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load your dashboard.'));
+
+    // Optional activities and ones already done. Anything still *required*
+    // never reaches this screen - the router sends the student to it instead.
+    api
+      .get<{ activities: ActivitySummary[] }>('/api/activities')
+      .then((res) => setActivities(res.activities))
+      .catch(() => undefined);
   }, []);
 
   if (error) return <Alert tone="error">{error}</Alert>;
@@ -54,6 +62,8 @@ export default function StudentDashboard() {
           </p>
         </div>
       </div>
+
+      {activities.length > 0 && <Activities activities={activities} />}
 
       <LiveTests tests={data.liveTests} />
 
@@ -102,6 +112,41 @@ export default function StudentDashboard() {
 
       {data.weakAreas.length > 0 && <WeakAreas areas={data.weakAreas} />}
     </div>
+  );
+}
+
+// --- Activities ------------------------------------------------------------
+
+/**
+ * Only optional activities and ones already completed appear here. A required
+ * one that is still outstanding is not a card on a dashboard - the student is
+ * taken straight to it.
+ */
+function Activities({ activities }: { activities: ActivitySummary[] }) {
+  return (
+    <Card title="Activities" padded={false}>
+      <ul className="divide-y divide-line">
+        {activities.map((a) => (
+          <li key={a.id} className="px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <span className="font-medium text-sm">{a.title}</span>
+                {a.completedAt ? <Badge tone="good">done</Badge> : a.isMandatory ? <Badge tone="warn">required</Badge> : <Badge>optional</Badge>}
+              </div>
+              <p className="text-[11px] text-ink-faint mt-0.5">
+                {a.cardCount > 0 && `${a.cardCount} card${a.cardCount === 1 ? '' : 's'}`}
+                {a.cardCount > 0 && a.hasVideo && ' · '}
+                {a.hasVideo && 'video'}
+                {a.completedAt && ` · completed ${formatDate(a.completedAt)}`}
+              </p>
+            </div>
+            <Link to={`/activity/${a.id}`} className="btn-secondary btn-sm shrink-0">
+              {a.completedAt ? 'Read again' : 'Open'}
+            </Link>
+          </li>
+        ))}
+      </ul>
+    </Card>
   );
 }
 

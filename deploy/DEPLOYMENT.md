@@ -219,6 +219,32 @@ time; it does not affect anybody's marks. By default a student already writing
 may finish; tick *"Submit papers still in progress when the window closes"* if
 nobody should be writing outside those hours at all.
 
+### Making students read something first
+
+**Admin → Activities → New activity.** Give it a title, choose whether it is
+cards, a video, or both, and pick the audience (grades and divisions; leave
+both blank for the whole school).
+
+- **Cards** are written one at a time. Each card holds one or more pieces of
+  content, chosen from the dropdown: text, maths, a table, an SVG or Mermaid
+  diagram, or code. *Preview* shows exactly what the student will see.
+- **Video** takes any link. YouTube and Vimeo play inside the page; anything
+  else becomes a button that opens the video in a new tab.
+- **Minimum time** is the number of seconds a student must have the activity
+  open before they can mark it done. Leave it at 0 for a short notice.
+- **Must be done first** is the point of the feature: while it is ticked and
+  the activity is live, students in the audience cannot reach their dashboard
+  or start a test until they have been through it. Untick it and the activity
+  simply appears on their dashboard.
+
+Nothing happens until you press **Publish** — an activity is a draft until
+then. **Who** shows the roster: completed, part way, not started. **Reset**
+puts an activity back in front of a student who has already done it, which is
+what you want after correcting a card half the class has read.
+
+To take an activity down, **Unpublish** it (returns it to draft) or **Archive**
+it, which keeps the record of who completed it.
+
 ### Releasing results after a test
 
 Students never see a score at submit time. Once the class has finished, open

@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../db.js';
-import { authenticate, requireFreshPassword } from '../middleware/auth.js';
+import { authenticate, requireActivitiesComplete, requireFreshPassword } from '../middleware/auth.js';
 import { finalizeAttempt, buildLayout, publicQuestion, remainingMs, resultsAreVisible, sweepExpiredAttempts } from '../services/attempt.js';
 import { findWeakAreas, type Breakdown } from '../lib/analytics.js';
 import { evaluateAvailability } from '../lib/availability.js';
@@ -12,6 +12,8 @@ import { validateResponse } from '../lib/grading.js';
 export default async function studentRoutes(app: FastifyInstance) {
   app.addHook('preHandler', authenticate);
   app.addHook('preHandler', requireFreshPassword);
+  // Nothing here is reachable while a mandatory activity is outstanding.
+  app.addHook('preHandler', requireActivitiesComplete);
 
   /** Dashboard: live tests, recent results, the percentage graph, weak areas. */
   app.get('/api/student/dashboard', async (request) => {

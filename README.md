@@ -31,6 +31,9 @@ ARM)** instance with `docker compose up -d`.
   appear only once the teacher releases them (practice tests excepted).
 - Result view with score, per-axis breakdown charts, and (if the test allows)
   correct answers with worked explanations.
+- **Activities** — a flashcard stack and/or a video the teacher has set. While
+  one is outstanding the student is taken straight to it: no dashboard, no
+  tests, nothing else until it has been read.
 
 ### For administrators
 - **Set test** — generate questions from OpenAI, OpenRouter, NVIDIA NIM,
@@ -48,6 +51,12 @@ ARM)** instance with `docker compose up -d`.
 - **Daily availability windows** — pause a test outside set hours: "only during
   school hours, Mon–Fri" or "paused between 11pm and 5am". Editable on a live
   test without disturbing anyone's score.
+- **Activities** — put a notice, a revision card or a video in front of a class
+  and require it before anything else. Cards use the same content blocks as
+  questions, so they can carry maths, diagrams, charts and tables. YouTube and
+  Vimeo play inside the page; any other link opens in a new tab. A per-activity
+  roster shows who has done it, who is part way through and who has not
+  started, with a one-click "make them do it again".
 - **Analytics** — score distribution, trend over time, per-class and per-subject
   comparison, cohort-wide tag mastery, and a weakest-first student ranking.
 - **Per-student analysis** — mastery grid across all four tag axes, and one
@@ -57,7 +66,7 @@ ARM)** instance with `docker compose up -d`.
   detail, change the username, set a new password to hand over in person, and
   delete (soft by default so historical results survive).
 - **Administrators with granular privileges** — create colleagues with exactly
-  the nine privileges you tick, or start from a preset (Teacher, Question
+  the ten privileges you tick, or start from a preset (Teacher, Question
   setter, Invigilator, Office). Someone who writes papers never has to hold the
   API keys or the backups.
 - Every test carries a permanent test ID (`TST-0001`) alongside its title.
@@ -150,6 +159,31 @@ progress when the window closes"*, turns that into a hard cut-off instead.
 A malformed window (missing an end, or start equal to end) fails **open** — the
 test stays available rather than silently becoming unattemptable.
 
+### Activities: the "do this first" gate
+
+An activity is a stack of flashcards, a video link, or both. Published and
+marked required, it becomes a gate: every student route refuses with
+`428 Precondition Required` and `code: ACTIVITY_REQUIRED` until it is done, and
+the browser sends the student to the activity rather than showing them an error
+they cannot act on. Administrators are never gated by their own material.
+
+Time spent is **credited by the server** from the gap between heartbeats,
+capped at two minutes per beat, so a tab left open overnight is not counted as
+engagement and `{"secondsSpent": 9999}` from a crafted request buys nothing.
+Finishing needs every card seen *and* the minimum time met.
+
+Video links go through `server/src/lib/video.ts` before they are stored. Only
+YouTube and Vimeo are ever framed, and only on their own player origins —
+`youtube-nocookie.com` and `player.vimeo.com`, in a sandboxed iframe. A
+lookalike host such as `youtube.com.evil.tld` is not recognised as YouTube and
+becomes an ordinary link that opens in a new tab; `javascript:` and `data:`
+URLs are refused outright.
+
+An activity that could not be finished is refused at publish time — cards
+required but none written, video required but no link — and a live activity
+cannot be edited into that state either. The alternative is a whole class stuck
+behind a gate with no way through.
+
 ### Question types
 
 Multiple choice only, and both variants are graded automatically:
@@ -239,6 +273,7 @@ and `server/src/lib/permissions.ts` is the single source of truth:
 | `results.release` | Reveal or withhold a test's results |
 | `analytics.view` | Class and per-student performance, CSV export |
 | `backups.manage` | Generate and download full backups |
+| `activities.manage` | Create activities and see who has completed them |
 | `settings.manage` | API keys, prompts, tags, grades and divisions |
 
 Enforcement is server-side: every admin area is registered inside a scope
@@ -298,10 +333,11 @@ restore, and a plain-JSON export that stays readable across a PostgreSQL major
 upgrade or a schema change. The archive is an ordinary `.tar.gz`, so it can be
 opened and inspected with any unzip tool.
 
-Stable identifiers reinforce this: `User.publicId` (`USR-00001`) and
-`Test.publicId` (`TST-0001`) are assigned by a database sequence at insert time
-and never updated, so external records and printed papers keep pointing at the
-right row no matter what is edited later.
+Stable identifiers reinforce this: `User.publicId` (`USR-00001`),
+`Test.publicId` (`TST-0001`) and `Activity.publicId` (`ACT-0001`) are assigned
+by a database sequence at insert time and never updated, so external records
+and printed papers keep pointing at the right row no matter what is edited
+later.
 
 ---
 

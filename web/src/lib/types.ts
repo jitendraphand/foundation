@@ -250,3 +250,113 @@ export interface Tag {
   sortOrder: number;
   isActive: boolean;
 }
+
+// --- Activities ------------------------------------------------------------
+
+export type ActivityKind = 'FLASHCARD' | 'VIDEO' | 'MIXED';
+export type ActivityStatus = 'DRAFT' | 'PUBLISHED' | 'ARCHIVED';
+
+/** A flashcard is a titled stack of the same blocks a question is made of. */
+export interface ActivityCard {
+  id: string;
+  title?: string;
+  blocks: Block[];
+}
+
+export interface ActivityContent {
+  version: number;
+  cards: ActivityCard[];
+}
+
+/** The shape the 428 gate hands back — just enough to redirect. */
+export interface PendingActivity {
+  id: string;
+  publicId: string;
+  title: string;
+  description: string | null;
+  kind: ActivityKind;
+}
+
+/** What the student's runner receives. */
+export interface ActivityDetail {
+  id: string;
+  publicId: string;
+  title: string;
+  description: string | null;
+  kind: ActivityKind;
+  content: ActivityContent;
+  videoUrl: string | null;
+  /** Only ever set for YouTube/Vimeo; anything else opens in a new tab. */
+  videoEmbedUrl: string | null;
+  videoProvider: string | null;
+  minSeconds: number;
+  isMandatory: boolean;
+  cardCount: number;
+}
+
+export interface ActivityProgress {
+  startedAt: string;
+  completedAt: string | null;
+  secondsSpent: number;
+  cardsSeen: number;
+  videoOpened: boolean;
+}
+
+/** A row in the student's dashboard list. */
+export interface ActivitySummary {
+  id: string;
+  publicId: string;
+  title: string;
+  description: string | null;
+  kind: ActivityKind;
+  isMandatory: boolean;
+  cardCount: number;
+  hasVideo: boolean;
+  completedAt: string | null;
+}
+
+/** The admin's view of an activity, with completion counts. */
+export interface AdminActivity {
+  id: string;
+  publicId: string;
+  title: string;
+  description: string | null;
+  kind: ActivityKind;
+  status: ActivityStatus;
+  content: ActivityContent;
+  videoUrl: string | null;
+  videoEmbedUrl: string | null;
+  videoProvider: string | null;
+  minSeconds: number;
+  isMandatory: boolean;
+  targetGrades: string[];
+  targetDivisions: string[];
+  targetUserId: string | null;
+  targetUser?: { id: string; username: string; firstName: string; lastName: string } | null;
+  startsAt: string | null;
+  endsAt: string | null;
+  publishedAt: string | null;
+  createdAt: string;
+  cardCount: number;
+  startedCount?: number;
+  completedCount?: number;
+}
+
+export interface ActivityCompletionRow {
+  user: {
+    id: string;
+    publicId: string;
+    username: string;
+    firstName: string;
+    lastName: string;
+    grade: string | null;
+    division: string | null;
+    rollNo: string | null;
+  };
+  startedAt: string | null;
+  completedAt: string | null;
+  secondsSpent: number;
+  cardsSeen: number;
+  videoOpened: boolean;
+  state: 'not_started' | 'in_progress' | 'completed';
+}
