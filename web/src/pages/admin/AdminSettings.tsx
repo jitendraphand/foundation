@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError } from '../../lib/api';
 import { Alert, Badge, Card, EmptyState, Field, Modal, PageLoader, Spinner, Tabs, formatDate } from '../../components/ui';
 import type { Tag } from '../../lib/types';
@@ -137,6 +137,20 @@ interface Credential {
   defaultModel: string | null;
   isActive: boolean;
   createdAt: string;
+  /** Bedrock only: region and auth mode. Never holds anything secret. */
+  meta?: { region?: string; authMode?: 'apiKey' | 'sigv4' } | null;
+}
+
+/**
+ * Bedrock is configured per region, and a model enabled in one region is not
+ * enabled in the next - so the region is the thing that tells two otherwise
+ * identical credentials apart, and it belongs on the row.
+ */
+function describeProvider(credential: Credential, providers: ProviderDef[]): string {
+  const name = providers.find((p) => p.id === credential.provider)?.label ?? credential.provider;
+  if (credential.provider !== 'bedrock' || !credential.meta?.region) return name;
+  const how = credential.meta.authMode === 'sigv4' ? 'IAM' : 'API key';
+  return `${name} · ${credential.meta.region} · ${how}`;
 }
 
 interface ProviderDef {
@@ -236,7 +250,7 @@ function Providers() {
                 {credentials.map((credential) => (
                   <tr key={credential.id}>
                     <td className="font-medium">{credential.label}</td>
-                    <td className="text-ink-muted">{credential.provider}</td>
+                    <td className="text-ink-muted">{describeProvider(credential, providers)}</td>
                     <td className="font-mono text-xs text-ink-faint">{credential.keyHint}</td>
                     <td className="font-mono text-xs text-ink-muted">{credential.defaultModel ?? '—'}</td>
                     <td className="text-xs text-ink-muted whitespace-nowrap">{formatDate(credential.createdAt)}</td>
@@ -281,15 +295,34 @@ function AddCredentialModal({ providers, onClose, onAdded }: { providers: Provid
   const [apiKey, setApiKey] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [defaultModel, setDefaultModel] = useState('');
+  // Bedrock only.
+  const [region, setRegion] = useState('us-east-1');
+  const [awsAuthMode, setAwsAuthMode] = useState<'apiKey' | 'sigv4'>('apiKey');
+  const [accessKeyId, setAccessKeyId] = useState('');
+  const [sessionToken, setSessionToken] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const def = providers.find((p) => p.id === provider);
+  const isBedrock = provider === 'bedrock';
+
+  // What the label box was last filled in with on the admin's behalf. Changing
+  // provider should move a label nobody has touched along with it - otherwise
+  // picking Bedrock after the default OpenAI saves a credential called
+  // "OpenAI" - but must never overwrite one that was typed.
+  const autoLabel = useRef('');
 
   useEffect(() => {
     setBaseUrl(def?.defaultBaseUrl ?? '');
     setDefaultModel(def?.suggestedModels[0] ?? '');
-    setLabel((l) => l || def?.label || '');
+
+    // Both reads happen here rather than inside the updater: React may call an
+    // updater more than once, so it has to be a pure function of values fixed
+    // before it runs.
+    const previous = autoLabel.current;
+    const next = def?.label ?? '';
+    autoLabel.current = next;
+    setLabel((current) => (current && current !== previous ? current : next));
   }, [provider, def]);
 
   const submit = async (event: React.FormEvent) => {
@@ -301,8 +334,20 @@ function AddCredentialModal({ providers, onClose, onAdded }: { providers: Provid
         provider,
         label: label.trim(),
         apiKey: apiKey.trim(),
-        baseUrl: baseUrl.trim() || undefined,
+        // Bedrock derives its endpoint from the region, and the box is hidden.
+        // Sending the stale default would override that derivation and point
+        // every request at us-east-1 whatever region was chosen.
+        baseUrl: isBedrock ? undefined : baseUrl.trim() || undefined,
         defaultModel: defaultModel.trim() || undefined,
+        ...(isBedrock
+          ? {
+              region: region.trim(),
+              awsAuthMode,
+              ...(awsAuthMode === 'sigv4'
+                ? { accessKeyId: accessKeyId.trim(), sessionToken: sessionToken.trim() || undefined }
+                : {}),
+            }
+          : {}),
       });
       onAdded(res.warning);
     } catch (err) {
@@ -327,20 +372,80 @@ function AddCredentialModal({ providers, onClose, onAdded }: { providers: Provid
           <input className="input" value={label} onChange={(e) => setLabel(e.target.value)} required />
         </Field>
 
+        {isBedrock && (
+          <Field
+            label="How to authenticate"
+            hint={
+              awsAuthMode === 'apiKey'
+                ? 'Bedrock > API keys in the AWS console. Simplest, and what to use unless your account forbids long-lived keys.'
+                : 'An IAM user or role with bedrock:InvokeModel. Each request is signed; nothing long-lived is sent.'
+            }
+          >
+            <select className="input" value={awsAuthMode} onChange={(e) => setAwsAuthMode(e.target.value as 'apiKey' | 'sigv4')}>
+              <option value="apiKey">Bedrock API key (recommended)</option>
+              <option value="sigv4">AWS access key and secret</option>
+            </select>
+          </Field>
+        )}
+
+        {isBedrock && awsAuthMode === 'sigv4' && (
+          <>
+            <Field label="Access key ID" required hint="The shorter one, starting AKIA or ASIA.">
+              <input
+                className="input font-mono text-xs"
+                value={accessKeyId}
+                onChange={(e) => setAccessKeyId(e.target.value)}
+                placeholder="AKIA…"
+                required
+                autoComplete="off"
+              />
+            </Field>
+            <Field label="Session token" hint="Only for temporary credentials from STS. Leave empty for a normal IAM user.">
+              <input
+                className="input font-mono text-xs"
+                type="password"
+                value={sessionToken}
+                onChange={(e) => setSessionToken(e.target.value)}
+                autoComplete="off"
+              />
+            </Field>
+          </>
+        )}
+
         <Field
-          label="API key"
+          label={isBedrock ? (awsAuthMode === 'sigv4' ? 'Secret access key' : 'Bedrock API key') : 'API key'}
           required
           hint={
-            'Paste the whole key. Providers show it in full only once, then display a shortened version ' +
-            'like sk-or-v1-… — that shortened form is not a key and will not work. Encrypted before it is stored.'
+            isBedrock
+              ? awsAuthMode === 'sigv4'
+                ? 'Shown once when the access key is created. Encrypted before it is stored.'
+                : 'Copy it when you generate it in the Bedrock console — it is shown in full only that once. Encrypted before it is stored.'
+              : 'Paste the whole key. Providers show it in full only once, then display a shortened version ' +
+                'like sk-or-v1-… — that shortened form is not a key and will not work. Encrypted before it is stored.'
           }
         >
           <input className="input font-mono text-xs" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} required minLength={8} autoComplete="off" />
         </Field>
 
-        <Field label="Base URL" required={provider === 'custom'}>
-          <input className="input font-mono text-xs" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://openrouter.ai/api/v1" />
-        </Field>
+        {isBedrock ? (
+          <Field
+            label="Region"
+            required
+            hint="Bedrock has a separate endpoint in every region, and models are enabled per region. Use the one where you turned the model on."
+          >
+            <input
+              className="input font-mono text-xs"
+              value={region}
+              onChange={(e) => setRegion(e.target.value)}
+              placeholder="us-east-1"
+              required
+            />
+          </Field>
+        ) : (
+          <Field label="Base URL" required={provider === 'custom'}>
+            <input className="input font-mono text-xs" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://openrouter.ai/api/v1" />
+          </Field>
+        )}
 
         <Field label="Default model" hint={def?.modelHint}>
           <input className="input font-mono text-xs" value={defaultModel} onChange={(e) => setDefaultModel(e.target.value)} list="provider-models" />

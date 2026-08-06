@@ -38,7 +38,8 @@ ARM)** instance with `docker compose up -d`.
 
 ### For administrators
 - **Set test** — generate questions from OpenAI, OpenRouter, NVIDIA NIM,
-  Hugging Face Inference Providers, or any other OpenAI-compatible endpoint. Full control of
+  Hugging Face Inference Providers, Amazon Bedrock, or any other
+  OpenAI-compatible endpoint. Full control of
   the system prompt, the model, the difficulty and cognitive mix, and the exact
   user message (with a preview of precisely what will be sent).
 - **Import** — when the provider is down, out of credit or unreachable, load
@@ -416,6 +417,7 @@ server/          Fastify API
   prisma/        schema + migrations
   src/lib/       content blocks, grading, analytics, crypto, passwords
   src/llm/       provider adapters, strict-JSON contract, prompts
+                 (bedrock.ts + aws-sigv4.ts: the one non-OpenAI protocol)
   src/routes/    auth, student, admin/*
   src/services/  attempt lifecycle, backup/restore
 web/             React frontend
@@ -455,7 +457,10 @@ screens are usable on a phone even though they are meant for a desk.
 
 - Argon2id password hashing (64 MB, 3 passes)
 - httpOnly + SameSite=Lax session cookies, Secure in production
-- LLM API keys AES-256-GCM encrypted at rest, never returned to any client
+- LLM API keys AES-256-GCM encrypted at rest, never returned to any client.
+  AWS credentials are the same: the secret access key and any session token are
+  encrypted together, and requests are signed with Signature Version 4 so the
+  secret itself never leaves the server
 - Backup archives are unencrypted by choice — keep them in a private folder,
   they contain password hashes
 - SVG allow-list sanitisation on write and on render

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { prisma } from '../db.js';
-import { decryptSecret } from '../lib/crypto.js';
+import { callParamsFor } from './credentials.js';
 import { normalizeContent, normalizeBlocks, CONTENT_VERSION } from '../lib/content.js';
 import { validateAnswerKey } from '../lib/grading.js';
 import { chatComplete, emitsReasoning, LlmError, PROVIDERS, type ChatMessage } from './providers.js';
@@ -236,7 +236,7 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
     throw new LlmError('That API credential no longer exists or has been disabled.');
   }
 
-  const apiKey = decryptSecret(credential.encryptedKey);
+  const call = callParamsFor(credential);
   const providerDef = PROVIDERS[credential.provider] ?? PROVIDERS.custom;
 
   let systemPrompt = opts.systemPrompt?.trim() || DEFAULT_SYSTEM_PROMPT;
@@ -299,8 +299,7 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
       ];
 
       let response = await chatComplete({
-        baseUrl: credential.baseUrl,
-        apiKey,
+        ...call,
         model: opts.model,
         messages,
         temperature: opts.temperature ?? 0.4,
@@ -341,8 +340,7 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
           });
 
           response = await chatComplete({
-            baseUrl: credential.baseUrl,
-            apiKey,
+            ...call,
             model: opts.model,
             messages,
             temperature: 0.1,

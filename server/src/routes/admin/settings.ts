@@ -2,11 +2,67 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { prisma } from '../../db.js';
 import { audit } from '../../middleware/auth.js';
-import { encryptSecret, decryptSecret, keyHint } from '../../lib/crypto.js';
+import { encryptSecret, keyHint } from '../../lib/crypto.js';
 import { PROVIDERS, describeKeyProblem, pingProvider } from '../../llm/providers.js';
+import { callParamsFor, packIamSecret } from '../../llm/credentials.js';
 import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_TEMPLATE } from '../../llm/prompts.js';
 import { COMMON_TIMEZONES, WINDOW_PRESETS, isValidTimezone, zonedNow, formatMinute } from '../../lib/availability.js';
 import { getSchoolTimezone, setSchoolTimezone } from '../../services/settings.js';
+
+/**
+ * Bedrock needs more than a key: a region, and a choice of how to authenticate.
+ * Assembled here so create and update cannot drift apart.
+ */
+interface BedrockFields {
+  baseUrl: string;
+  secret: string;
+  meta: { authMode: 'apiKey' | 'sigv4'; region: string; accessKeyId?: string };
+}
+
+/** AWS regions, roughly - enough to catch a typo, not to gatekeep new ones. */
+const REGION_SHAPE = /^[a-z]{2}(-[a-z]+)+-\d$/;
+
+function buildBedrockFields(body: {
+  apiKey: string;
+  region?: string;
+  awsAuthMode?: 'apiKey' | 'sigv4';
+  accessKeyId?: string;
+  sessionToken?: string;
+}): BedrockFields | { error: string } {
+  const region = body.region?.trim();
+  if (!region) {
+    return { error: 'Amazon Bedrock needs a region, for example us-east-1. Bedrock has a separate endpoint in each one.' };
+  }
+  if (!REGION_SHAPE.test(region)) {
+    return { error: `"${region}" does not look like an AWS region. They look like us-east-1, eu-west-2 or ap-south-1.` };
+  }
+
+  const mode = body.awsAuthMode ?? 'apiKey';
+  const suffix = region.startsWith('cn-') ? 'amazonaws.com.cn' : 'amazonaws.com';
+  const baseUrl = `https://bedrock-runtime.${region}.${suffix}`;
+
+  if (mode === 'apiKey') {
+    return { baseUrl, secret: body.apiKey, meta: { authMode: 'apiKey', region } };
+  }
+
+  const accessKeyId = body.accessKeyId?.trim();
+  if (!accessKeyId) {
+    return { error: 'Signing with IAM credentials needs the access key ID as well as the secret access key.' };
+  }
+  // AKIA is a long-lived key, ASIA a temporary one from STS. Catching a
+  // swapped pair here saves a SignatureDoesNotMatch that explains nothing.
+  if (/^[A-Za-z0-9/+=]{40}$/.test(accessKeyId) && accessKeyId.length === 40) {
+    return { error: 'That looks like the secret access key in the access key ID box. The ID is the shorter one, starting AKIA or ASIA.' };
+  }
+
+  return {
+    baseUrl,
+    // Secret access key and session token are packed together and encrypted;
+    // neither is ever stored in plain text.
+    secret: packIamSecret(body.apiKey, body.sessionToken || undefined),
+    meta: { authMode: 'sigv4', region, accessKeyId },
+  };
+}
 
 export default async function adminSettingsRoutes(app: FastifyInstance) {
   // --- LLM API credentials -------------------------------------------------
@@ -14,10 +70,13 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
   app.get('/api/admin/credentials', async () => {
     const credentials = await prisma.apiCredential.findMany({
       orderBy: { createdAt: 'asc' },
-      // encryptedKey is deliberately never selected.
+      // encryptedKey is deliberately never selected. meta is safe: it holds
+      // the region, the auth mode and the access key id - the things an
+      // administrator needs to tell two Bedrock credentials apart - and never
+      // the secret.
       select: {
         id: true, provider: true, label: true, baseUrl: true, keyHint: true,
-        defaultModel: true, isActive: true, createdAt: true, updatedAt: true,
+        defaultModel: true, isActive: true, createdAt: true, updatedAt: true, meta: true,
       },
     });
     return { credentials, providers: Object.values(PROVIDERS) };
@@ -31,11 +90,26 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
         apiKey: z.string().trim().min(8).max(500),
         baseUrl: z.string().url().optional(),
         defaultModel: z.string().max(200).optional(),
+
+        // Bedrock only. It has one endpoint per region and two ways in: a
+        // bearer API key, or an IAM key pair signed per request.
+        region: z.string().trim().max(40).optional(),
+        awsAuthMode: z.enum(['apiKey', 'sigv4']).optional(),
+        accessKeyId: z.string().trim().max(128).optional(),
+        sessionToken: z.string().trim().max(4096).optional(),
       })
       .parse(request.body);
 
     const def = PROVIDERS[body.provider];
-    const baseUrl = body.baseUrl ?? def?.defaultBaseUrl;
+
+    let bedrock: BedrockFields | null = null;
+    if (body.provider === 'bedrock') {
+      const built = buildBedrockFields(body);
+      if ('error' in built) return reply.code(400).send({ error: built.error });
+      bedrock = built;
+    }
+
+    const baseUrl = body.baseUrl ?? bedrock?.baseUrl ?? def?.defaultBaseUrl;
     if (!baseUrl) {
       return reply.code(400).send({ error: 'A base URL is required for a custom provider.' });
     }
@@ -44,16 +118,21 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
     const keyProblem = describeKeyProblem(body.provider, body.apiKey);
     if (keyProblem.error) return reply.code(400).send({ error: keyProblem.error });
 
+    const secret = bedrock?.secret ?? body.apiKey;
+
     const credential = await prisma.apiCredential.create({
       data: {
         provider: body.provider,
         label: body.label,
         baseUrl,
-        encryptedKey: encryptSecret(body.apiKey),
+        encryptedKey: encryptSecret(secret),
+        // The hint is of the key the admin actually typed, not the packed
+        // blob, so it still matches what they can see in the AWS console.
         keyHint: keyHint(body.apiKey),
         defaultModel: body.defaultModel ?? def?.suggestedModels[0] ?? null,
+        ...(bedrock ? { meta: bedrock.meta } : {}),
       },
-      select: { id: true, provider: true, label: true, baseUrl: true, keyHint: true, defaultModel: true, isActive: true },
+      select: { id: true, provider: true, label: true, baseUrl: true, keyHint: true, defaultModel: true, isActive: true, meta: true },
     });
 
     await audit(request.user!.sub, 'credential.create', {
@@ -73,6 +152,11 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
         baseUrl: z.string().url().optional(),
         defaultModel: z.string().max(200).optional(),
         isActive: z.boolean().optional(),
+
+        region: z.string().trim().max(40).optional(),
+        awsAuthMode: z.enum(['apiKey', 'sigv4']).optional(),
+        accessKeyId: z.string().trim().max(128).optional(),
+        sessionToken: z.string().trim().max(4096).optional(),
       })
       .parse(request.body);
 
@@ -82,6 +166,22 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
     const keyProblem = body.apiKey ? describeKeyProblem(existing.provider, body.apiKey) : {};
     if (keyProblem.error) return reply.code(400).send({ error: keyProblem.error });
 
+    // Bedrock's region and auth mode travel with the key, so a new key means
+    // rebuilding the whole set rather than swapping one field.
+    let bedrock: BedrockFields | null = null;
+    if (existing.provider === 'bedrock' && body.apiKey) {
+      const meta = (existing.meta ?? {}) as { region?: string; authMode?: 'apiKey' | 'sigv4'; accessKeyId?: string };
+      const built = buildBedrockFields({
+        apiKey: body.apiKey,
+        region: body.region ?? meta.region,
+        awsAuthMode: body.awsAuthMode ?? meta.authMode,
+        accessKeyId: body.accessKeyId ?? meta.accessKeyId,
+        sessionToken: body.sessionToken,
+      });
+      if ('error' in built) return reply.code(400).send({ error: built.error });
+      bedrock = built;
+    }
+
     const credential = await prisma.apiCredential.update({
       where: { id },
       data: {
@@ -89,9 +189,15 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
         ...(body.baseUrl !== undefined ? { baseUrl: body.baseUrl } : {}),
         ...(body.defaultModel !== undefined ? { defaultModel: body.defaultModel } : {}),
         ...(body.isActive !== undefined ? { isActive: body.isActive } : {}),
-        ...(body.apiKey ? { encryptedKey: encryptSecret(body.apiKey), keyHint: keyHint(body.apiKey) } : {}),
+        ...(body.apiKey
+          ? {
+              encryptedKey: encryptSecret(bedrock?.secret ?? body.apiKey),
+              keyHint: keyHint(body.apiKey),
+              ...(bedrock ? { baseUrl: body.baseUrl ?? bedrock.baseUrl, meta: bedrock.meta } : {}),
+            }
+          : {}),
       },
-      select: { id: true, provider: true, label: true, baseUrl: true, keyHint: true, defaultModel: true, isActive: true },
+      select: { id: true, provider: true, label: true, baseUrl: true, keyHint: true, defaultModel: true, isActive: true, meta: true },
     });
 
     await audit(request.user!.sub, 'credential.update', { entity: 'ApiCredential', entityId: id, ip: request.ip });
@@ -116,22 +222,24 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
     const model = body.model || credential.defaultModel || PROVIDERS[credential.provider]?.suggestedModels[0];
     if (!model) return reply.code(400).send({ error: 'Choose a model to test with.' });
 
-    let apiKey: string;
+    let call: ReturnType<typeof callParamsFor>;
     try {
-      apiKey = decryptSecret(credential.encryptedKey);
+      call = callParamsFor(credential);
     } catch (err) {
-      return reply.code(500).send({ error: err instanceof Error ? err.message : 'Could not read the stored key.' });
+      return { ok: false, message: err instanceof Error ? err.message : 'Could not read the stored key.' };
     }
 
     // Say what is wrong with the stored key rather than letting the provider
     // answer "missing authentication header", which sounds like our bug.
-    const stored = describeKeyProblem(credential.provider, apiKey);
-    if (stored.error) {
-      return { ok: false, message: `The saved key cannot work. ${stored.error}` };
+    // A Bedrock IAM credential stores a packed blob, so the shape check runs
+    // against the key the admin typed, which is what call.apiKey holds for
+    // every mode except sigv4.
+    if (call.apiKey) {
+      const stored = describeKeyProblem(credential.provider, call.apiKey);
+      if (stored.error) return { ok: false, message: `The saved key cannot work. ${stored.error}` };
     }
 
-    const result = await pingProvider(credential.baseUrl, apiKey, model);
-    return stored.warning && !result.ok ? { ...result, message: `${result.message} ${stored.warning}` } : result;
+    return pingProvider({ ...call, model });
   });
 
   // --- Prompt templates ----------------------------------------------------

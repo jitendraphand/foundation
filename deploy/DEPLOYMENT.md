@@ -207,6 +207,7 @@ mixed-content block.
 | OpenRouter | `https://openrouter.ai/api/v1` | <https://openrouter.ai/keys> | `anthropic/claude-sonnet-4.5` |
 | NVIDIA NIM | `https://integrate.api.nvidia.com/v1` | <https://build.nvidia.com/> | `meta/llama-3.3-70b-instruct` |
 | Hugging Face | `https://router.huggingface.co/v1` | <https://huggingface.co/settings/tokens> | `meta-llama/Llama-3.3-70B-Instruct` |
+| Amazon Bedrock | derived from the region | AWS console, see below | `us.anthropic.claude-sonnet-4-20250514-v1:0` |
 | Other | anything OpenAI-compatible | Groq, Together, a local Ollama, … | whatever it expects |
 
 OpenAI's reasoning models (`o1`/`o3`/`o4`/`gpt-5` lines) are detected
@@ -232,6 +233,56 @@ others are kept and the run says which one failed.
 Hugging Face routes to whichever backend provider is fastest by default. To pin
 one, append a suffix to the model id — `openai/gpt-oss-120b:groq` — or use
 `:cheapest` / `:fastest`.
+
+### Amazon Bedrock
+
+Bedrock is the one provider that does not speak the OpenAI shape, and the one
+that needs work in the AWS console before a key will do anything. Three steps,
+in order.
+
+**1. Turn the model on, in the region you intend to use.** Bedrock ships with
+every model switched off, and a model enabled in `us-east-1` is not enabled in
+`eu-west-2`. Go to **Bedrock → Model access** in the region you want, request
+access to the models you need, and wait for them to show as *Access granted* —
+Anthropic and a few others ask for a one-line description of the use case first
+and can take a few minutes to approve. Skipping this is the single most common
+cause of a credential that tests fine on paper and returns *access denied* in
+practice, which is why that error names the console page.
+
+**2. Create a credential.** Either kind works:
+
+- **Bedrock API key** (*Bedrock → API keys*) — a bearer token, the simpler
+  option, and the one to use unless the school's AWS account forbids
+  long-lived keys. Copy it when it is created; it is shown in full only once.
+- **IAM access key and secret** — an IAM user or role with `bedrock:InvokeModel`
+  (and `bedrock:InvokeModelWithResponseStream` if you later want streaming).
+  Each request is signed with AWS Signature Version 4, so the secret itself
+  never travels. Temporary STS credentials work too: paste the session token
+  into the box beside the key. Both are encrypted before they are stored.
+
+**3. Add it under Admin → Settings → LLM providers.** Choose *Amazon Bedrock*,
+pick how to authenticate, and give the region — there is no base URL box,
+because the endpoint is derived from the region
+(`https://bedrock-runtime.<region>.amazonaws.com`, or `.amazonaws.com.cn` in
+the China partition). The credential row then shows the region and auth mode,
+so several Bedrock credentials in different regions stay distinguishable.
+
+**Model ids need care.** Most current models are not callable on their own id;
+they need a *cross-region inference profile*, whose id is the model id with a
+geography prefix — `us.`, `eu.` or `apac.`:
+
+```
+anthropic.claude-sonnet-4-20250514-v1:0        ← may be refused
+us.anthropic.claude-sonnet-4-20250514-v1:0     ← the inference profile
+```
+
+If a model id comes back as *"on-demand throughput isn't supported"*, that is
+what it means: add the prefix for the geography your region belongs to. Copy
+ids from **Bedrock → Model catalogue** rather than typing them; the colon and
+version suffix are part of the id.
+
+Costs are billed to the AWS account per token, with no free tier — check the
+pricing page for the model before generating a few hundred questions.
 
 ### When the provider is unavailable
 

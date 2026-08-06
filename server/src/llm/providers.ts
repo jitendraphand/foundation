@@ -102,6 +102,34 @@ export const PROVIDERS: Record<string, ProviderDef> = {
     supportsJsonMode: false,
   },
 
+  bedrock: {
+    id: 'bedrock',
+    label: 'Amazon Bedrock',
+    // Filled in from the region when the credential is saved; Bedrock has one
+    // endpoint per region rather than one global one.
+    defaultBaseUrl: 'https://bedrock-runtime.us-east-1.amazonaws.com',
+    docsUrl: 'https://docs.aws.amazon.com/bedrock/latest/userguide/',
+    keyUrl: 'https://console.aws.amazon.com/bedrock/home#/api-keys',
+    modelHint:
+      'The model id exactly as Bedrock shows it, e.g. ' +
+      'anthropic.claude-sonnet-4-20250514-v1:0. Many newer models are only ' +
+      'callable through a cross-region inference profile, whose id carries a ' +
+      'us. eu. or apac. prefix - if a model id is refused as "on-demand not ' +
+      'supported", that is why.',
+    suggestedModels: [
+      'us.anthropic.claude-sonnet-4-20250514-v1:0',
+      'anthropic.claude-3-5-sonnet-20241022-v2:0',
+      'anthropic.claude-3-5-haiku-20241022-v1:0',
+      'us.amazon.nova-pro-v1:0',
+      'us.amazon.nova-lite-v1:0',
+      'us.meta.llama3-3-70b-instruct-v1:0',
+      'mistral.mistral-large-2407-v1:0',
+    ],
+    // Converse has no response_format; the JSON contract is enforced by the
+    // prompt and the repair rounds, as with NVIDIA and Hugging Face.
+    supportsJsonMode: false,
+  },
+
   custom: {
     id: 'custom',
     label: 'Other OpenAI-compatible endpoint',
@@ -144,6 +172,8 @@ export function describeKeyProblem(provider: string, key: string): { error?: str
     return { error: 'That is the placeholder text, not a key.' };
   }
 
+  // Bedrock is deliberately absent: an API key and a secret access key look
+  // nothing alike and neither has a stable prefix worth guessing at.
   const expected: Record<string, { prefix: string; example: string }> = {
     openai: { prefix: 'sk-', example: 'sk-proj-…' },
     openrouter: { prefix: 'sk-or-', example: 'sk-or-v1-…' },
@@ -176,6 +206,12 @@ export interface ChatRequest {
   temperature?: number;
   maxTokens?: number;
   jsonMode?: boolean;
+  /**
+   * Set for Bedrock only. Its API is not OpenAI-shaped, so chatComplete hands
+   * the whole call to the Bedrock adapter rather than trying to bend one
+   * request shape around two protocols.
+   */
+  bedrock?: import('./bedrock.js').BedrockConfig;
 }
 
 export interface ChatResponse {
@@ -217,6 +253,19 @@ export function emitsReasoning(model: string): boolean {
 }
 
 export async function chatComplete(req: ChatRequest): Promise<ChatResponse> {
+  // Bedrock speaks its own protocol. Everything below this line is the
+  // OpenAI chat/completions shape that the other four providers share.
+  if (req.bedrock) {
+    const { bedrockChat } = await import('./bedrock.js');
+    return bedrockChat({
+      config: req.bedrock,
+      modelId: req.model,
+      messages: req.messages,
+      temperature: req.temperature,
+      maxTokens: req.maxTokens,
+    });
+  }
+
   const url = `${req.baseUrl.replace(/\/+$/, '')}/chat/completions`;
   const started = Date.now();
   const reasoning = isReasoningModel(req.model);
@@ -308,17 +357,15 @@ export async function chatComplete(req: ChatRequest): Promise<ChatResponse> {
 
 /** Cheap credential check used by the "Test connection" button. */
 export async function pingProvider(
-  baseUrl: string,
-  apiKey: string,
-  model: string,
+  call: Pick<ChatRequest, 'baseUrl' | 'apiKey' | 'model' | 'bedrock'>,
 ): Promise<{ ok: boolean; message: string; latencyMs?: number }> {
   try {
     const res = await chatComplete({
-      baseUrl,
-      apiKey,
-      model,
+      ...call,
       messages: [{ role: 'user', content: 'Reply with exactly: OK' }],
-      maxTokens: 12,
+      // Bedrock counts a reasoning model's working against this too, so it is
+      // generous enough that a thinking model still gets a word out.
+      maxTokens: 64,
       temperature: 0,
     });
     return { ok: true, message: `Connected. Model replied in ${res.latencyMs} ms.`, latencyMs: res.latencyMs };
