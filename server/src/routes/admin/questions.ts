@@ -74,6 +74,40 @@ function bucketWhere(bucket?: QuestionBucket) {
   }
 }
 
+/**
+ * Which questions a given administrator may see.
+ *
+ * A school runs several people who set papers, and one colleague's half-baked
+ * drafts appearing in another's review queue is noise at best and confusing at
+ * worst - two people can approve the same question for two different papers
+ * without ever knowing.
+ *
+ * So a question belongs to whoever put it in the bank. The exception is
+ * admins.manage, the keys-to-the-kingdom privilege that already grants
+ * authority over every other administrator: that holder sees everything,
+ * because somebody has to be able to audit and clean up.
+ *
+ * Questions with no author - imported before authorship was recorded - are
+ * visible to everybody. Hiding them would strand real work behind a column
+ * that was NULL for historical reasons rather than for any decision anyone
+ * made.
+ */
+function visibleToUser(request: { user?: { sub: string; permissions: readonly string[] } }) {
+  const user = request.user!;
+  if (user.permissions.includes('admins.manage')) return {};
+  return { OR: [{ createdById: user.sub }, { createdById: null }] };
+}
+
+/** Whether this administrator may act on one particular question. */
+async function mayTouch(
+  request: { user?: { sub: string; permissions: readonly string[] } },
+  questionId: string,
+): Promise<boolean> {
+  if (request.user!.permissions.includes('admins.manage')) return true;
+  const q = await prisma.question.findUnique({ where: { id: questionId }, select: { createdById: true } });
+  return !q || q.createdById === null || q.createdById === request.user!.sub;
+}
+
 export default async function adminQuestionRoutes(app: FastifyInstance) {
   /** Everything the "Set test" screen needs to render its form. */
   app.get('/api/admin/generation/context', async () => {
@@ -315,8 +349,10 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
       .parse(request.query);
 
     const bucket = bucketWhere(q.bucket);
+    const mine = visibleToUser(request);
 
     const where = {
+      ...mine,
       // The Rejected view is the bin - it deliberately shows retired rows, so
       // a rejection can be undone. Every other view hides them.
       ...(q.status === 'REJECTED' || q.bucket === 'REJECTED' ? {} : { deletedAt: null }),
@@ -365,6 +401,7 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
     const subjectRows = await prisma.question.groupBy({
       by: ['subject'],
       where: {
+        ...mine,
         ...(q.status === 'REJECTED' || q.bucket === 'REJECTED' ? {} : { deletedAt: null }),
         ...(q.status ? { status: q.status } : {}),
         ...bucket,
@@ -376,10 +413,10 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
     // Counts for the four tabs, so each one can show how much is waiting
     // without the UI fetching four pages to find out.
     const [draft, approved, onTest, rejected] = await Promise.all([
-      prisma.question.count({ where: { deletedAt: null, ...bucketWhere('DRAFT') } }),
-      prisma.question.count({ where: { deletedAt: null, ...bucketWhere('APPROVED') } }),
-      prisma.question.count({ where: { deletedAt: null, ...bucketWhere('ON_TEST') } }),
-      prisma.question.count({ where: bucketWhere('REJECTED') }),
+      prisma.question.count({ where: { ...mine, deletedAt: null, ...bucketWhere('DRAFT') } }),
+      prisma.question.count({ where: { ...mine, deletedAt: null, ...bucketWhere('APPROVED') } }),
+      prisma.question.count({ where: { ...mine, deletedAt: null, ...bucketWhere('ON_TEST') } }),
+      prisma.question.count({ where: { ...mine, ...bucketWhere('REJECTED') } }),
     ]);
 
     return {
@@ -394,7 +431,7 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
 
   app.get('/api/admin/questions/:id', async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
-    const question = await prisma.question.findFirst({ where: { id, deletedAt: null } });
+    const question = await prisma.question.findFirst({ where: { id, deletedAt: null, ...visibleToUser(request) } });
     if (!question) return reply.code(404).send({ error: 'Question not found.' });
     return { question };
   });
@@ -409,18 +446,26 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
       })
       .parse(request.body);
 
+    // Only the caller's own questions, so a stale tab or a copied id cannot
+    // reach into a colleague's bank.
+    const owned = await prisma.question.findMany({
+      where: { id: { in: body.ids }, ...visibleToUser(request) },
+      select: { id: true },
+    });
+    const ownedIds = new Set(owned.map((q) => q.id));
+
     // A question that needs a picture cannot be approved until one is
     // attached, otherwise a student would sit a question they cannot answer.
     let blocked: string[] = [];
-    let ids = body.ids;
+    let ids = body.ids.filter((id) => ownedIds.has(id));
 
     if (body.status === 'APPROVED') {
       const unfulfilled = await prisma.question.findMany({
-        where: { id: { in: body.ids }, deletedAt: null, imageRequired: true, imageFulfilled: false },
+        where: { id: { in: ids }, deletedAt: null, imageRequired: true, imageFulfilled: false },
         select: { id: true },
       });
       blocked = unfulfilled.map((q) => q.id);
-      ids = body.ids.filter((id) => !blocked.includes(id));
+      ids = ids.filter((id) => !blocked.includes(id));
     }
 
     /**
@@ -504,6 +549,7 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
    */
   app.post('/api/admin/questions/:id/image', { preHandler: requirePermission('questions.review') }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    if (!(await mayTouch(request, id))) return reply.code(404).send({ error: 'Question not found.' });
     const body = z
       .object({
         assetId: z.string().uuid(),
@@ -560,6 +606,7 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
 
     const questions = await prisma.question.findMany({
       where: {
+        ...visibleToUser(request),
         deletedAt: null,
         imageRequired: true,
         imageFulfilled: false,
@@ -576,6 +623,7 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
   /** Full edit of a draft question, including its diagram blocks. */
   app.patch('/api/admin/questions/:id', { preHandler: requirePermission('questions.review') }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    if (!(await mayTouch(request, id))) return reply.code(404).send({ error: 'Question not found.' });
     const body = z
       .object({
         format: z.enum(['MCQ_SINGLE', 'MCQ_MULTI']).optional(),
@@ -665,6 +713,7 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
    */
   app.delete('/api/admin/questions/:id', { preHandler: requirePermission('questions.review') }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    if (!(await mayTouch(request, id))) return reply.code(404).send({ error: 'Question not found.' });
 
     const question = await prisma.question.findUnique({
       where: { id },
@@ -707,7 +756,7 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
    */
   app.post('/api/admin/questions/purge-rejected', { preHandler: requirePermission('questions.review') }, async (request) => {
     const rejected = await prisma.question.findMany({
-      where: { status: 'REJECTED' },
+      where: { status: 'REJECTED', ...visibleToUser(request) },
       select: { id: true, _count: { select: { answers: true } } },
     });
 

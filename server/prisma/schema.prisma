@@ -165,6 +165,7 @@ model User {
   meta Json @default("{}")
 
   attempts            Attempt[]
+  authoredQuestions   Question[]           @relation("QuestionCreatedBy")
   generationRuns      GenerationRun[]      @relation("RunRequestedBy")
   practiceTests       Test[]               @relation("PracticeTarget")
   createdTests        Test[]               @relation("TestCreatedBy")
@@ -326,6 +327,19 @@ model Question {
   estimatedSeconds Int @default(60)
 
   // --- Provenance: lets the admin see which prompt produces good questions.
+
+  /// Who put this question into the bank - whoever ran the generation or the
+  /// import. A question is visible only to its author and to a holder of
+  /// admins.manage, so two colleagues preparing different papers do not see
+  /// each other's drafts.
+  ///
+  /// Nullable because questions created before authorship existed have no
+  /// author to name; those are treated as belonging to everybody, since
+  /// retro-assigning them to whoever happens to hold the account would be a
+  /// guess.
+  createdById String?
+  createdBy   User?   @relation("QuestionCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
   generationRunId String?
   generationRun   GenerationRun? @relation(fields: [generationRunId], references: [id], onDelete: SetNull)
   sourceModel     String?
@@ -348,6 +362,7 @@ model Question {
   answers       Answer[]
   assets        Asset[]
 
+  @@index([createdById, status])
   @@index([status, subject])
   @@index([status, imageRequired, imageFulfilled])
   @@index([difficultyTag, cognitiveTag])

@@ -150,7 +150,7 @@ async function repairRejected(args: {
   systemPrompt: string;
   questions: LlmQuestion[];
   rejected: Array<{ index: number; reason: string }>;
-  ctx: { runId: string; model: string; validTags: ValidTags; retagged: { count: number } };
+  ctx: { runId: string; model: string; createdById: string; validTags: ValidTags; retagged: { count: number } };
   tokensPerQuestion: number;
 }): Promise<{
   rows: ReturnType<typeof toQuestionRow>[];
@@ -232,7 +232,7 @@ async function repairRejected(args: {
  */
 function toQuestionRow(
   q: LlmQuestion,
-  ctx: { runId: string; model: string; validTags: ValidTags; retagged: { count: number } },
+  ctx: { runId: string; model: string; createdById: string; validTags: ValidTags; retagged: { count: number } },
 ) {
   // Tags must exist in the vocabulary, otherwise analytics silently splits into
   // buckets nobody ever looks at. Misfiled ones are moved to the axis they
@@ -307,6 +307,7 @@ function toQuestionRow(
     imagePrompt,
     imageFulfilled: false,
     generationRunId: ctx.runId,
+    createdById: ctx.createdById,
     sourceModel: ctx.model,
   };
 }
@@ -528,7 +529,7 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
 
     parsedResponse.questions.forEach((q, index) => {
       try {
-        rows.push(toQuestionRow(q, { runId: run.id, model: opts.model, validTags, retagged }));
+        rows.push(toQuestionRow(q, { runId: run.id, model: opts.model, createdById: opts.requestedById, validTags, retagged }));
       } catch (err) {
         rejected.push({ index, reason: err instanceof Error ? err.message : String(err) });
       }
@@ -549,7 +550,7 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
         systemPrompt,
         questions: parsedResponse.questions,
         rejected,
-        ctx: { runId: run.id, model: opts.model, validTags, retagged },
+        ctx: { runId: run.id, model: opts.model, createdById: opts.requestedById, validTags, retagged },
         tokensPerQuestion,
       });
       if (recovered.rows.length > 0) {
@@ -686,7 +687,7 @@ export async function importQuestions(opts: {
 
   parsedResponse.questions.forEach((q, index) => {
     try {
-      rows.push(toQuestionRow(q, { runId: run.id, model: run.model, validTags, retagged }));
+      rows.push(toQuestionRow(q, { runId: run.id, model: run.model, createdById: opts.requestedById, validTags, retagged }));
     } catch (err) {
       rejected.push({ index, reason: err instanceof Error ? err.message : String(err) });
     }

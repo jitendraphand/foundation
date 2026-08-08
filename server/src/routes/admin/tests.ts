@@ -60,6 +60,18 @@ const testSchema = testFields.refine(windowIsComplete, { message: WINDOW_ERROR }
  * Publishing is reversible, so this is a lock rather than a dead end: move the
  * test back to draft, change it, publish again.
  */
+/**
+ * The same ownership rule the question bank applies, so the two screens agree
+ * on what exists. Kept beside the routes that need it rather than shared
+ * through a module, because it is three lines and one import would drag the
+ * whole question router in.
+ */
+function questionsVisibleTo(request: { user?: { sub: string; permissions: readonly string[] } }) {
+  const user = request.user!;
+  if (user.permissions.includes('admins.manage')) return {};
+  return { OR: [{ createdById: user.sub }, { createdById: null }] };
+}
+
 function compositionLock(test: { status: string; _count: { attempts: number } }): string | null {
   if (test._count.attempts > 0) {
     return 'Students have already attempted this test, so its questions can no longer be changed.';
@@ -206,8 +218,10 @@ export default async function adminTestRoutes(app: FastifyInstance) {
     const locked = compositionLock(test);
     if (locked) return reply.code(409).send({ error: locked });
 
+    // Scoped to what this administrator can see, so a question id copied from
+    // a colleague's bank cannot be pulled onto a paper.
     const found = await prisma.question.findMany({
-      where: { id: { in: body.questionIds }, deletedAt: null },
+      where: { id: { in: body.questionIds }, deletedAt: null, ...questionsVisibleTo(request) },
       select: { id: true, status: true },
     });
 
@@ -266,7 +280,7 @@ export default async function adminTestRoutes(app: FastifyInstance) {
     const skippedDuplicate = wanted.length - toAdd.length;
 
     const found = await prisma.question.findMany({
-      where: { id: { in: toAdd }, deletedAt: null },
+      where: { id: { in: toAdd }, deletedAt: null, ...questionsVisibleTo(request) },
       select: { id: true, status: true, subject: true },
     });
 
