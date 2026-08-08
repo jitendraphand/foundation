@@ -13,6 +13,15 @@ import type { BankQuestion, Tag } from '../../lib/types';
  * wrong, then approves it.
  */
 
+type Bucket = 'DRAFT' | 'APPROVED' | 'ON_TEST' | 'REJECTED';
+
+const BUCKETS: Array<{ id: Bucket; label: string }> = [
+  { id: 'DRAFT', label: 'Awaiting review' },
+  { id: 'APPROVED', label: 'Approved' },
+  { id: 'ON_TEST', label: 'On a test' },
+  { id: 'REJECTED', label: 'Rejected' },
+];
+
 export default function AdminQuestions() {
   const [params, setParams] = useSearchParams();
   const [questions, setQuestions] = useState<BankQuestion[]>([]);
@@ -27,8 +36,12 @@ export default function AdminQuestions() {
   // ids are re-selected once they reappear under "Approved", so the admin can
   // put them straight on a paper instead of hunting for them again.
   const carryOver = useRef<string[] | null>(null);
+  const [counts, setCounts] = useState<Record<Bucket, number> | null>(null);
 
-  const status = params.get('status') ?? 'DRAFT';
+  // Four exclusive places, not three states: an approved question already on
+  // a paper is spoken for, and showing it under "Approved" made an admin
+  // building a second test think it was still free.
+  const bucket = (params.get('bucket') ?? params.get('status') ?? 'DRAFT') as Bucket;
   const subject = params.get('subject') ?? '';
   const runId = params.get('generationRunId') ?? '';
 
@@ -36,12 +49,15 @@ export default function AdminQuestions() {
     setLoading(true);
     try {
       const query = new URLSearchParams({ pageSize: '50' });
-      if (status) query.set('status', status);
+      if (bucket) query.set('bucket', bucket);
       if (subject) query.set('subject', subject);
       if (runId) query.set('generationRunId', runId);
 
-      const res = await api.get<{ questions: BankQuestion[] }>(`/api/admin/questions?${query}`);
+      const res = await api.get<{ questions: BankQuestion[]; counts: Record<Bucket, number> }>(
+        `/api/admin/questions?${query}`,
+      );
       setQuestions(res.questions);
+      setCounts(res.counts);
 
       const keep = carryOver.current;
       carryOver.current = null;
@@ -52,7 +68,7 @@ export default function AdminQuestions() {
     } finally {
       setLoading(false);
     }
-  }, [status, subject, runId]);
+  }, [bucket, subject, runId]);
 
   useEffect(() => {
     void load();
@@ -64,6 +80,34 @@ export default function AdminQuestions() {
       .then((res) => setTags(res.tags))
       .catch(() => undefined);
   }, []);
+
+  /**
+   * Really deletes, rather than retiring. Only offered from Rejected, because
+   * that is the only list where an admin has already decided the question is
+   * no good; anywhere else this would be a slip waiting to happen.
+   */
+  const removeForGood = async (ids: string[]) => {
+    if (ids.length === 0) return;
+    const plural = ids.length === 1 ? '' : 's';
+    if (!window.confirm(
+      `Permanently delete ${ids.length} question${plural}? This cannot be undone. ` +
+      'Any that students have already answered will be kept instead, so released results stay explainable.',
+    )) return;
+
+    try {
+      const results = await Promise.all(ids.map((id) => api.delete<{ mode: string }>(`/api/admin/questions/${id}`)));
+      const hard = results.filter((r) => r.mode === 'hard').length;
+      const soft = results.length - hard;
+      setNotice(
+        `${hard} question${hard === 1 ? '' : 's'} deleted for good.` +
+          (soft ? ` ${soft} had already been answered, so ${soft === 1 ? 'it was' : 'they were'} retired instead.` : ''),
+      );
+      setSelected(new Set());
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not delete those questions.');
+    }
+  };
 
   const setStatus = async (ids: string[], next: 'APPROVED' | 'REJECTED' | 'DRAFT') => {
     if (ids.length === 0) return;
@@ -88,10 +132,10 @@ export default function AdminQuestions() {
       if (res.blocked > 0 && res.message) setError(res.message);
 
       // Approving is not the end of the job, so land where the next step is.
-      if (next === 'APPROVED' && res.updated > 0 && status !== 'APPROVED') {
+      if (next === 'APPROVED' && res.updated > 0 && bucket !== 'APPROVED') {
         carryOver.current = ids;
         const params2 = new URLSearchParams(params);
-        params2.set('status', 'APPROVED');
+        params2.set('bucket', 'APPROVED');
         setParams(params2);
         return; // the filter change reloads the list
       }
@@ -116,21 +160,8 @@ export default function AdminQuestions() {
         <h1 className="text-lg font-semibold">Question bank</h1>
 
         <div className="flex flex-wrap items-center gap-2">
-          <select
-            className="input w-auto text-xs py-1.5"
-            value={status}
-            onChange={(e) => {
-              const next = new URLSearchParams(params);
-              next.set('status', e.target.value);
-              setParams(next);
-            }}
-          >
-            <option value="DRAFT">Drafts awaiting review</option>
-            <option value="APPROVED">Approved</option>
-            <option value="REJECTED">Rejected (out of use)</option>
-          </select>
-
           {runId && (
+
             <button
               type="button"
               className="btn-ghost btn-sm"
@@ -146,10 +177,40 @@ export default function AdminQuestions() {
         </div>
       </div>
 
+      <div className="scroll-x -mx-1 px-1">
+        <div className="flex gap-1 border-b border-line" role="tablist">
+          {BUCKETS.map((b) => (
+            <button
+              key={b.id}
+              type="button"
+              role="tab"
+              aria-selected={bucket === b.id}
+              className={
+                'px-3 py-2 text-sm whitespace-nowrap border-b-2 -mb-px transition-colors ' +
+                (bucket === b.id
+                  ? 'border-brand text-brand font-medium'
+                  : 'border-transparent text-ink-muted hover:text-ink')
+              }
+              onClick={() => {
+                const next = new URLSearchParams(params);
+                next.set('bucket', b.id);
+                next.delete('status');
+                setParams(next);
+              }}
+            >
+              {b.label}
+              {counts && (
+                <span className="ml-1.5 tabular-nums text-xs text-ink-faint">{counts[b.id]}</span>
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+
       {error && <Alert tone="error" onDismiss={() => setError(null)}>{error}</Alert>}
       {notice && <Alert tone="success" onDismiss={() => setNotice(null)}>{notice}</Alert>}
 
-      {status === 'REJECTED' && (
+      {bucket === 'REJECTED' && (
         <Alert tone="info">
           Rejected questions are out of use: taken off every test that has not been sat yet, and never given to a
           student starting a new paper. They stay here so a mistake can be undone — select and choose
@@ -164,23 +225,31 @@ export default function AdminQuestions() {
             {/* Approving used to be the end of the road here: the admin then
                 had to go to Tests, make one, and hope its subject matched.
                 Putting them on a paper belongs at the moment of approval. */}
-            {status === 'APPROVED' ? (
+            {bucket === 'APPROVED' && (
               <button type="button" className="btn-primary btn-sm" onClick={() => setAllocating(true)}>
                 Put on a test
               </button>
-            ) : (
+            )}
+            {/* A question can be sent to any of the other places from wherever
+                it is now, so a mis-click is never a one-way door. */}
+            {bucket !== 'APPROVED' && bucket !== 'ON_TEST' && (
               <button type="button" className="btn-primary btn-sm" onClick={() => setStatus([...selected], 'APPROVED')}>
                 Approve
               </button>
             )}
-            {status !== 'REJECTED' && (
+            {bucket !== 'DRAFT' && (
+              <button type="button" className="btn-secondary btn-sm" onClick={() => setStatus([...selected], 'DRAFT')}>
+                Back to draft
+              </button>
+            )}
+            {bucket !== 'REJECTED' && (
               <button type="button" className="btn-secondary btn-sm" onClick={() => setStatus([...selected], 'REJECTED')}>
                 Reject
               </button>
             )}
-            {status === 'REJECTED' && (
-              <button type="button" className="btn-secondary btn-sm" onClick={() => setStatus([...selected], 'DRAFT')}>
-                Back to draft
+            {bucket === 'REJECTED' && (
+              <button type="button" className="btn-secondary btn-sm text-bad" onClick={() => void removeForGood([...selected])}>
+                Delete for good
               </button>
             )}
             <button type="button" className="btn-ghost btn-sm" onClick={() => setSelected(new Set())}>
@@ -195,8 +264,20 @@ export default function AdminQuestions() {
       ) : questions.length === 0 ? (
         <Card>
           <EmptyState
-            title={status === 'DRAFT' ? 'No drafts awaiting review' : `No ${status.toLowerCase()} questions`}
-            hint={status === 'DRAFT' ? 'Generate questions from the "Set test" screen to see them here.' : undefined}
+            title={
+              bucket === 'DRAFT'
+                ? 'No drafts awaiting review'
+                : bucket === 'ON_TEST'
+                  ? 'No questions are on a test yet'
+                  : `No ${bucket.toLowerCase()} questions`
+            }
+            hint={
+              bucket === 'DRAFT'
+                ? 'Generate questions from the "Set test" screen to see them here.'
+                : bucket === 'ON_TEST'
+                  ? 'Approve questions, then use "Put on a test" to build a paper.'
+                  : undefined
+            }
           />
         </Card>
       ) : (

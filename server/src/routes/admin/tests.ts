@@ -48,6 +48,31 @@ const WINDOW_ERROR = 'A daily window needs a start time and an end time, and the
 
 const testSchema = testFields.refine(windowIsComplete, { message: WINDOW_ERROR });
 
+/**
+ * Whether a paper's question list may still be changed, and why not.
+ *
+ * Two separate reasons, and they are not the same thing. A sat test is frozen
+ * because its results are computed from exactly these questions. A published
+ * test is frozen because it is live to students right now - nobody may have
+ * started yet, but the paper is out, and quietly changing what is on it while
+ * it is available is how two students end up sitting different exams.
+ *
+ * Publishing is reversible, so this is a lock rather than a dead end: move the
+ * test back to draft, change it, publish again.
+ */
+function compositionLock(test: { status: string; _count: { attempts: number } }): string | null {
+  if (test._count.attempts > 0) {
+    return 'Students have already attempted this test, so its questions can no longer be changed.';
+  }
+  if (test.status === 'PUBLISHED') {
+    return 'This test is published and live to students, so its questions cannot be changed. Move it back to draft first, then edit it.';
+  }
+  if (test.status === 'CLOSED') {
+    return 'This test is closed, so its questions can no longer be changed. Move it back to draft to reopen it for editing.';
+  }
+  return null;
+}
+
 export default async function adminTestRoutes(app: FastifyInstance) {
   app.get('/api/admin/tests', async (request) => {
     const q = z
@@ -170,7 +195,7 @@ export default async function adminTestRoutes(app: FastifyInstance) {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = z
       .object({
-        questionIds: z.array(z.string().uuid()).min(1).max(200),
+        questionIds: z.array(z.string().uuid()).min(1),
         /** Per-question override; falls back to the test's marksPerQuestion. */
         marks: z.record(z.number().min(0.25).max(100)).optional(),
       })
@@ -178,9 +203,8 @@ export default async function adminTestRoutes(app: FastifyInstance) {
 
     const test = await prisma.test.findFirst({ where: { id, deletedAt: null }, include: { _count: { select: { attempts: true } } } });
     if (!test) return reply.code(404).send({ error: 'Test not found.' });
-    if (test._count.attempts > 0) {
-      return reply.code(409).send({ error: 'Students have already attempted this test, so its questions can no longer be changed.' });
-    }
+    const locked = compositionLock(test);
+    if (locked) return reply.code(409).send({ error: locked });
 
     const found = await prisma.question.findMany({
       where: { id: { in: body.questionIds }, deletedAt: null },
@@ -226,16 +250,15 @@ export default async function adminTestRoutes(app: FastifyInstance) {
    */
   app.post('/api/admin/tests/:id/questions/add', { preHandler: requirePermission('tests.manage') }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
-    const body = z.object({ questionIds: z.array(z.string().uuid()).min(1).max(200) }).parse(request.body);
+    const body = z.object({ questionIds: z.array(z.string().uuid()).min(1) }).parse(request.body);
 
     const test = await prisma.test.findFirst({
       where: { id, deletedAt: null },
       include: { _count: { select: { attempts: true } }, questions: { select: { questionId: true, position: true } } },
     });
     if (!test) return reply.code(404).send({ error: 'Test not found.' });
-    if (test._count.attempts > 0) {
-      return reply.code(409).send({ error: 'Students have already attempted this test, so its questions can no longer be changed.' });
-    }
+    const locked = compositionLock(test);
+    if (locked) return reply.code(409).send({ error: locked });
 
     const already = new Set(test.questions.map((q) => q.questionId));
     const wanted = [...new Set(body.questionIds)];

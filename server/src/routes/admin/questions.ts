@@ -25,10 +25,10 @@ const generateSchema = z.object({
     topic: z.string().max(200).optional(),
     subtopic: z.string().max(200).optional(),
     grade: z.string().max(20).optional(),
-    // Split into batches of ten behind the scenes; see planBatches. The
-    // ceiling is about how long an admin is prepared to wait, not a limit on
-    // what one reply can hold.
-    count: z.number().int().min(1).max(100),
+    // Split into batches of ten behind the scenes; see planBatches, so what
+    // one reply can hold is no longer the limit. The remaining bound is
+    // patience - a large run is many sequential calls - not the format.
+    count: z.number().int().min(1).max(500),
     marksPerQuestion: z.number().min(0.25).max(100).default(1),
     difficultyMix: z.record(z.number().int().min(0)).optional(),
     cognitiveMix: z.record(z.number().int().min(0)).optional(),
@@ -38,6 +38,41 @@ const generateSchema = z.object({
     avoidImages: z.boolean().optional(),
   }),
 });
+
+/**
+ * The four places a question can be, as one exclusive set.
+ *
+ * "Approved" and "on a test" were the same status, so an approved question
+ * that had been placed on a paper still sat in the approved list, and an
+ * admin building a second paper could not tell what was already spoken for.
+ *
+ * Rather than store a fourth status - which would then have to be kept in step
+ * with every add, remove, and test deletion, and would be wrong the moment it
+ * was not - "on a test" is derived from the links themselves. A question is on
+ * a test if some live test still references it; remove it from that test and
+ * it returns to the approved list by itself, with nothing to reconcile.
+ *
+ * Links to deleted tests do not count: the paper is gone, the question is free.
+ */
+type QuestionBucket = 'DRAFT' | 'APPROVED' | 'ON_TEST' | 'REJECTED';
+
+const ON_A_LIVE_TEST = { some: { test: { deletedAt: null } } };
+const ON_NO_LIVE_TEST = { none: { test: { deletedAt: null } } };
+
+function bucketWhere(bucket?: QuestionBucket) {
+  switch (bucket) {
+    case 'DRAFT':
+      return { status: 'DRAFT' as const };
+    case 'APPROVED':
+      return { status: 'APPROVED' as const, testQuestions: ON_NO_LIVE_TEST };
+    case 'ON_TEST':
+      return { status: 'APPROVED' as const, testQuestions: ON_A_LIVE_TEST };
+    case 'REJECTED':
+      return { status: 'REJECTED' as const };
+    default:
+      return {};
+  }
+}
 
 export default async function adminQuestionRoutes(app: FastifyInstance) {
   /** Everything the "Set test" screen needs to render its form. */
@@ -261,6 +296,12 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
     const q = z
       .object({
         status: z.enum(['DRAFT', 'APPROVED', 'REJECTED']).optional(),
+        /**
+         * Where the question sits, as one of four mutually exclusive places.
+         * Preferred over `status`, which cannot express "approved but already
+         * on a paper" - see bucketWhere.
+         */
+        bucket: z.enum(['DRAFT', 'APPROVED', 'ON_TEST', 'REJECTED']).optional(),
         subject: z.string().optional(),
         topic: z.string().optional(),
         difficultyTag: z.string().optional(),
@@ -273,11 +314,14 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
       })
       .parse(request.query);
 
+    const bucket = bucketWhere(q.bucket);
+
     const where = {
       // The Rejected view is the bin - it deliberately shows retired rows, so
       // a rejection can be undone. Every other view hides them.
-      ...(q.status === 'REJECTED' ? {} : { deletedAt: null }),
+      ...(q.status === 'REJECTED' || q.bucket === 'REJECTED' ? {} : { deletedAt: null }),
       ...(q.status ? { status: q.status } : {}),
+      ...bucket,
       // Case-insensitive: a test called "Maths" must still find questions
       // filed under "maths". An exact match here silently returned nothing
       // and looked like the question bank was empty.
@@ -296,6 +340,15 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
         orderBy: { createdAt: 'desc' },
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
+        // Which papers it is on, so the bank can say "on Maths Unit 1" rather
+        // than leaving an approved question mysteriously absent from the
+        // approved list.
+        include: {
+          testQuestions: {
+            where: { test: { deletedAt: null } },
+            select: { test: { select: { id: true, title: true, status: true } } },
+          },
+        },
       }),
     ]);
 
@@ -312,12 +365,22 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
     const subjectRows = await prisma.question.groupBy({
       by: ['subject'],
       where: {
-        ...(q.status === 'REJECTED' ? {} : { deletedAt: null }),
+        ...(q.status === 'REJECTED' || q.bucket === 'REJECTED' ? {} : { deletedAt: null }),
         ...(q.status ? { status: q.status } : {}),
+        ...bucket,
       },
       _count: { _all: true },
       orderBy: { subject: 'asc' },
     });
+
+    // Counts for the four tabs, so each one can show how much is waiting
+    // without the UI fetching four pages to find out.
+    const [draft, approved, onTest, rejected] = await Promise.all([
+      prisma.question.count({ where: { deletedAt: null, ...bucketWhere('DRAFT') } }),
+      prisma.question.count({ where: { deletedAt: null, ...bucketWhere('APPROVED') } }),
+      prisma.question.count({ where: { deletedAt: null, ...bucketWhere('ON_TEST') } }),
+      prisma.question.count({ where: bucketWhere('REJECTED') }),
+    ]);
 
     return {
       total,
@@ -325,6 +388,7 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
       pageSize: q.pageSize,
       questions: filtered,
       subjects: subjectRows.map((r) => ({ subject: r.subject, count: r._count._all })),
+      counts: { DRAFT: draft, APPROVED: approved, ON_TEST: onTest, REJECTED: rejected },
     };
   });
 
@@ -339,7 +403,7 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
   app.post('/api/admin/questions/bulk-status', { preHandler: requirePermission('questions.review') }, async (request) => {
     const body = z
       .object({
-        ids: z.array(z.string().uuid()).min(1).max(200),
+        ids: z.array(z.string().uuid()).min(1),
         status: z.enum(['DRAFT', 'APPROVED', 'REJECTED']),
         reviewNote: z.string().max(1000).optional(),
       })
@@ -587,18 +651,88 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
     return { ok: true, question: updated };
   });
 
+  /**
+   * Deletes a question for good.
+   *
+   * The Rejected list is a bin, and a bin nobody can empty just becomes a
+   * place where rubbish accumulates - so this really does remove the row.
+   *
+   * It is refused in exactly one case: the question has been answered by
+   * somebody. Those answers are what a released result was computed from, and
+   * deleting the question would leave marks that can no longer be explained.
+   * A question merely sitting on an unsat paper is unlinked and then deleted,
+   * because nothing has been computed from it yet.
+   */
   app.delete('/api/admin/questions/:id', { preHandler: requirePermission('questions.review') }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
 
-    const used = await prisma.testQuestion.count({ where: { questionId: id } });
-    if (used > 0) {
-      // Soft delete only: a hard delete would orphan historical answers.
+    const question = await prisma.question.findUnique({
+      where: { id },
+      select: { id: true, status: true, _count: { select: { answers: true, testQuestions: true } } },
+    });
+    if (!question) return reply.code(404).send({ error: 'Question not found.' });
+
+    if (question._count.answers > 0) {
       await prisma.question.update({ where: { id }, data: { deletedAt: new Date(), status: 'REJECTED' } });
-      return { ok: true, mode: 'soft', message: 'This question is used by a test, so it has been retired rather than deleted.' };
+      await audit(request.user!.sub, 'question.retire', { entity: 'Question', entityId: id, ip: request.ip });
+      return {
+        ok: true,
+        mode: 'soft',
+        message:
+          'Students have answered this question, so it has been retired rather than deleted - deleting it would ' +
+          'leave marks in released results that could no longer be explained. It will never be served again.',
+      };
     }
 
-    await prisma.question.delete({ where: { id } });
-    await audit(request.user!.sub, 'question.delete', { entity: 'Question', entityId: id, ip: request.ip });
+    // Unlink from any unsat paper first; the foreign key would otherwise
+    // refuse the delete and the admin would see a database error.
+    await prisma.$transaction([
+      prisma.testQuestion.deleteMany({ where: { questionId: id } }),
+      prisma.asset.deleteMany({ where: { questionId: id } }),
+      prisma.question.delete({ where: { id } }),
+    ]);
+
+    await audit(request.user!.sub, 'question.delete', {
+      entity: 'Question', entityId: id, ip: request.ip,
+      detail: { unlinkedFrom: question._count.testQuestions },
+    });
     return { ok: true, mode: 'hard' };
+  });
+
+  /**
+   * Empties the Rejected list in one go.
+   *
+   * Rejected questions accumulate fast - a bad prompt produces twenty in one
+   * run - and removing them one at a time is not a real option.
+   */
+  app.post('/api/admin/questions/purge-rejected', { preHandler: requirePermission('questions.review') }, async (request) => {
+    const rejected = await prisma.question.findMany({
+      where: { status: 'REJECTED' },
+      select: { id: true, _count: { select: { answers: true } } },
+    });
+
+    const deletable = rejected.filter((q) => q._count.answers === 0).map((q) => q.id);
+    const kept = rejected.length - deletable.length;
+
+    if (deletable.length) {
+      await prisma.$transaction([
+        prisma.testQuestion.deleteMany({ where: { questionId: { in: deletable } } }),
+        prisma.asset.deleteMany({ where: { questionId: { in: deletable } } }),
+        prisma.question.deleteMany({ where: { id: { in: deletable } } }),
+      ]);
+    }
+
+    await audit(request.user!.sub, 'question.purge_rejected', {
+      entity: 'Question', ip: request.ip, detail: { deleted: deletable.length, kept },
+    });
+
+    return {
+      ok: true,
+      deleted: deletable.length,
+      kept,
+      message: kept
+        ? `Deleted ${deletable.length}. Kept ${kept} that students have already answered, so released results stay explainable.`
+        : `Deleted ${deletable.length} rejected question${deletable.length === 1 ? '' : 's'}.`,
+    };
   });
 }
