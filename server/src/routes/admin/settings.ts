@@ -7,6 +7,7 @@ import { encryptSecret, keyHint } from '../../lib/crypto.js';
 import { PROVIDERS, describeKeyProblem, pingProvider, DEFAULT_AZURE_API_VERSION } from '../../llm/providers.js';
 import { parseServiceAccount, vertexBaseUrl } from '../../llm/google-auth.js';
 import { looksLikeOcid } from '../../llm/oci-signer.js';
+import { getStepUpConfig, setStepUpConfig } from '../../llm/step-up.js';
 import { callParamsFor, packIamSecret } from '../../llm/credentials.js';
 import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_TEMPLATE } from '../../llm/prompts.js';
 import { COMMON_TIMEZONES, WINDOW_PRESETS, isValidTimezone, zonedNow, formatMinute } from '../../lib/availability.js';
@@ -467,6 +468,60 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
     });
 
     return { results, checkedAt: new Date().toISOString() };
+  });
+
+  /**
+   * Which provider the Step-up Test uses.
+   *
+   * Kept separate from the credential a paper is generated with, deliberately.
+   * Step-up is triggered by students rather than staff, several times a day
+   * across a class, so a school will usually want it pointed at something
+   * cheap or free even when papers are set with the best model available.
+   */
+  app.get('/api/admin/step-up', async () => {
+    const config = await getStepUpConfig();
+    const credentials = await prisma.apiCredential.findMany({
+      where: { isActive: true },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true, label: true, provider: true, defaultModel: true },
+    });
+    return { config, credentials };
+  });
+
+  app.put('/api/admin/step-up', async (request, reply) => {
+    const body = z
+      .object({
+        credentialId: z.string().uuid().nullable(),
+        model: z.string().max(200).optional(),
+      })
+      .parse(request.body);
+
+    if (body.credentialId === null) {
+      await setStepUpConfig(null);
+      await audit(request.user!.sub, 'settings.step_up', { ip: request.ip, detail: { enabled: false } });
+      return { ok: true, config: null, message: 'Step-up tests are switched off. Students will not see the buttons.' };
+    }
+
+    const credential = await prisma.apiCredential.findUnique({ where: { id: body.credentialId } });
+    if (!credential || !credential.isActive) {
+      return reply.code(400).send({ error: 'That credential does not exist or is disabled.' });
+    }
+
+    const model = body.model?.trim() || credential.defaultModel;
+    if (!model) {
+      return reply.code(400).send({ error: 'Choose a model, or set a default model on that credential first.' });
+    }
+
+    await setStepUpConfig({ credentialId: credential.id, model });
+    await audit(request.user!.sub, 'settings.step_up', {
+      ip: request.ip, detail: { credentialId: credential.id, model },
+    });
+
+    return {
+      ok: true,
+      config: { credentialId: credential.id, model },
+      message: `Step-up tests will use ${credential.label} (${model}).`,
+    };
   });
 
   // --- Prompt templates ----------------------------------------------------

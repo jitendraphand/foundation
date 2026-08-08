@@ -4,6 +4,8 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../db.js';
 import { authenticate, requireActivitiesComplete, requireFreshPassword } from '../middleware/auth.js';
 import { finalizeAttempt, buildLayout, publicQuestion, remainingMs, resultsAreVisible, sweepExpiredAttempts } from '../services/attempt.js';
+import { generateStepUp } from '../llm/step-up.js';
+import { LlmError } from '../llm/providers.js';
 import { findWeakAreas, type Breakdown } from '../lib/analytics.js';
 import { evaluateAvailability } from '../lib/availability.js';
 import { getSchoolTimezone } from '../services/settings.js';
@@ -573,7 +575,57 @@ export default async function studentRoutes(app: FastifyInstance) {
         : { message: 'Your paper has been submitted. Your teacher will release the results for this test.' }),
     };
   });
+
+  /**
+   * The Step-up Test: five more questions built from one the student has just
+   * seen, sat immediately.
+   *
+   * Rate limited hard, and per student rather than per IP, because this spends
+   * the school's API budget on demand from someone who is not paying for it. A
+   * handful an hour is enough to be genuinely useful for revision and not
+   * enough to be expensive if somebody discovers the button is fun.
+   */
+  app.post('/api/step-up', {
+    config: { rateLimit: { max: 6, timeWindow: '1 hour', keyGenerator: (req: { user?: { sub: string }; ip: string }) => req.user?.sub ?? req.ip } },
+  }, async (request, reply) => {
+    const body = z
+      .object({
+        questionId: z.string().uuid(),
+        mode: z.enum(['SAME', 'LADDER']),
+      })
+      .parse(request.body);
+
+    const userId = request.user!.sub;
+
+    // The student may only build on a question they have actually been given,
+    // in a paper whose results they are allowed to see - otherwise this is a
+    // way to read any question in the bank, answer key and all, by guessing
+    // ids.
+    const answer = await prisma.answer.findFirst({
+      where: {
+        questionId: body.questionId,
+        attempt: { userId, status: { in: ['SUBMITTED', 'AUTO_SUBMITTED'] } },
+      },
+      select: { attempt: { select: { test: { select: { kind: true, resultsReleased: true } } } } },
+    });
+
+    if (!answer || !resultsAreVisible(answer.attempt.test)) {
+      return reply.code(404).send({ error: 'That question is not one of yours to practise yet.' });
+    }
+
+    const question = await prisma.question.findUnique({ where: { id: body.questionId } });
+    if (!question) return reply.code(404).send({ error: 'That question no longer exists.' });
+
+    try {
+      const result = await generateStepUp({ question, mode: body.mode, studentId: userId });
+      return { ok: true, ...result };
+    } catch (err) {
+      if (err instanceof LlmError) return reply.code(502).send({ error: err.message });
+      throw err;
+    }
+  });
 }
+
 
 function shapeResult(a: {
   id: string;

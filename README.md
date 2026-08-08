@@ -69,6 +69,11 @@ ARM)** instance with `docker compose up -d`.
   started, with a one-click "make them do it again".
 - **Analytics** — score distribution, trend over time, per-class and per-subject
   comparison, cohort-wide tag mastery, and a weakest-first student ranking.
+- **Step-up tests** — reviewing a result, a student can ask any question for
+  five more like it, or five that build up to it easiest-first. The paper is
+  written on the spot, opens in a new tab, and is marked the moment it is
+  submitted. An administrator chooses which provider answers these (usually a
+  cheap one, since students trigger them) or leaves it off entirely.
 - **Per-student analysis** — mastery grid across all four tag axes, and one
   button to generate a practice test aimed at exactly the cells they are
   failing. Practice data stays segregated from class-test data everywhere.

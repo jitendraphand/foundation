@@ -381,6 +381,8 @@ function Providers() {
         )}
       </Card>
 
+      <StepUpSettings credentials={credentials} />
+
       <Alert tone="info">
         A provider ticked as <strong>fallback</strong> is used when the one you chose keeps refusing — rate limited,
         overloaded, or unreachable. The chosen provider is always tried first and retried before anything else is
@@ -697,6 +699,91 @@ function AddCredentialModal({ providers, onClose, onAdded }: { providers: Provid
         </div>
       </form>
     </Modal>
+  );
+}
+
+/**
+ * Which provider answers a student pressing "5 more like this".
+ *
+ * Separate from the credential papers are set with, on purpose: Step-up is
+ * triggered by students, several times a day across a class, so a school will
+ * usually want it pointed somewhere cheap even when papers use the best model
+ * they have. Leaving it unset switches the feature off rather than falling
+ * back to an expensive default nobody chose.
+ */
+function StepUpSettings({ credentials }: { credentials: Credential[] }) {
+  const [credentialId, setCredentialId] = useState('');
+  const [model, setModel] = useState('');
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api
+      .get<{ config: { credentialId: string; model?: string } | null }>('/api/admin/step-up')
+      .then((res) => {
+        setCredentialId(res.config?.credentialId ?? '');
+        setModel(res.config?.model ?? '');
+      })
+      .catch(() => undefined);
+  }, []);
+
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api.put<{ message: string }>('/api/admin/step-up', {
+        credentialId: credentialId || null,
+        model: model.trim() || undefined,
+      });
+      setNotice(res.message);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not save that.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const chosen = credentials.find((c) => c.id === credentialId);
+
+  return (
+    <Card title="Step-up tests">
+      {error && <Alert tone="error" onDismiss={() => setError(null)}>{error}</Alert>}
+      {notice && <Alert tone="success" onDismiss={() => setNotice(null)}>{notice}</Alert>}
+
+      <p className="text-xs text-ink-muted mb-3">
+        When a student reviews a result, each question offers them five more like it, or five building up to it,
+        generated on the spot and marked straight away. Choose which provider answers those. Students trigger this
+        themselves, so point it at something cheap; leave it as &ldquo;off&rdquo; and the buttons do not appear.
+      </p>
+
+      <div className="grid sm:grid-cols-2 gap-4">
+        <Field label="Provider">
+          <select className="input" value={credentialId} onChange={(e) => { setCredentialId(e.target.value); setModel(''); }}>
+            <option value="">Off — students see no Step-up buttons</option>
+            {credentials.map((c) => (
+              <option key={c.id} value={c.id}>{c.label}</option>
+            ))}
+          </select>
+        </Field>
+
+        <Field label="Model" hint={chosen?.defaultModel ? `Leave empty to use ${chosen.defaultModel}.` : undefined}>
+          <input
+            className="input font-mono text-xs"
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            placeholder={chosen?.defaultModel ?? ''}
+            disabled={!credentialId}
+          />
+        </Field>
+      </div>
+
+      <div className="flex justify-end mt-3">
+        <button type="button" className="btn-primary btn-sm" onClick={() => void save()} disabled={busy}>
+          {busy ? <Spinner label="Saving" /> : 'Save'}
+        </button>
+      </div>
+    </Card>
   );
 }
 

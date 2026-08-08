@@ -349,6 +349,28 @@ up/down with latency. That is the quick way to tell a broken key from a busy
 service, without spending a generation run to find out. Anything answering
 slower than a few seconds will struggle with a long run.
 
+### Step-up tests
+
+**Admin → Settings → LLM providers → Step-up tests.**
+
+When a student reviews a released result, every question offers them five more
+like it, or five building up to it. The paper is generated on the spot, opens
+in a new tab, and is marked immediately.
+
+Choose which provider answers those, separately from the one papers are set
+with — students trigger this themselves, several times a day across a class, so
+it usually wants pointing at something cheap even when papers use the best
+model available. Left as *Off*, the buttons do not appear at all.
+
+It is limited to six a student an hour, and a student can only build on a
+question from a paper they actually sat whose results have been released — both
+because this spends the school's API budget, and because otherwise it would be
+a way to read questions out of the bank by guessing ids.
+
+The generated questions belong to the student, so they never appear in anyone's
+review queue, and the papers are practice tests: segregated from class results
+everywhere, and marked without waiting for a release.
+
 ### When the provider is unavailable
 
 **Admin → Set test → Import from a file instead.**

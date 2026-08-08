@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useLocation, useParams } from 'react-router-dom';
 import { api, ApiError } from '../lib/api';
-import { Alert, Badge, Card, PageLoader, formatDate, humanizeTag } from '../components/ui';
+import { Alert, Badge, Card, PageLoader, Spinner, formatDate, humanizeTag } from '../components/ui';
 import { AccuracyMeter, BarChart, DataTable, StatTile } from '../components/charts';
 import { ContentRenderer, BlocksRenderer } from '../renderers/BlockRenderer';
 import type { Breakdown, PaperQuestion } from '../lib/types';
@@ -276,11 +276,69 @@ function QuestionReview({ question, index, showAnswers }: { question: PaperQuest
             {question.skillTags.map((tag) => (
               <Badge key={tag}>{humanizeTag(tag)}</Badge>
             ))}
-            {question.topic && <span className="text-[11px] text-ink-faint">{question.topic}</span>}
           </div>
+
+          <StepUp questionId={question.id} />
         </div>
       )}
     </li>
+  );
+}
+
+/**
+ * Five more questions, generated from this one and sat straight away.
+ *
+ * Two buttons rather than one because "more of these" means different things
+ * depending on how the question went. Someone who was nearly right wants
+ * another five of the same; someone who had no idea where to start wants the
+ * steps that lead up to it.
+ *
+ * The paper opens in a new tab, so the result being read stays put - a student
+ * comparing their working against the explanation should not lose it by
+ * clicking through.
+ */
+function StepUp({ questionId }: { questionId: string }) {
+  const [busy, setBusy] = useState<'SAME' | 'LADDER' | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const start = async (mode: 'SAME' | 'LADDER') => {
+    setBusy(mode);
+    setError(null);
+    // Opened before the request, because a tab opened later - after an await -
+    // is a pop-up as far as the browser is concerned and gets blocked.
+    const tab = window.open('', '_blank');
+    if (tab) tab.document.write('<title>Building your Step-up test…</title><p style="font:14px system-ui;padding:2rem">Writing five questions for you. This takes a few seconds.</p>');
+
+    try {
+      const built = await api.post<{ testId: string }>('/api/step-up', { questionId, mode });
+      // Start it here rather than server-side, so the paper opens through the
+      // same route as any other test and keeps its checks - attempt limits,
+      // availability, the activity gate.
+      const started = await api.post<{ attemptId: string }>(`/api/student/tests/${built.testId}/start`, {});
+      const url = `${window.location.origin}/attempt/${started.attemptId}`;
+      if (tab) tab.location.href = url;
+      else window.location.href = url;
+    } catch (err) {
+      tab?.close();
+      setError(err instanceof ApiError ? err.message : 'Could not build a Step-up test just now.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="mt-4 rounded-lg border border-line bg-surface-sunken p-3">
+      <p className="text-xs text-ink-muted mb-2">Want more practice on this?</p>
+      <div className="flex flex-wrap gap-2">
+        <button type="button" className="btn-secondary btn-sm" disabled={busy !== null} onClick={() => void start('SAME')}>
+          {busy === 'SAME' ? <Spinner label="Writing" /> : '5 more like this'}
+        </button>
+        <button type="button" className="btn-secondary btn-sm" disabled={busy !== null} onClick={() => void start('LADDER')}>
+          {busy === 'LADDER' ? <Spinner label="Writing" /> : 'Build up to this'}
+        </button>
+      </div>
+      {error && <p className="text-xs text-bad mt-2">{error}</p>}
+    </div>
   );
 }
 
