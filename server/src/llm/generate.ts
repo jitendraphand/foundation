@@ -3,7 +3,8 @@ import { prisma } from '../db.js';
 import { callParamsFor, type CallParams } from './credentials.js';
 import { normalizeContent, normalizeBlocks, CONTENT_VERSION } from '../lib/content.js';
 import { validateAnswerKey } from '../lib/grading.js';
-import { chatComplete, emitsReasoning, LlmError, PROVIDERS, type ChatMessage } from './providers.js';
+import { chatComplete, emitsReasoning, LlmError, PROVIDERS, type ChatMessage, type ChatRequest } from './providers.js';
+import { chatWithFallback } from './resilience.js';
 import { extractJson, llmResponseSchema, llmQuestionSchema, describeIssues, type LlmQuestion } from './schema.js';
 import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_TEMPLATE, PRACTICE_SYSTEM_SUFFIX, renderTemplate } from './prompts.js';
 import type { TestKind, QuestionStatus } from '@prisma/client';
@@ -79,6 +80,53 @@ export function buildUserPrompt(spec: GenerateSpec, template = DEFAULT_USER_TEMP
     skillFocus: spec.skillFocus?.length ? spec.skillFocus.join(', ') : 'any relevant skills',
     extraInstructions: extra,
   });
+}
+
+/**
+ * The order to try providers in, when the chosen one will not answer.
+ *
+ * The administrator's choice always goes first and is never skipped - a
+ * fallback is a way to finish a run that would otherwise be lost, not a
+ * licence to quietly spend money somewhere else.
+ *
+ * After that, only credentials explicitly marked as fallbacks are used, in the
+ * order they were added. Left unmarked, nothing happens: an admin using a paid
+ * key and a free one would be very surprised to find a rate limit on the free
+ * one silently billed to the paid account.
+ *
+ * Each candidate keeps its own model, because a model id is provider-specific
+ * - "gpt-4.1" means nothing to Bedrock - and the credential's default is the
+ * only sensible choice on a provider the admin did not pick.
+ */
+async function buildCandidates(
+  chosen: { id: string; label: string },
+  model: string,
+  call: CallParams,
+): Promise<Array<{ label: string; model: string; call: Omit<ChatRequest, 'model' | 'messages'> }>> {
+  const candidates = [{ label: chosen.label, model, call }];
+
+  const fallbacks = await prisma.apiCredential.findMany({
+    where: { isActive: true, id: { not: chosen.id }, meta: { path: ['useAsFallback'], equals: true } },
+    orderBy: { createdAt: 'asc' },
+  });
+
+  for (const credential of fallbacks) {
+    // A fallback with no default model has nothing usable to call.
+    if (!credential.defaultModel) continue;
+    try {
+      candidates.push({
+        label: credential.label,
+        model: credential.defaultModel,
+        call: await callParamsFor(credential),
+      });
+    } catch {
+      // A fallback that cannot even be unpacked - a Vertex token exchange that
+      // fails, say - is skipped rather than breaking the run it was meant to
+      // rescue.
+    }
+  }
+
+  return candidates;
 }
 
 /**
@@ -379,6 +427,11 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
   const call = await callParamsFor(credential);
   const providerDef = PROVIDERS[credential.provider] ?? PROVIDERS.custom;
 
+  // The chosen credential first, then whatever else is available, so a free
+  // endpoint that rate-limits mid-run does not lose the whole batch. See
+  // buildCandidates for why the order is what it is.
+  const candidates = await buildCandidates(credential, opts.model, call);
+
   let systemPrompt = opts.systemPrompt?.trim() || DEFAULT_SYSTEM_PROMPT;
   if (opts.kind === 'PRACTICE') systemPrompt += PRACTICE_SYSTEM_SUFFIX;
 
@@ -438,14 +491,24 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
         { role: 'user', content: batchPrompt },
       ];
 
-      let response = await chatComplete({
-        ...call,
-        model: opts.model,
-        messages,
+      const shared = {
         temperature: opts.temperature ?? 0.4,
         jsonMode: providerDef.supportsJsonMode,
         maxTokens: Math.min(32000, tokensPerQuestion * Math.max(1, batchCount)),
+      };
+
+      const first = await chatWithFallback(messages, {
+        candidates: candidates.map((c) => ({ ...c, call: { ...c.call, ...shared } })),
+        onRetry: (note) =>
+          warnings.push(
+            `${note.credentialLabel} was busy on batch ${batchIndex + 1} (${note.error.slice(0, 90)}). ` +
+              `Waiting ${Math.round((note.waitedMs ?? 0) / 1000)}s and trying again.`,
+          ),
       });
+      let response = first.response;
+      if (first.usedLabel !== credential.label) {
+        warnings.push(`Batch ${batchIndex + 1} fell back to ${first.usedLabel} (${first.usedModel}).`);
+      }
 
       rawText = response.text;
       attempts++;
@@ -479,14 +542,19 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
               `Return the corrected, complete JSON object now. Output only the JSON object, no fences and no commentary.`,
           });
 
-          response = await chatComplete({
-            ...call,
-            model: opts.model,
-            messages,
-            temperature: 0.1,
-            jsonMode: providerDef.supportsJsonMode,
-            maxTokens: Math.min(32000, tokensPerQuestion * Math.max(1, batchCount)),
-          });
+          response = (
+            await chatWithFallback(messages, {
+              candidates: candidates.map((c) => ({
+                ...c,
+                call: {
+                  ...c.call,
+                  temperature: 0.1,
+                  jsonMode: providerDef.supportsJsonMode,
+                  maxTokens: Math.min(32000, tokensPerQuestion * Math.max(1, batchCount)),
+                },
+              })),
+            })
+          ).response;
           rawText = response.text;
           attempts++;
           latencyMs += response.latencyMs;

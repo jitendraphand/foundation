@@ -146,6 +146,7 @@ interface Credential {
     authMode?: 'apiKey' | 'sigv4';
     projectId?: string;
     apiVersion?: string;
+    useAsFallback?: boolean;
   } | null;
 }
 
@@ -181,6 +182,18 @@ function describeProvider(credential: Credential, providers: ProviderDef[]): str
   return name;
 }
 
+/** One row of the all-providers health check. */
+interface HealthRow {
+  id: string;
+  label: string;
+  provider: string;
+  model: string | null;
+  ok: boolean;
+  latencyMs: number | null;
+  message: string;
+  useAsFallback: boolean;
+}
+
 interface ProviderDef {
   id: string;
   label: string;
@@ -201,6 +214,8 @@ function Providers() {
   const [notice, setNotice] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [testing, setTesting] = useState<string | null>(null);
+  const [health, setHealth] = useState<HealthRow[] | null>(null);
+  const [checking, setChecking] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -231,6 +246,33 @@ function Providers() {
       setError(err instanceof ApiError ? err.message : 'The connection test failed.');
     } finally {
       setTesting(null);
+    }
+  };
+
+  /**
+   * Tests everything at once. The free tiers are erratic enough that "is it me
+   * or is it them" is a question worth being able to answer in one click,
+   * rather than by spending a generation run to find out.
+   */
+  const checkAll = async () => {
+    setChecking(true);
+    setError(null);
+    try {
+      const res = await api.post<{ results: HealthRow[] }>('/api/admin/credentials/health', {});
+      setHealth(res.results);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not check the providers.');
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const setFallback = async (credential: Credential, useAsFallback: boolean) => {
+    try {
+      await api.patch(`/api/admin/credentials/${credential.id}`, { useAsFallback });
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not change that setting.');
     }
   };
 
@@ -270,6 +312,7 @@ function Providers() {
                   <th>Provider</th>
                   <th>Key</th>
                   <th>Default model</th>
+                  <th className="text-center">Fallback</th>
                   <th>Added</th>
                   <th />
                 </tr>
@@ -281,6 +324,15 @@ function Providers() {
                     <td className="text-ink-muted">{describeProvider(credential, providers)}</td>
                     <td className="font-mono text-xs text-ink-faint">{credential.keyHint}</td>
                     <td className="font-mono text-xs text-ink-muted">{credential.defaultModel ?? '—'}</td>
+                    <td className="text-center">
+                      <input
+                        type="checkbox"
+                        className="accent-series-1"
+                        checked={credential.meta?.useAsFallback === true}
+                        onChange={(e) => void setFallback(credential, e.target.checked)}
+                        aria-label={`Use ${credential.label} as a fallback`}
+                      />
+                    </td>
                     <td className="text-xs text-ink-muted whitespace-nowrap">{formatDate(credential.createdAt)}</td>
                     <td className="text-right whitespace-nowrap">
                       <button type="button" className="btn-ghost btn-sm" onClick={() => test(credential)} disabled={testing === credential.id}>
@@ -295,6 +347,46 @@ function Providers() {
           </div>
         )}
       </Card>
+
+      <Card
+        title="Check every provider"
+        action={
+          <button type="button" className="btn-secondary btn-sm" onClick={() => void checkAll()} disabled={checking}>
+            {checking ? <Spinner label="Checking" /> : 'Check all now'}
+          </button>
+        }
+      >
+        <p className="text-xs text-ink-muted">
+          Sends one tiny request to each active provider and reports whether it answered and how fast. The free tiers
+          rate-limit and go down without warning, so this is the quick way to tell a broken key from a busy service.
+          Anything slower than a few seconds will struggle with a long generation run.
+        </p>
+
+        {health && (
+          <ul className="mt-3 divide-y divide-line text-sm">
+            {health.map((row) => (
+              <li key={row.id} className="py-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+                <Badge tone={row.ok ? 'good' : 'bad'}>{row.ok ? 'up' : 'down'}</Badge>
+                <span className="font-medium">{row.label}</span>
+                {row.latencyMs !== null && (
+                  <span className={'tabular-nums text-xs ' + (row.latencyMs > 5000 ? 'text-warn' : 'text-ink-faint')}>
+                    {row.latencyMs} ms
+                  </span>
+                )}
+                {row.useAsFallback && <span className="badge">fallback</span>}
+                <span className="text-xs text-ink-muted basis-full sm:basis-auto sm:flex-1">{row.message}</span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
+
+      <Alert tone="info">
+        A provider ticked as <strong>fallback</strong> is used when the one you chose keeps refusing — rate limited,
+        overloaded, or unreachable. The chosen provider is always tried first and retried before anything else is
+        touched, so a fallback only ever rescues a run that would have been lost. Nothing is used as a fallback unless
+        you tick it, so a free key running out cannot quietly start billing a paid one.
+      </Alert>
 
       <Alert tone="info">
         API keys are encrypted before they are stored and are never shown in full again. If you change{' '}

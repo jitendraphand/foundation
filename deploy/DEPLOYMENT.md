@@ -321,6 +321,34 @@ Models are per-region on all of these. A model enabled in one region is not
 enabled in the next, and that is by far the commonest cause of a credential
 that saves cleanly and then fails on the first real call.
 
+### Free endpoints, and surviving them
+
+The free tiers — OpenRouter's `:free` models, NVIDIA's build tier, Hugging
+Face's shared router — are genuinely useful for a school with no budget and
+genuinely unreliable. They rate-limit under load, return 503 while a model
+loads, and sometimes just drop the connection. None of that means the
+credential is wrong, but a single attempt reports it as though it were.
+
+**Retries are automatic.** A call that fails with 429, 503, a timeout or a
+dropped connection is retried up to three times with exponential backoff and
+jitter — the jitter matters, because batches failing together would otherwise
+retry in lockstep and rate-limit each other again. A provider that says how
+long to wait is believed, up to a minute. Configuration errors are *not*
+retried: a wrong key or a bad model id fails immediately, because waiting
+cannot fix either and telling you now is more useful.
+
+**Fallbacks are opt-in.** Tick *Fallback* on any credential and it will be used
+when the chosen provider has exhausted its retries. The provider you chose is
+always tried first, so a fallback only ever rescues a run that would have been
+lost — and nothing is used unless ticked, so a free key running out cannot
+quietly start billing a paid account. The run says which batches fell back and
+to what.
+
+**Check all now** sends one tiny request to every active provider and reports
+up/down with latency. That is the quick way to tell a broken key from a busy
+service, without spending a generation run to find out. Anything answering
+slower than a few seconds will struggle with a long run.
+
 ### When the provider is unavailable
 
 **Admin → Set test → Import from a file instead.**

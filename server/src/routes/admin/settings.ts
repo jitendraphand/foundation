@@ -319,6 +319,8 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
         baseUrl: z.string().url().optional(),
         defaultModel: z.string().max(200).optional(),
         isActive: z.boolean().optional(),
+        /** Offer this credential when the chosen one will not answer. */
+        useAsFallback: z.boolean().optional(),
 
         region: z.string().trim().max(40).optional(),
         awsAuthMode: z.enum(['apiKey', 'sigv4']).optional(),
@@ -356,6 +358,11 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
         ...(body.baseUrl !== undefined ? { baseUrl: body.baseUrl } : {}),
         ...(body.defaultModel !== undefined ? { defaultModel: body.defaultModel } : {}),
         ...(body.isActive !== undefined ? { isActive: body.isActive } : {}),
+        // Merged rather than replaced: meta also carries the region, project
+        // and auth mode, and overwriting it would break the credential.
+        ...(body.useAsFallback !== undefined
+          ? { meta: { ...((existing.meta ?? {}) as object), useAsFallback: body.useAsFallback } }
+          : {}),
         ...(body.apiKey
           ? {
               encryptedKey: encryptSecret(bedrock?.secret ?? body.apiKey),
@@ -407,6 +414,59 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
     }
 
     return pingProvider({ ...call, model });
+  });
+
+  /**
+   * Tests every credential at once and reports how each one is doing.
+   *
+   * The free tiers are the reason this exists. They are usable but erratic,
+   * and "is it me or is it them" is otherwise unanswerable without spending a
+   * generation run to find out. Latency is worth showing too: a provider that
+   * answers in eight seconds will not get through a fifty-question run.
+   */
+  app.post('/api/admin/credentials/health', async (request) => {
+    const credentials = await prisma.apiCredential.findMany({
+      where: { isActive: true },
+      orderBy: { createdAt: 'asc' },
+    });
+
+    // In parallel: this is a diagnostic an admin is watching, and running six
+    // providers in sequence at eight seconds each is a minute of waiting.
+    const results = await Promise.all(
+      credentials.map(async (credential) => {
+        const model = credential.defaultModel || PROVIDERS[credential.provider]?.suggestedModels[0];
+        const base = {
+          id: credential.id,
+          label: credential.label,
+          provider: credential.provider,
+          model: model ?? null,
+          useAsFallback: ((credential.meta ?? {}) as { useAsFallback?: boolean }).useAsFallback === true,
+        };
+
+        if (!model) return { ...base, ok: false, latencyMs: null, message: 'No default model set, so there is nothing to test.' };
+
+        const started = Date.now();
+        try {
+          const call = await callParamsFor(credential);
+          const res = await pingProvider({ ...call, model });
+          return { ...base, ok: res.ok, latencyMs: Date.now() - started, message: res.message };
+        } catch (err) {
+          return {
+            ...base,
+            ok: false,
+            latencyMs: Date.now() - started,
+            message: err instanceof Error ? err.message : 'The check failed.',
+          };
+        }
+      }),
+    );
+
+    await audit(request.user!.sub, 'credential.health', {
+      ip: request.ip,
+      detail: { checked: results.length, healthy: results.filter((r) => r.ok).length },
+    });
+
+    return { results, checkedAt: new Date().toISOString() };
   });
 
   // --- Prompt templates ----------------------------------------------------
