@@ -125,7 +125,7 @@ else
 fi
 
 # --- 6. Build and start -----------------------------------------------------
-info "Building images - the first build takes 5-10 minutes on 2 OCPUs"
+info "Building images - the first build takes 5-10 minutes on 2 cores"
 docker compose build
 
 info "Starting the stack"

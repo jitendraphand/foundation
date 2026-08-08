@@ -4,8 +4,10 @@ An online examination system for schools. Students sign up, sit timed tests, and
 see their results and progress; administrators generate questions with an LLM,
 review them, publish tests, and analyse where each student is falling behind.
 
-Built to run on a single **Oracle Cloud Ampere A1 (2 OCPU / 12 GB, Ubuntu 24.04
-ARM)** instance with `docker compose up -d`.
+Runs on a single Linux machine with `docker compose up -d`. Nothing in it is
+tied to a particular cloud or instance type — it needs Docker, a public IP if
+students are off-site, and ports 80 and 443. It is developed on arm64 and
+x86-64 alike.
 
 **→ [Deployment guide](deploy/DEPLOYMENT.md)** — start here.
 
@@ -113,12 +115,56 @@ Caddy (auto HTTPS)
 
 | Layer | Choice | Why |
 |---|---|---|
-| Runtime | Node 22 LTS + TypeScript | Native arm64, no emulation on Ampere |
+| Runtime | Node 22 LTS + TypeScript | Native arm64 and x86-64 images, no emulation either way |
 | API | Fastify + Zod | Schema-first validation on every route |
 | Database | PostgreSQL 16 | JSONB for content, real constraints, `pg_dump` backups |
 | ORM | Prisma | Versioned, reversible migrations |
 | Frontend | React + Vite + Tailwind | Minimal light UI; component model suits future simulations |
 | Proxy | Caddy | Automatic Let's Encrypt certificates, zero config |
+
+### What runs where
+
+```
+  browser ──HTTPS──▶ Caddy :443        one container, terminates TLS
+                       ├── /api/*  ──▶ api    Node 22 / Fastify  :4000
+                       ├── /uploads ─▶ api    (images, cached diagrams)
+                       └── /*      ──▶ web    nginx serving the built SPA :80
+                                        │
+                                        └──▶ db  PostgreSQL 16  :5432
+                                             volumes: db_data, uploads, backups
+```
+
+Four containers, one host, one network. Only Caddy publishes ports; the API and
+database are reachable only from inside the compose network, so neither is
+exposed even if the host firewall is misconfigured.
+
+Requests a student generates while sitting a paper: one heartbeat every 20
+seconds, one autosave per answer change, and one page load at the start. The
+expensive moment is not the exam — it is everyone starting within the same
+minute, when each attempt is created and its whole paper is assembled and sent.
+
+### Sizing
+
+| Concurrent students | vCPU | RAM | Disk | Notes |
+|---|---|---|---|---|
+| Up to 50 | 2 | 4 GB | 40 GB | Comfortable. A trial or one class at a time. |
+| Up to 200 | 4 | 8 GB | 60 GB | The recommended shape for a whole school sitting together. |
+| Beyond 200 | 8 | 16 GB | 100 GB+ | Also the point to move PostgreSQL to its own host. |
+
+Two hundred students sitting a paper is roughly 20 requests a second sustained
+— heartbeats plus autosaves — which Fastify handles without difficulty. The
+constraint is the start-of-exam spike and the database connection pool, not
+steady-state traffic. `DB_POOL_SIZE` defaults to 20 for that reason; Prisma's
+own default is `cpus * 2 + 1`, which is five on a 2-core box and queues a whole
+class behind it.
+
+Disk is dominated by uploaded images and backups rather than rows: a question
+bank of several thousand is tens of megabytes, one backup archive is a few.
+
+**These are engineering estimates from the architecture, not measured
+benchmarks.** They are the right starting point, and a load test against your
+own paper sizes is the only way to turn them into numbers worth trusting. Do
+one before the first real exam.
 
 ---
 

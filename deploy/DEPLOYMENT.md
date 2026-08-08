@@ -1,15 +1,23 @@
 # Deployment guide
 
-Target: **Oracle Cloud Ampere A1 (VM.Standard.A1.Flex), 2 OCPU / 12 GB RAM, Ubuntu 24.04 Minimal ARM (aarch64)**.
+Any Linux machine with Docker, a public IP, and ports 80 and 443 open. Nothing
+below is specific to a cloud or an instance type — the examples happen to use
+Oracle Cloud's free tier because it is free, but AWS Lightsail, Hetzner, DigitalOcean
+or a machine in the school office all work identically.
 
-Everything runs in Docker. Once the instance exists, deployment is three commands.
+**Size it for the class.** 2 vCPU / 4 GB is fine up to about fifty students at
+once; 4 vCPU / 8 GB is the recommendation for a whole school sitting together
+(see [Sizing](../README.md#sizing)). Both arm64 and x86-64 are supported
+natively.
+
+Everything runs in Docker. Once the machine exists, deployment is three commands.
 
 ---
 
 ## Overview
 
 ```
-                 GitHub Pages                     Oracle Cloud A1 instance
+                 GitHub Pages                        your Linux host
         ┌──────────────────────────┐      ┌──────────────────────────────────────┐
         │  yourname.github.io/     │      │  Caddy  :443  (auto HTTPS)           │
         │  foundation              │      │    ├── /api/*   → api    (Node 22)   │
@@ -93,27 +101,42 @@ can be carried over with **Admin → Backups → Generate backup** and then
 
 ---
 
-## 1. Create the instance
+## 1. Create the machine
 
-In the Oracle Cloud console: **Compute → Instances → Create instance**.
+Whatever your provider, you need:
 
-| Setting | Value |
+| Requirement | Value |
 |---|---|
-| Image | Canonical Ubuntu 24.04 **Minimal aarch64** |
-| Shape | `VM.Standard.A1.Flex` — 2 OCPU, 12 GB RAM |
-| Boot volume | 50 GB or more (the default 46.6 GB works; more is better for backups) |
-| VNIC | **Assign a public IPv4 address** — this is essential |
-| SSH keys | Upload your public key, or let Oracle generate one and download it |
+| OS | Ubuntu 24.04 (or any distribution Docker runs on) |
+| Size | 2 vCPU / 4 GB minimum; **4 vCPU / 8 GB for 200 concurrent students** |
+| Disk | 40 GB or more — backups and uploaded images live here |
+| Network | **A public IPv4 address**, if students are off-site |
+| Access | Your SSH public key |
 
-Note the **public IP address** when the instance finishes provisioning.
+Note the **public IP address** once it is running.
+
+<details>
+<summary>Example: Oracle Cloud free tier</summary>
+
+**Compute → Instances → Create instance**, then Canonical Ubuntu 24.04 Minimal
+aarch64 on a `VM.Standard.A1.Flex` shape with 2 OCPU / 12 GB, a 50 GB boot
+volume, and **Assign a public IPv4 address** ticked. The A1 shape is free
+indefinitely, which is why it is the worked example — nothing else here depends
+on it.
+</details>
 
 ---
 
-## 2. Open the ports in Oracle Cloud
+## 2. Open ports 80 and 443
 
-This is the step people miss. Oracle blocks inbound traffic at **two** layers,
-and both must be opened. This is the cloud-side layer; `bootstrap.sh` handles
-the host-side one for you.
+This is the step people miss. Most clouds firewall inbound traffic at the
+provider level **as well as** on the host, and both must be opened.
+`bootstrap.sh` handles the host side; the provider side is yours.
+
+Open **TCP 80** and **TCP 443** from `0.0.0.0/0`.
+
+<details>
+<summary>Example: Oracle Cloud security lists</summary>
 
 1. **Networking → Virtual Cloud Networks →** your VCN
 2. **Security Lists →** `Default Security List for <vcn>`
@@ -129,6 +152,11 @@ the host-side one for you.
 
 If your instance uses a **Network Security Group** instead of a security list,
 add the same two rules there.
+</details>
+
+On AWS this is a security group, on GCP a VPC firewall rule, on Hetzner and
+DigitalOcean a cloud firewall. On a machine in the school office it is whatever
+the office router does with port forwarding.
 
 ---
 
@@ -156,7 +184,7 @@ Log out and back in, then run it again — or continue immediately with:
 exec sg docker -- ./deploy/bootstrap.sh
 ```
 
-The first build takes **5–10 minutes** on 2 OCPUs. Subsequent builds are cached
+The first build takes **5–10 minutes** on 2 cores. Subsequent builds are cached
 and take under a minute.
 
 When it finishes it prints your URL and admin credentials.
@@ -171,6 +199,69 @@ still being issued.
 
 Sign in with `admin` / `foundation_123`, then **change that password
 immediately** from the footer link.
+
+---
+
+## 3a. Running something else on the same machine
+
+A second project on the same host — n8n is the usual one — collides with
+Foundation in exactly one place: **ports 80 and 443**. Only one process can
+hold them, and Foundation's Caddy already does. Everything else about sharing a
+host is fine.
+
+So do not give the other app its own ports. Make Caddy the single front door
+for both.
+
+**Hostnames are free.** sslip.io resolves *any* hostname containing an IP back
+to that IP, including subdomains — so if Foundation is at
+`132-145-10-20.sslip.io`, then `n8n.132-145-10-20.sslip.io` resolves to the
+same machine with nothing to configure. Caddy issues a separate certificate for
+each automatically.
+
+**1.** Put the other app on the same Docker network and give it no host ports:
+
+```yaml
+# n8n's own docker-compose.yml
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n
+    restart: unless-stopped
+    # No "ports:" - Caddy reaches it over the shared network.
+    environment:
+      N8N_HOST: n8n.132-145-10-20.sslip.io
+      N8N_PROTOCOL: https
+      WEBHOOK_URL: https://n8n.132-145-10-20.sslip.io/
+    networks: [foundation_default]
+
+networks:
+  foundation_default:
+    external: true
+```
+
+> The network is named after the directory Foundation was cloned into, so
+> `foundation_default` assumes `~/foundation`. Check with
+> `docker network ls | grep default` if you cloned it somewhere else.
+
+**2.** Add a site block to Foundation's `Caddyfile`:
+
+```caddy
+n8n.{$PUBLIC_HOST} {
+	reverse_proxy n8n:5678
+}
+```
+
+`{$PUBLIC_HOST}` is already your Foundation hostname, so this reads
+`n8n.132-145-10-20.sslip.io` with nothing new to set.
+
+**3.** `docker compose up -d` in each directory.
+
+The existing `:80` catch-all redirect does not interfere: Caddy matches an
+explicit hostname block before a catch-all, so requests to the n8n hostname
+reach n8n and everything else still lands on Foundation.
+
+**Watch the memory.** n8n running workflows alongside a school sitting an exam
+is two real workloads on one box. On a 4 GB machine that is tight; if you are
+sizing for 200 concurrent students, size for both.
 
 ---
 
