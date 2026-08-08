@@ -1,5 +1,6 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import type { Prisma } from '@prisma/client';
 import { prisma } from '../../db.js';
 import { audit, requirePermission } from '../../middleware/auth.js';
 
@@ -30,6 +31,19 @@ const testFields = z.object({
   windowEndMinute: z.number().int().min(0).max(1439).optional().nullable(),
   windowDays: z.array(z.number().int().min(0).max(6)).max(7).default([]),
   autoSubmitOnClose: z.boolean().default(false),
+
+  /**
+   * Optional proctoring. Stored in meta rather than as columns because it is
+   * three settings on a minority of tests, and meta is exactly the escape
+   * hatch that keeps a change like this off the migration path.
+   */
+  proctoring: z
+    .object({
+      enabled: z.boolean().default(false),
+      allowance: z.number().int().min(1).max(20).default(3),
+      requireFullscreen: z.boolean().default(true),
+    })
+    .optional(),
 });
 
 /** A window is only meaningful with both ends set, and they must differ. */
@@ -189,10 +203,13 @@ export default async function adminTestRoutes(app: FastifyInstance) {
       }
     }
 
+    const { proctoring, ...fields } = body;
+
     const test = await prisma.test.update({
       where: { id },
       data: {
-        ...body,
+        ...fields,
+        ...(proctoring ? { meta: { ...((existing.meta ?? {}) as object), proctoring } as unknown as Prisma.InputJsonValue } : {}),
         ...(body.startsAt !== undefined ? { startsAt: body.startsAt ? new Date(body.startsAt) : null } : {}),
         ...(body.endsAt !== undefined ? { endsAt: body.endsAt ? new Date(body.endsAt) : null } : {}),
       },

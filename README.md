@@ -54,6 +54,13 @@ ARM)** instance with `docker compose up -d`.
   its builder.
 - **Tests** — choose the final questions, set marks, negative marking, duration,
   shuffling, and audience; publish when ready.
+- **Proctoring (optional, per test)** — records when a student leaves the paper:
+  another tab, another app, or leaving fullscreen. Warns, then submits
+  automatically once the allowance is spent, and keeps the list for the
+  invigilator. It cannot see a second device, a phone or notes on the desk, so
+  it is a deterrent and a record rather than a substitute for supervision — the
+  banner tells the student it is on, because a watch nobody knows about is a
+  trap rather than a deterrent.
 - **Release results** — one action per test reveals every student's score at
   once, so nobody learns the answers from a classmate who sat it earlier.
   Reversible. Practice tests are exempt and always show results immediately.

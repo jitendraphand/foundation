@@ -349,6 +349,34 @@ up/down with latency. That is the quick way to tell a broken key from a busy
 service, without spending a generation run to find out. Anything answering
 slower than a few seconds will struggle with a long run.
 
+### Proctoring
+
+Tick **Proctored exam** when creating or editing a test. Set how many
+departures are allowed (three by default) and whether leaving fullscreen counts
+alongside hiding the page.
+
+**What it sees:** the tab losing focus, the page being hidden behind another
+window, the app being switched away from on a phone, and fullscreen being left.
+Each is recorded on the attempt with a timestamp. Past the allowance the paper
+is submitted automatically.
+
+**What it cannot see:** a second device, a phone under the desk, a person in
+the room, notes on paper, or a screenshot. It cannot prevent any of those.
+
+That distinction matters more than the feature: a school that believes this
+prevents cheating will supervise less, which makes things worse rather than
+better. Treat it as a deterrent against casual tab-switching and as a record to
+look at afterwards, not as a lock.
+
+The count is kept by the server, not the page, so editing the page in a
+browser's developer tools cannot raise the allowance. The student is told the
+paper is proctored before they start — a watch nobody knows about deters
+nobody.
+
+Deliberately not attempted: blocking copy, paste, right-click or screenshots.
+All are trivial to work around, all break legitimate use — zooming a diagram,
+or a screen reader — and all imply a security that is not there.
+
 ### Step-up tests
 
 **Admin → Settings → LLM providers → Step-up tests.**

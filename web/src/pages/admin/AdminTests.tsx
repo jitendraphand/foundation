@@ -223,6 +223,9 @@ function CreateTestModal({ onClose, onCreated }: { onClose: () => void; onCreate
     maxAttempts: 1,
     shuffleQuestions: true,
     shuffleOptions: true,
+    proctored: false,
+    proctorAllowance: 3,
+    proctorFullscreen: true,
     showAnswersAfter: true,
     targetGrades: '',
     targetDivisions: '',
@@ -263,6 +266,11 @@ function CreateTestModal({ onClose, onCreated }: { onClose: () => void; onCreate
         maxAttempts: form.maxAttempts,
         shuffleQuestions: form.shuffleQuestions,
         shuffleOptions: form.shuffleOptions,
+        proctoring: {
+          enabled: form.proctored,
+          allowance: form.proctorAllowance,
+          requireFullscreen: form.proctorFullscreen,
+        },
         showAnswersAfter: form.showAnswersAfter,
         targetGrades: form.targetGrades.split(',').map((s) => s.trim()).filter(Boolean),
         targetDivisions: form.targetDivisions.split(',').map((s) => s.trim()).filter(Boolean),
@@ -344,6 +352,50 @@ function CreateTestModal({ onClose, onCreated }: { onClose: () => void; onCreate
               <span className="text-ink-muted">{label}</span>
             </label>
           ))}
+        </div>
+
+        <div className="pt-3 border-t border-line space-y-2">
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              className="accent-series-1"
+              checked={form.proctored}
+              onChange={(e) => setForm((f) => ({ ...f, proctored: e.target.checked }))}
+            />
+            <span>Proctored exam</span>
+          </label>
+
+          {form.proctored && (
+            <div className="pl-6 space-y-2">
+              <p className="text-xs text-ink-muted">
+                Records when a student leaves the paper — another tab, another app, or leaving fullscreen — and
+                submits automatically once the allowance is used up. It cannot see a second device, a phone, or
+                notes on the desk, so it is a deterrent and a record, not a substitute for invigilation.
+              </p>
+              <div className="flex flex-wrap items-center gap-4">
+                <label className="flex items-center gap-2 text-sm">
+                  <span className="text-ink-muted">Allowed departures</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={20}
+                    className="input w-20"
+                    value={form.proctorAllowance}
+                    onChange={(e) => setForm((f) => ({ ...f, proctorAllowance: Number(e.target.value) || 1 }))}
+                  />
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    className="accent-series-1"
+                    checked={form.proctorFullscreen}
+                    onChange={(e) => setForm((f) => ({ ...f, proctorFullscreen: e.target.checked }))}
+                  />
+                  <span className="text-ink-muted">Leaving fullscreen counts too</span>
+                </label>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="flex justify-end gap-2">

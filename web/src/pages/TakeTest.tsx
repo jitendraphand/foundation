@@ -7,7 +7,12 @@ import type { AnswerResponse, PaperQuestion } from '../lib/types';
 
 interface Paper {
   attempt: { id: string; startedAt: string; expiresAt: string; remainingMs: number; attemptNumber: number };
-  test: { id: string; title: string; subject: string; kind: string; durationMinutes: number; negativeMarks: number; totalMarks: number };
+  test: {
+    id: string; title: string; subject: string; kind: string; durationMinutes: number;
+    negativeMarks: number; totalMarks: number;
+    proctoring?: { enabled: boolean; allowance: number; requireFullscreen: boolean };
+  };
+  proctorCount?: number;
   questions: PaperQuestion[];
 }
 
@@ -23,6 +28,7 @@ export default function TakeTest() {
   const [answers, setAnswers] = useState<Record<string, AnswerResponse>>({});
   const [flags, setFlags] = useState<Record<string, boolean>>({});
   const [remainingMs, setRemainingMs] = useState(0);
+  const [proctorNotice, setProctorNotice] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<SaveState>('idle');
   const [confirmSubmit, setConfirmSubmit] = useState(false);
   const [paneOpen, setPaneOpen] = useState(false);
@@ -102,6 +108,8 @@ export default function TakeTest() {
   }, [paper, attemptId, navigate]);
 
   // Auto-submit the moment the local clock hits zero; the server agrees.
+  useProctoring(paper, attemptId, submitting, (message) => setProctorNotice(message), () => void submit(true));
+
   useEffect(() => {
     if (paper && remainingMs <= 0 && !submitting) void submit(true);
   }, [remainingMs, paper, submit, submitting]);
@@ -191,9 +199,39 @@ export default function TakeTest() {
 
   const question = paper.questions[index];
   const lowTime = remainingMs < 60_000;
+  const proctored = paper.test.proctoring?.enabled === true;
 
   return (
     <div className="min-h-full flex flex-col bg-surface">
+      {/*
+        Announced rather than silent. A student who does not know the paper is
+        watched cannot choose to stay on it, which makes the whole thing a trap
+        rather than a deterrent.
+      */}
+      {proctored && (
+        <div className="bg-warn/10 border-b border-warn/30 px-4 py-2 text-center">
+          <p className="text-xs text-ink">
+            <strong>This is a proctored exam.</strong>{' '}
+            Leaving this page — another tab, another app, or leaving fullscreen — is recorded. After{' '}
+            {paper.test.proctoring?.allowance} times your paper is submitted automatically.
+            {paper.test.proctoring?.requireFullscreen && !document.fullscreenElement && (
+              <button
+                type="button"
+                className="ml-2 underline font-medium"
+                onClick={() => void document.documentElement.requestFullscreen().catch(() => undefined)}
+              >
+                Enter fullscreen
+              </button>
+            )}
+          </p>
+        </div>
+      )}
+
+      {proctorNotice && (
+        <div className="px-4 pt-3">
+          <Alert tone="error" onDismiss={() => setProctorNotice(null)}>{proctorNotice}</Alert>
+        </div>
+      )}
       <header className="sticky top-0 z-30 bg-surface/95 backdrop-blur border-b border-line">
         <div className="mx-auto max-w-5xl px-4 h-14 flex items-center justify-between gap-4">
           <div className="min-w-0">
@@ -452,4 +490,88 @@ function AnswerInput({
     default:
       return <p className="text-sm text-bad">This question type cannot be displayed.</p>;
   }
+}
+
+/**
+ * Proctoring, as far as a browser can honestly manage it.
+ *
+ * Watches for the paper being left: another tab or window taking focus, the
+ * page being hidden (which is also what switching apps looks like on a phone),
+ * and fullscreen being exited. Each is reported to the server, which counts
+ * them and decides when the allowance is spent - the page does not get to
+ * decide that, because a page can be edited.
+ *
+ * Deliberately not attempted: blocking copy, paste, right-click or
+ * screenshots. They are trivial to work around, they break legitimate use -
+ * a student zooming a diagram, or using a screen reader - and they create an
+ * impression of security that is not there.
+ */
+function useProctoring(
+  paper: Paper | null,
+  attemptId: string | undefined,
+  submitting: boolean,
+  onNotice: (message: string) => void,
+  onAutoSubmit: () => void,
+) {
+  const settings = paper?.test.proctoring;
+  const enabled = !!settings?.enabled && !submitting;
+  const leftAt = useRef<number | null>(null);
+  // Guards against the same departure being counted twice: hiding a tab fires
+  // both blur and visibilitychange in most browsers.
+  const reporting = useRef(false);
+
+  useEffect(() => {
+    if (!enabled || !attemptId) return;
+
+    const report = async (kind: 'blur' | 'hidden' | 'fullscreen_exit') => {
+      if (reporting.current) return;
+      reporting.current = true;
+      const awayMs = leftAt.current ? Date.now() - leftAt.current : undefined;
+      leftAt.current = null;
+
+      try {
+        const res = await api.post<{ submitted: boolean; message?: string }>(
+          `/api/student/attempts/${attemptId}/proctor`,
+          { kind, awayMs },
+        );
+        if (res.message) onNotice(res.message);
+        if (res.submitted) onAutoSubmit();
+      } catch {
+        // A dropped report must never interrupt the exam. The server counts
+        // what reaches it; losing one to a flaky connection favours the
+        // student, which is the right way round to be wrong.
+      } finally {
+        // Long enough that one departure is one event, short enough that a
+        // second genuine switch still counts.
+        setTimeout(() => { reporting.current = false; }, 1500);
+      }
+    };
+
+    const onHidden = () => {
+      if (document.visibilityState === 'hidden') {
+        leftAt.current = Date.now();
+      } else {
+        void report('hidden');
+      }
+    };
+    const onBlur = () => { leftAt.current = Date.now(); };
+    const onFocus = () => { if (leftAt.current) void report('blur'); };
+    const onFullscreen = () => {
+      if (settings?.requireFullscreen && !document.fullscreenElement) void report('fullscreen_exit');
+    };
+
+    document.addEventListener('visibilitychange', onHidden);
+    window.addEventListener('blur', onBlur);
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('fullscreenchange', onFullscreen);
+
+    return () => {
+      document.removeEventListener('visibilitychange', onHidden);
+      window.removeEventListener('blur', onBlur);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('fullscreenchange', onFullscreen);
+    };
+  }, [enabled, attemptId, settings?.requireFullscreen, onNotice, onAutoSubmit]);
+
+  return enabled;
 }

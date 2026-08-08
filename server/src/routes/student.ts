@@ -5,6 +5,7 @@ import { prisma } from '../db.js';
 import { authenticate, requireActivitiesComplete, requireFreshPassword } from '../middleware/auth.js';
 import { finalizeAttempt, buildLayout, publicQuestion, remainingMs, resultsAreVisible, sweepExpiredAttempts } from '../services/attempt.js';
 import { generateStepUp } from '../llm/step-up.js';
+import { proctoringFor, proctorStateOf, recordProctorEvent } from '../services/proctoring.js';
 import { LlmError } from '../llm/providers.js';
 import { findWeakAreas, type Breakdown } from '../lib/analytics.js';
 import { evaluateAvailability } from '../lib/availability.js';
@@ -447,7 +448,11 @@ export default async function studentRoutes(app: FastifyInstance) {
         durationMinutes: attempt.test.durationMinutes,
         negativeMarks: attempt.test.negativeMarks,
         totalMarks: attempt.maxScore,
+        // The paper says whether it is proctored; the client cannot opt out,
+        // because the server counts the events either way.
+        proctoring: proctoringFor(attempt.test),
       },
+      proctorCount: proctorStateOf(attempt).count,
       questions,
     };
   });
@@ -548,6 +553,52 @@ export default async function studentRoutes(app: FastifyInstance) {
     return {
       submitted: attempt.status !== 'IN_PROGRESS',
       remainingMs: Math.max(0, attempt.expiresAt.getTime() - Date.now()),
+    };
+  });
+
+  /**
+   * The student left the paper: another tab, another app, or out of
+   * fullscreen. Reported by the page, counted by the server.
+   */
+  app.post('/api/student/attempts/:id/proctor', { config: EXAM_LIMIT }, async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const body = z
+      .object({
+        kind: z.enum(['blur', 'hidden', 'fullscreen_exit', 'reload']),
+        awayMs: z.number().int().min(0).max(24 * 3600_000).optional(),
+      })
+      .parse(request.body);
+
+    const attempt = await prisma.attempt.findFirst({
+      where: { id, userId: request.user!.sub },
+      select: { id: true, status: true, test: { select: { meta: true } } },
+    });
+    if (!attempt) return reply.code(404).send({ error: 'Attempt not found.' });
+    if (attempt.status !== 'IN_PROGRESS') return { submitted: true, count: 0, remaining: 0 };
+
+    const settings = proctoringFor(attempt.test);
+    if (!settings.enabled) return { ignored: true, count: 0, remaining: 0 };
+
+    const result = await recordProctorEvent(attempt.id, body.kind, body.awayMs, settings);
+
+    if (result.shouldSubmit) {
+      await finalizeAttempt(attempt.id, true);
+      return {
+        submitted: true,
+        count: result.count,
+        remaining: 0,
+        message: `You left the exam ${result.count} times. The paper has been submitted automatically.`,
+      };
+    }
+
+    return {
+      submitted: false,
+      count: result.count,
+      remaining: result.remaining,
+      message:
+        result.remaining === 0
+          ? 'Leaving the exam again will submit your paper automatically.'
+          : `Please stay on this page. ${result.remaining} more and your paper will be submitted automatically.`,
     };
   });
 
