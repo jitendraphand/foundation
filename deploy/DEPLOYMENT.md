@@ -349,6 +349,32 @@ up/down with latency. That is the quick way to tell a broken key from a busy
 service, without spending a generation run to find out. Anything answering
 slower than a few seconds will struggle with a long run.
 
+### Video activities: what "time spent" actually means
+
+Set **minimum seconds** on an activity and a student cannot mark it done until
+they have spent that long on the page. Two things about that are worth being
+precise on, because the obvious reading is wrong:
+
+- **The time is wall-clock time on the activity page, not video playback.** An
+  embedded YouTube or Vimeo player does not report how much was watched to the
+  page around it, so the system genuinely cannot know. Time is credited by a
+  heartbeat, capped at two minutes per beat so a tab left open overnight does
+  not count as engagement.
+- **The video must be started.** Opening it is required before an activity with
+  a video link can be completed — without that, the time requirement could be
+  satisfied by leaving the tab open and doing something else.
+
+So: set minimum seconds to roughly the video's length and this is a reasonable
+proxy. It confirms the student opened the video and stayed on the page. It does
+not confirm they watched, and nothing browser-based can.
+
+**Only YouTube and Vimeo embed.** Both are recognised and framed inside the
+page using their own privacy-preserving player domains. Every other link,
+Instagram included, is treated as external and opens in a new tab — Instagram
+in particular serves 403 to anything that is not a browser and gates embedding
+behind its own flow, so it is materially more work than adding a URL pattern
+and has not been attempted.
+
 ### Proctoring
 
 Tick **Proctored exam** when creating or editing a test. Set how many

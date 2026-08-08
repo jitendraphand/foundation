@@ -52,7 +52,7 @@ export default async function activityRoutes(app: FastifyInstance) {
       orderBy: [{ createdAt: 'desc' }],
       select: {
         id: true, publicId: true, title: true, description: true, kind: true,
-        isMandatory: true, minSeconds: true, content: true, videoProvider: true,
+        isMandatory: true, minSeconds: true, content: true, videoProvider: true, videoUrl: true,
         completions: { where: { userId }, select: { completedAt: true, secondsSpent: true, cardsSeen: true } },
       },
     });
@@ -189,6 +189,9 @@ export default async function activityRoutes(app: FastifyInstance) {
         secondsRemaining: left,
       });
     }
+    if (activity.videoUrl && !progress.videoOpened) {
+      return reply.code(409).send({ error: 'Please start the video before marking this as done.' });
+    }
 
     const done = await prisma.activityCompletion.update({
       where: { id: progress.id },
@@ -208,10 +211,28 @@ export default async function activityRoutes(app: FastifyInstance) {
   });
 }
 
+/**
+ * Whether the student has genuinely been through this.
+ *
+ * Three conditions, and the third was missing. Time is wall-clock time on the
+ * page - the system cannot see how much of a video was played, because a
+ * YouTube iframe does not report that to the page embedding it - so without
+ * requiring the video to have been opened at all, a video activity could be
+ * satisfied by leaving the tab open and doing something else. It was being
+ * recorded and then ignored.
+ *
+ * The honest limit remains: this knows the video was opened and that the
+ * student stayed on the page for the required time. It does not know they
+ * watched. Setting minSeconds to roughly the video's length is what makes the
+ * time requirement mean anything.
+ */
 function canComplete(
-  activity: { minSeconds: number; content: unknown },
-  progress: { secondsSpent: number; cardsSeen: number },
+  activity: { minSeconds: number; content: unknown; videoUrl?: string | null },
+  progress: { secondsSpent: number; cardsSeen: number; videoOpened?: boolean },
 ): boolean {
   const total = cardCount(activity as never);
-  return progress.cardsSeen >= total && progress.secondsSpent >= activity.minSeconds;
+  if (progress.cardsSeen < total) return false;
+  if (progress.secondsSpent < activity.minSeconds) return false;
+  if (activity.videoUrl && !progress.videoOpened) return false;
+  return true;
 }

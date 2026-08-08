@@ -76,7 +76,8 @@ ARM)** instance with `docker compose up -d`.
   of a class and require it before anything else. Cards use the same content
   blocks as questions, so they can carry maths, diagrams, charts, tables and
   uploaded pictures, and each card takes one of seven colours. YouTube and
-  Vimeo play inside the page; any other link opens in a new tab. A per-activity
+  Vimeo play inside the page; any other link — Instagram included — opens in a
+  new tab rather than embedding. A per-activity
   roster shows who has done it, who is part way through and who has not
   started, with a one-click "make them do it again".
 - **Analytics** — score distribution, trend over time, per-class and per-subject
