@@ -376,7 +376,7 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
     throw new LlmError('That API credential no longer exists or has been disabled.');
   }
 
-  const call = callParamsFor(credential);
+  const call = await callParamsFor(credential);
   const providerDef = PROVIDERS[credential.provider] ?? PROVIDERS.custom;
 
   let systemPrompt = opts.systemPrompt?.trim() || DEFAULT_SYSTEM_PROMPT;

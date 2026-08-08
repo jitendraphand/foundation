@@ -137,20 +137,45 @@ interface Credential {
   defaultModel: string | null;
   isActive: boolean;
   createdAt: string;
-  /** Bedrock only: region and auth mode. Never holds anything secret. */
-  meta?: { region?: string; authMode?: 'apiKey' | 'sigv4' } | null;
+  /**
+   * Whatever the provider needed beyond a key - region, auth mode, project,
+   * API version. Never holds anything secret.
+   */
+  meta?: {
+    region?: string;
+    authMode?: 'apiKey' | 'sigv4';
+    projectId?: string;
+    apiVersion?: string;
+  } | null;
 }
 
 /**
- * Bedrock is configured per region, and a model enabled in one region is not
- * enabled in the next - so the region is the thing that tells two otherwise
- * identical credentials apart, and it belongs on the row.
+ * The cloud providers are configured per region or per resource, and a model
+ * enabled in one is not enabled in another - so that detail is what tells two
+ * otherwise identical credentials apart, and it belongs on the row.
  */
 function describeProvider(credential: Credential, providers: ProviderDef[]): string {
   const name = providers.find((p) => p.id === credential.provider)?.label ?? credential.provider;
-  if (credential.provider !== 'bedrock' || !credential.meta?.region) return name;
-  const how = credential.meta.authMode === 'sigv4' ? 'IAM' : 'API key';
-  return `${name} · ${credential.meta.region} · ${how}`;
+  const meta = credential.meta;
+
+  if (credential.provider === 'bedrock' && meta?.region) {
+    return `${name} · ${meta.region} · ${meta.authMode === 'sigv4' ? 'IAM' : 'API key'}`;
+  }
+  if (credential.provider === 'vertex' && meta?.projectId) {
+    return `${name} · ${meta.projectId} · ${meta.region ?? ''}`.trim();
+  }
+  if (credential.provider === 'azure') {
+    // The resource name is the hostname, which is the identifying part.
+    const host = (() => {
+      try {
+        return new URL(credential.baseUrl).hostname.split('.')[0];
+      } catch {
+        return '';
+      }
+    })();
+    return host ? `${name} · ${host}` : name;
+  }
+  return name;
 }
 
 interface ProviderDef {
@@ -300,11 +325,19 @@ function AddCredentialModal({ providers, onClose, onAdded }: { providers: Provid
   const [awsAuthMode, setAwsAuthMode] = useState<'apiKey' | 'sigv4'>('apiKey');
   const [accessKeyId, setAccessKeyId] = useState('');
   const [sessionToken, setSessionToken] = useState('');
+  // Azure only.
+  const [resourceName, setResourceName] = useState('');
+  const [apiVersion, setApiVersion] = useState('2024-10-21');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const def = providers.find((p) => p.id === provider);
   const isBedrock = provider === 'bedrock';
+  const isAzure = provider === 'azure';
+  const isVertex = provider === 'vertex';
+  // Bedrock, Azure and Vertex all derive their endpoint from something else -
+  // a region, a resource, a project - so none of them shows a base URL box.
+  const derivesEndpoint = isBedrock || isAzure || isVertex;
 
   // What the label box was last filled in with on the admin's behalf. Changing
   // provider should move a label nobody has touched along with it - otherwise
@@ -323,6 +356,16 @@ function AddCredentialModal({ providers, onClose, onAdded }: { providers: Provid
     const next = def?.label ?? '';
     autoLabel.current = next;
     setLabel((current) => (current && current !== previous ? current : next));
+
+    // AWS and Google name their regions differently, so carrying us-east-1
+    // across to Vertex would offer a region that does not exist there.
+    setRegion((current) =>
+      provider === 'vertex'
+        ? (current && !/^[a-z]{2}-[a-z]+-\d$/.test(current) ? current : 'us-central1')
+        : provider === 'bedrock'
+          ? (current && !/^[a-z]+-[a-z]+\d$/.test(current) ? current : 'us-east-1')
+          : current,
+    );
   }, [provider, def]);
 
   const submit = async (event: React.FormEvent) => {
@@ -337,7 +380,7 @@ function AddCredentialModal({ providers, onClose, onAdded }: { providers: Provid
         // Bedrock derives its endpoint from the region, and the box is hidden.
         // Sending the stale default would override that derivation and point
         // every request at us-east-1 whatever region was chosen.
-        baseUrl: isBedrock ? undefined : baseUrl.trim() || undefined,
+        baseUrl: derivesEndpoint ? undefined : baseUrl.trim() || undefined,
         defaultModel: defaultModel.trim() || undefined,
         ...(isBedrock
           ? {
@@ -348,6 +391,8 @@ function AddCredentialModal({ providers, onClose, onAdded }: { providers: Provid
                 : {}),
             }
           : {}),
+        ...(isAzure ? { resourceName: resourceName.trim(), apiVersion: apiVersion.trim() } : {}),
+        ...(isVertex ? { region: region.trim() } : {}),
       });
       onAdded(res.warning);
     } catch (err) {
@@ -412,36 +457,89 @@ function AddCredentialModal({ providers, onClose, onAdded }: { providers: Provid
           </>
         )}
 
+        {isAzure && (
+          <>
+            <Field
+              label="Resource name or endpoint"
+              required
+              hint='The bit before .openai.azure.com, or paste the whole "Endpoint" URL from the resource overview in the portal.'
+            >
+              <input
+                className="input font-mono text-xs"
+                value={resourceName}
+                onChange={(e) => setResourceName(e.target.value)}
+                placeholder="my-school-openai"
+                required
+              />
+            </Field>
+            <Field label="API version" hint="Azure pins its API surface to a date. Leave this unless your resource is older.">
+              <input
+                className="input font-mono text-xs"
+                value={apiVersion}
+                onChange={(e) => setApiVersion(e.target.value)}
+                placeholder="2024-10-21"
+              />
+            </Field>
+          </>
+        )}
+
         <Field
-          label={isBedrock ? (awsAuthMode === 'sigv4' ? 'Secret access key' : 'Bedrock API key') : 'API key'}
+          label={
+            isBedrock ? (awsAuthMode === 'sigv4' ? 'Secret access key' : 'Bedrock API key')
+            : isAzure ? 'Azure API key'
+            : isVertex ? 'Service account JSON'
+            : 'API key'
+          }
           required
           hint={
             isBedrock
               ? awsAuthMode === 'sigv4'
                 ? 'Shown once when the access key is created. Encrypted before it is stored.'
                 : 'Copy it when you generate it in the Bedrock console — it is shown in full only that once. Encrypted before it is stored.'
-              : 'Paste the whole key. Providers show it in full only once, then display a shortened version ' +
-                'like sk-or-v1-… — that shortened form is not a key and will not work. Encrypted before it is stored.'
+              : isAzure
+                ? 'Either of the two keys on the resource, under Keys and Endpoint. Encrypted before it is stored.'
+                : isVertex
+                  ? 'Paste the whole JSON key file you downloaded from IAM & Admin → Service Accounts → Keys, ' +
+                    'braces and all. The project is read out of the file. Encrypted before it is stored.'
+                  : 'Paste the whole key. Providers show it in full only once, then display a shortened version ' +
+                    'like sk-or-v1-… — that shortened form is not a key and will not work. Encrypted before it is stored.'
           }
         >
-          <input className="input font-mono text-xs" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} required minLength={8} autoComplete="off" />
+          {/* The service-account file is far too long for a single line, and
+              an admin needs to see they pasted the whole thing. */}
+          {isVertex ? (
+            <textarea
+              className="input font-mono text-[11px] h-32"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder='{ "type": "service_account", "project_id": "...", ... }'
+              required
+              autoComplete="off"
+            />
+          ) : (
+            <input className="input font-mono text-xs" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} required minLength={8} autoComplete="off" />
+          )}
         </Field>
 
-        {isBedrock ? (
+        {isBedrock || isVertex ? (
           <Field
             label="Region"
             required
-            hint="Bedrock has a separate endpoint in every region, and models are enabled per region. Use the one where you turned the model on."
+            hint={
+              isVertex
+                ? 'Vertex is regional and models are enabled per region, e.g. us-central1 or europe-west4.'
+                : 'Bedrock has a separate endpoint in every region, and models are enabled per region. Use the one where you turned the model on.'
+            }
           >
             <input
               className="input font-mono text-xs"
               value={region}
               onChange={(e) => setRegion(e.target.value)}
-              placeholder="us-east-1"
+              placeholder={isVertex ? 'us-central1' : 'us-east-1'}
               required
             />
           </Field>
-        ) : (
+        ) : isAzure ? null : (
           <Field label="Base URL" required={provider === 'custom'}>
             <input className="input font-mono text-xs" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://openrouter.ai/api/v1" />
           </Field>

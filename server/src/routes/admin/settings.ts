@@ -1,9 +1,11 @@
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { Prisma } from '@prisma/client';
 import { prisma } from '../../db.js';
 import { audit } from '../../middleware/auth.js';
 import { encryptSecret, keyHint } from '../../lib/crypto.js';
-import { PROVIDERS, describeKeyProblem, pingProvider } from '../../llm/providers.js';
+import { PROVIDERS, describeKeyProblem, pingProvider, DEFAULT_AZURE_API_VERSION } from '../../llm/providers.js';
+import { parseServiceAccount, vertexBaseUrl } from '../../llm/google-auth.js';
 import { callParamsFor, packIamSecret } from '../../llm/credentials.js';
 import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_TEMPLATE } from '../../llm/prompts.js';
 import { COMMON_TIMEZONES, WINDOW_PRESETS, isValidTimezone, zonedNow, formatMinute } from '../../lib/availability.js';
@@ -64,6 +66,75 @@ function buildBedrockFields(body: {
   };
 }
 
+/**
+ * Azure addresses a resource by hostname; the deployment name goes in the
+ * model box, not here. Accepts either the bare resource name or the full URL,
+ * because an administrator copying from the portal will have the URL.
+ */
+function buildAzureFields(body: { resourceName?: string; baseUrl?: string; apiVersion?: string }):
+  | { baseUrl: string; meta: { apiVersion: string } }
+  | { error: string } {
+  const raw = (body.baseUrl || body.resourceName || '').trim();
+  if (!raw) {
+    return {
+      error:
+        'Azure OpenAI needs the resource name or its endpoint URL - the bit before .openai.azure.com, ' +
+        'shown as "Endpoint" on the resource overview in the portal.',
+    };
+  }
+
+  let baseUrl: string;
+  if (/^https?:\/\//i.test(raw)) {
+    try {
+      baseUrl = new URL(raw).origin;
+    } catch {
+      return { error: `"${raw}" is not a valid URL.` };
+    }
+  } else if (/^[a-z0-9][a-z0-9-]{1,62}$/i.test(raw)) {
+    baseUrl = `https://${raw.toLowerCase()}.openai.azure.com`;
+  } else {
+    return {
+      error: `"${raw}" is not a resource name or a URL. A resource name is letters, digits and hyphens, e.g. my-school-openai.`,
+    };
+  }
+
+  const apiVersion = (body.apiVersion || DEFAULT_AZURE_API_VERSION).trim();
+  if (!/^\d{4}-\d{2}-\d{2}(-preview)?$/.test(apiVersion)) {
+    return { error: `"${apiVersion}" is not an Azure API version. They look like 2024-10-21 or 2025-01-01-preview.` };
+  }
+
+  return { baseUrl, meta: { apiVersion } };
+}
+
+/**
+ * Vertex takes the whole downloaded service-account JSON as its "key". The
+ * project comes out of the file itself, so the administrator only has to
+ * choose a region.
+ */
+function buildVertexFields(body: { apiKey: string; region?: string }):
+  | { baseUrl: string; meta: { projectId: string; region: string; clientEmail: string } }
+  | { error: string } {
+  const region = (body.region || '').trim();
+  if (!region) {
+    return { error: 'Vertex AI needs a region, for example us-central1 or europe-west4. Models are enabled per region.' };
+  }
+  if (!/^[a-z]+-[a-z]+\d$/.test(region)) {
+    return { error: `"${region}" does not look like a Google Cloud region. They look like us-central1 or asia-south1.` };
+  }
+
+  let account;
+  try {
+    account = parseServiceAccount(body.apiKey);
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : 'That service-account key could not be read.' };
+  }
+
+  return {
+    baseUrl: vertexBaseUrl(account.project_id, region),
+    meta: { projectId: account.project_id, region, clientEmail: account.client_email },
+  };
+}
+
 export default async function adminSettingsRoutes(app: FastifyInstance) {
   // --- LLM API credentials -------------------------------------------------
 
@@ -97,19 +168,42 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
         awsAuthMode: z.enum(['apiKey', 'sigv4']).optional(),
         accessKeyId: z.string().trim().max(128).optional(),
         sessionToken: z.string().trim().max(4096).optional(),
+
+        // Azure: the resource, and the dated API surface it exposes.
+        resourceName: z.string().trim().max(120).optional(),
+        apiVersion: z.string().trim().max(40).optional(),
       })
+      // A service-account JSON file is far longer than any bearer token.
+      .extend({ apiKey: z.string().trim().min(8).max(8192) })
       .parse(request.body);
 
     const def = PROVIDERS[body.provider];
 
     let bedrock: BedrockFields | null = null;
+    let derivedBaseUrl: string | undefined;
+    let derivedMeta: Prisma.InputJsonValue | undefined;
+
     if (body.provider === 'bedrock') {
       const built = buildBedrockFields(body);
       if ('error' in built) return reply.code(400).send({ error: built.error });
       bedrock = built;
     }
 
-    const baseUrl = body.baseUrl ?? bedrock?.baseUrl ?? def?.defaultBaseUrl;
+    if (body.provider === 'azure') {
+      const built = buildAzureFields(body);
+      if ('error' in built) return reply.code(400).send({ error: built.error });
+      derivedBaseUrl = built.baseUrl;
+      derivedMeta = built.meta;
+    }
+
+    if (body.provider === 'vertex') {
+      const built = buildVertexFields(body);
+      if ('error' in built) return reply.code(400).send({ error: built.error });
+      derivedBaseUrl = built.baseUrl;
+      derivedMeta = built.meta;
+    }
+
+    const baseUrl = body.baseUrl ?? derivedBaseUrl ?? bedrock?.baseUrl ?? def?.defaultBaseUrl;
     if (!baseUrl) {
       return reply.code(400).send({ error: 'A base URL is required for a custom provider.' });
     }
@@ -130,7 +224,7 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
         // blob, so it still matches what they can see in the AWS console.
         keyHint: keyHint(body.apiKey),
         defaultModel: body.defaultModel ?? def?.suggestedModels[0] ?? null,
-        ...(bedrock ? { meta: bedrock.meta } : {}),
+        ...(bedrock ? { meta: bedrock.meta } : derivedMeta ? { meta: derivedMeta } : {}),
       },
       select: { id: true, provider: true, label: true, baseUrl: true, keyHint: true, defaultModel: true, isActive: true, meta: true },
     });
@@ -222,9 +316,9 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
     const model = body.model || credential.defaultModel || PROVIDERS[credential.provider]?.suggestedModels[0];
     if (!model) return reply.code(400).send({ error: 'Choose a model to test with.' });
 
-    let call: ReturnType<typeof callParamsFor>;
+    let call: Awaited<ReturnType<typeof callParamsFor>>;
     try {
-      call = callParamsFor(credential);
+      call = await callParamsFor(credential);
     } catch (err) {
       return { ok: false, message: err instanceof Error ? err.message : 'Could not read the stored key.' };
     }

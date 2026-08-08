@@ -1,6 +1,7 @@
 import type { ApiCredential } from '@prisma/client';
 import { decryptSecret } from '../lib/crypto.js';
-import { LlmError } from './providers.js';
+import { LlmError, DEFAULT_AZURE_API_VERSION } from './providers.js';
+import { accessTokenFor, parseServiceAccount, vertexBaseUrl } from './google-auth.js';
 import type { BedrockConfig } from './bedrock.js';
 
 /**
@@ -27,10 +28,24 @@ export interface BedrockMeta {
   accessKeyId?: string;
 }
 
+/** Azure addresses a resource by hostname and pins a dated API version. */
+export interface AzureMeta {
+  apiVersion?: string;
+}
+
+/** Vertex is regional and scoped to a project, both read from the key file. */
+export interface VertexMeta {
+  projectId: string;
+  region: string;
+  clientEmail?: string;
+}
+
 export interface CallParams {
   baseUrl: string;
   apiKey: string;
   bedrock?: BedrockConfig;
+  dialect?: 'openai' | 'azure' | 'bedrock' | 'oci';
+  azure?: { apiVersion: string };
 }
 
 /** The secret half of an IAM credential, as stored. */
@@ -53,10 +68,40 @@ export function bedrockMetaOf(credential: Pick<ApiCredential, 'meta'>): BedrockM
   };
 }
 
-export function callParamsFor(
+/**
+ * Async because Vertex has no key to send: a service account has to be
+ * exchanged for a short-lived access token before the call can be made. Every
+ * other provider resolves without a round trip, and the token is cached for
+ * its lifetime, so this is not a per-call cost.
+ */
+export async function callParamsFor(
   credential: Pick<ApiCredential, 'provider' | 'baseUrl' | 'encryptedKey' | 'meta'>,
-): CallParams {
+): Promise<CallParams> {
   const secret = decryptSecret(credential.encryptedKey);
+
+  if (credential.provider === 'azure') {
+    const meta = (credential.meta ?? {}) as AzureMeta;
+    return {
+      baseUrl: credential.baseUrl,
+      apiKey: secret,
+      dialect: 'azure',
+      azure: { apiVersion: meta.apiVersion || DEFAULT_AZURE_API_VERSION },
+    };
+  }
+
+  if (credential.provider === 'vertex') {
+    const meta = credential.meta as VertexMeta | null;
+    if (!meta?.projectId || !meta.region) {
+      throw new LlmError('This Vertex credential has no project or region saved. Delete it and add it again.');
+    }
+    const account = parseServiceAccount(secret);
+    return {
+      // The stored base URL wins so a private endpoint can be pointed at, but
+      // normally it is the regional one derived when the credential was saved.
+      baseUrl: credential.baseUrl || vertexBaseUrl(meta.projectId, meta.region),
+      apiKey: await accessTokenFor(account),
+    };
+  }
 
   if (credential.provider !== 'bedrock') {
     return { baseUrl: credential.baseUrl, apiKey: secret };

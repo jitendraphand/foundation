@@ -23,6 +23,16 @@ export interface ProviderDef {
   suggestedModels: string[];
   /** Whether the provider honours response_format: { type: "json_object" }. */
   supportsJsonMode: boolean;
+  /**
+   * How the HTTP call is shaped. Most services copy OpenAI exactly; the ones
+   * that do not get a named dialect rather than a pile of conditionals.
+   *
+   *   openai  POST {base}/chat/completions, Authorization: Bearer
+   *   azure   the deployment is in the path and the key is an api-key header
+   *   bedrock its own protocol entirely; see bedrock.ts
+   *   oci     its own protocol and its own request signing; see oci.ts
+   */
+  dialect?: 'openai' | 'azure' | 'bedrock' | 'oci';
 }
 
 export const PROVIDERS: Record<string, ProviderDef> = {
@@ -130,6 +140,47 @@ export const PROVIDERS: Record<string, ProviderDef> = {
     supportsJsonMode: false,
   },
 
+  azure: {
+    id: 'azure',
+    label: 'Azure OpenAI',
+    // Filled in from the resource name when the credential is saved: every
+    // Azure OpenAI resource has its own hostname.
+    defaultBaseUrl: '',
+    docsUrl: 'https://learn.microsoft.com/azure/ai-services/openai/reference',
+    keyUrl: 'https://portal.azure.com/',
+    modelHint:
+      'On Azure the model is the DEPLOYMENT name you chose in Azure AI Foundry, not the ' +
+      'underlying model - so if you deployed gpt-4o as "exam-writer", put exam-writer here.',
+    suggestedModels: ['gpt-4.1', 'gpt-4o', 'gpt-4o-mini'],
+    supportsJsonMode: true,
+    dialect: 'azure',
+  },
+
+  google: {
+    id: 'google',
+    label: 'Google Gemini (AI Studio key)',
+    defaultBaseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
+    docsUrl: 'https://ai.google.dev/gemini-api/docs/openai',
+    keyUrl: 'https://aistudio.google.com/apikey',
+    modelHint: 'e.g. gemini-2.5-pro for the best questions, gemini-2.5-flash to keep costs down.',
+    suggestedModels: ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.0-flash'],
+    supportsJsonMode: true,
+  },
+
+  vertex: {
+    id: 'vertex',
+    label: 'Google Vertex AI (service account)',
+    // Derived from the project and region on the service account.
+    defaultBaseUrl: '',
+    docsUrl: 'https://cloud.google.com/vertex-ai/generative-ai/docs/multimodal/call-vertex-using-openai-library',
+    keyUrl: 'https://console.cloud.google.com/iam-admin/serviceaccounts',
+    modelHint:
+      'e.g. google/gemini-2.5-pro. Vertex model ids carry a publisher prefix, and the model must be ' +
+      'enabled in the region on the service account.',
+    suggestedModels: ['google/gemini-2.5-pro', 'google/gemini-2.5-flash', 'google/gemini-2.0-flash'],
+    supportsJsonMode: true,
+  },
+
   custom: {
     id: 'custom',
     label: 'Other OpenAI-compatible endpoint',
@@ -155,6 +206,12 @@ export const PROVIDERS: Record<string, ProviderDef> = {
  * wrong about that must not stop someone using their own key.
  */
 export function describeKeyProblem(provider: string, key: string): { error?: string; warning?: string } {
+  // Vertex's "key" is the whole service-account JSON file, which legitimately
+  // contains braces, newlines and a PEM block. Every check below is about the
+  // shape of a bearer token and would reject a perfectly good key file; the
+  // file gets its own, stricter validation in google-auth.ts instead.
+  if (provider === 'vertex') return {};
+
   if (/\.\.\.|…/.test(key)) {
     return {
       error:
@@ -212,6 +269,15 @@ export interface ChatRequest {
    * request shape around two protocols.
    */
   bedrock?: import('./bedrock.js').BedrockConfig;
+
+  /** See ProviderDef.dialect. Absent means the ordinary OpenAI shape. */
+  dialect?: ProviderDef['dialect'];
+
+  /**
+   * Azure only. The deployment name goes in the path rather than the body, and
+   * the API version is a required query parameter that Azure pins per feature.
+   */
+  azure?: { apiVersion: string };
 }
 
 export interface ChatResponse {
@@ -234,6 +300,13 @@ export class LlmError extends Error {
  * temperature other than the default. Sending the usual parameters gets a 400
  * that reads like a bad API key, so detect them and adjust.
  */
+/**
+ * Azure pins its API surface to a dated version. This one is the current
+ * generally-available release; an admin whose resource is older can override
+ * it per credential.
+ */
+export const DEFAULT_AZURE_API_VERSION = '2024-10-21';
+
 function isReasoningModel(model: string): boolean {
   const name = model.toLowerCase().split('/').pop() ?? '';
   return /^(o\d|gpt-5)/.test(name);
@@ -266,11 +339,23 @@ export async function chatComplete(req: ChatRequest): Promise<ChatResponse> {
     });
   }
 
-  const url = `${req.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+  const isAzure = req.dialect === 'azure';
+  const base = req.baseUrl.replace(/\/+$/, '');
+
+  // Azure addresses a deployment, not a model: the name the admin chose when
+  // they deployed goes in the path, and the api-version query parameter is
+  // mandatory - omitting it returns a 404 that reads like a wrong hostname.
+  const url = isAzure
+    ? `${base}/openai/deployments/${encodeURIComponent(req.model)}/chat/completions` +
+      `?api-version=${encodeURIComponent(req.azure?.apiVersion ?? DEFAULT_AZURE_API_VERSION)}`
+    : `${base}/chat/completions`;
+
   const started = Date.now();
   const reasoning = isReasoningModel(req.model);
 
   const body: Record<string, unknown> = {
+    // Azure ignores this - the deployment in the URL decides - but sending it
+    // is harmless and keeps the request readable in a log.
     model: req.model,
     messages: req.messages,
   };
@@ -293,7 +378,9 @@ export async function chatComplete(req: ChatRequest): Promise<ChatResponse> {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${req.apiKey}`,
+        // Azure authenticates with its own header; everyone else takes a
+        // bearer token. Sending Bearer to Azure returns 401 PermissionDenied.
+        ...(isAzure ? { 'api-key': req.apiKey } : { Authorization: `Bearer ${req.apiKey}` }),
         // OpenRouter asks for these; harmless everywhere else.
         'HTTP-Referer': `https://${env.PUBLIC_HOST}`,
         'X-Title': 'Foundation Exam System',
