@@ -16,26 +16,102 @@ import { samplePoints } from '../lib/expr';
  * Nothing else changes, and existing questions are unaffected.
  */
 
-export function ContentRenderer({ content, className = '' }: { content?: Content | null; className?: string }) {
-  if (!content?.blocks?.length) return null;
+/**
+ * Whether a block belongs in the flow of a sentence rather than on its own.
+ *
+ * Text and inline maths do; display maths, diagrams, tables and code are
+ * paragraph-level things that earn their own line.
+ */
+function isInline(block: Block): boolean {
+  return block.type === 'text' || (block.type === 'math' && !block.display);
+}
+
+/**
+ * Groups blocks into rendering runs.
+ *
+ * Each block used to render as its own paragraph, so a question written as
+ * text + inline maths + text - "the area of a circle is", A = πr², "where r is
+ * the radius" - came out as three stacked lines instead of one sentence. That
+ * is a single sentence the model happened to send in three pieces, and it
+ * should read as one.
+ *
+ * A run is only merged when it actually mixes types. Two consecutive text
+ * blocks stay two paragraphs, because a model that sends two paragraphs means
+ * two paragraphs; it is the mixing that was never intended as a line break.
+ */
+function groupBlocks(blocks: Block[]): Array<{ inline: boolean; blocks: Block[] }> {
+  const groups: Array<{ inline: boolean; blocks: Block[] }> = [];
+
+  for (const block of blocks) {
+    const last = groups[groups.length - 1];
+    if (isInline(block) && last?.inline) last.blocks.push(block);
+    else groups.push({ inline: isInline(block), blocks: [block] });
+  }
+
+  // A run of nothing but text is still separate paragraphs.
+  return groups.map((g) =>
+    g.inline && g.blocks.every((b) => b.type === 'text')
+      ? { inline: false, blocks: g.blocks }
+      : g,
+  ).flatMap((g) =>
+    g.inline ? [g] : g.blocks.map((b) => ({ inline: false, blocks: [b] })),
+  );
+}
+
+function GroupedBlocks({ blocks, className = '' }: { blocks: Block[]; className?: string }) {
+  const groups = useMemo(() => groupBlocks(blocks), [blocks]);
+
   return (
     <div className={className}>
-      {content.blocks.map((block, i) => (
-        <BlockRenderer key={i} block={block} />
-      ))}
+      {groups.map((group, i) =>
+        group.inline ? (
+          <p key={i} className="my-1.5 whitespace-pre-wrap leading-relaxed">
+            {group.blocks.map((block, j) => (
+              <InlineBlock key={j} block={block} spaceBefore={needsSpaceBetween(group.blocks[j - 1], block)} />
+            ))}
+          </p>
+        ) : (
+          <BlockRenderer key={i} block={group.blocks[0]} />
+        ),
+      )}
     </div>
   );
 }
 
+/**
+ * Whether two adjacent pieces of one sentence need a space between them.
+ *
+ * The model sends "the area of a circle is" and the formula as separate
+ * blocks, neither carrying a space of its own, so without this they render as
+ * "circle isA = pi r^2". A formula counts as having no whitespace on either
+ * side; text is inspected for its own.
+ */
+function needsSpaceBetween(before: Block | undefined, after: Block): boolean {
+  if (!before) return false;
+  const endsOpen = before.type === 'text' ? !/\s$/.test(before.value) : true;
+  const startsOpen = after.type === 'text' ? !/^\s/.test(after.value) : true;
+  return endsOpen && startsOpen;
+}
+
+/** The inline half of BlockRenderer: never emits a block-level element. */
+function InlineBlock({ block, spaceBefore }: { block: Block; spaceBefore: boolean }) {
+  const content =
+    block.type === 'math' ? <InlineMath tex={block.tex} />
+    : block.type === 'text' ? <InlineText value={block.value} />
+    : null;
+
+  if (!content) return null;
+  return spaceBefore ? <>{' '}{content}</> : content;
+}
+
+export function ContentRenderer({ content, className = '' }: { content?: Content | null; className?: string }) {
+  if (!content?.blocks?.length) return null;
+  return <GroupedBlocks blocks={content.blocks} className={className} />;
+}
+
 export function BlocksRenderer({ blocks, className = '' }: { blocks?: Block[] | null; className?: string }) {
   if (!blocks?.length) return null;
-  return (
-    <div className={className}>
-      {blocks.map((block, i) => (
-        <BlockRenderer key={i} block={block} />
-      ))}
-    </div>
-  );
+  return <GroupedBlocks blocks={blocks} className={className} />;
 }
 
 export function BlockRenderer({ block }: { block: Block }) {
@@ -68,14 +144,23 @@ export function BlockRenderer({ block }: { block: Block }) {
  * LaTeX into text blocks however firmly the prompt tells them not to.
  */
 function TextBlock({ value }: { value: string }) {
+  return (
+    <p className="my-1.5 whitespace-pre-wrap leading-relaxed">
+      <InlineText value={value} />
+    </p>
+  );
+}
+
+/** The same text without the paragraph, so it can sit mid-sentence. */
+function InlineText({ value }: { value: string }) {
   const parts = useMemo(() => splitInlineMath(value), [value]);
 
   return (
-    <p className="my-1.5 whitespace-pre-wrap leading-relaxed">
+    <>
       {parts.map((part, i) =>
         part.type === 'math' ? <InlineMath key={i} tex={part.value} /> : <span key={i}>{part.value}</span>,
       )}
-    </p>
+    </>
   );
 }
 
