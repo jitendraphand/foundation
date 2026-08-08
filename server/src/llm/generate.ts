@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { prisma } from '../db.js';
-import { callParamsFor } from './credentials.js';
+import { callParamsFor, type CallParams } from './credentials.js';
 import { normalizeContent, normalizeBlocks, CONTENT_VERSION } from '../lib/content.js';
 import { validateAnswerKey } from '../lib/grading.js';
 import { chatComplete, emitsReasoning, LlmError, PROVIDERS, type ChatMessage } from './providers.js';
@@ -82,24 +82,163 @@ export function buildUserPrompt(spec: GenerateSpec, template = DEFAULT_USER_TEMP
 }
 
 /**
+ * Puts each supplied tag on the axis it actually belongs to.
+ *
+ * Models mix up the cognitive and skill axes constantly - they are two
+ * adjacent taxonomies of "what this question is like", and no amount of
+ * prompt wording stops it. A typical batch arrives with
+ *
+ *   cognitiveTag: "spatial_visual"      (a skill)
+ *   skillTags:    ["conceptual"]        (a cognitive level)
+ *
+ * Both codes are real and both are correct - they are simply in each other's
+ * field. Rejecting those questions threw away good work over a filing error,
+ * which is what turned a batch of twelve into six.
+ *
+ * So every supplied code goes into one pool and is dealt back out to the axis
+ * whose vocabulary contains it, keeping whatever was already in the right
+ * place. A code that belongs to no axis at all is still an error: that is a
+ * model inventing vocabulary, not misfiling it, and silently guessing a tag
+ * would corrupt the weak-area reports these feed.
+ */
+function sortTagsIntoAxes(
+  q: Pick<LlmQuestion, 'difficultyTag' | 'cognitiveTag' | 'skillTags'>,
+  valid: ValidTags,
+): { difficultyTag: string; cognitiveTag: string; skills: string[]; moved: boolean } {
+  const pool = [q.difficultyTag, q.cognitiveTag, ...q.skillTags].map((t) => t.trim()).filter(Boolean);
+
+  const pickOne = (supplied: string, vocabulary: Set<string>): string | undefined =>
+    vocabulary.has(supplied) ? supplied : pool.find((t) => vocabulary.has(t));
+
+  const difficultyTag = pickOne(q.difficultyTag, valid.difficulty);
+  const cognitiveTag = pickOne(q.cognitiveTag, valid.cognitive);
+
+  const ownSkills = q.skillTags.filter((s) => valid.skill.has(s));
+  // Deduplicated: a code can only be dealt to one axis, but the model may have
+  // repeated it across two.
+  const skills = ownSkills.length ? [...new Set(ownSkills)] : [...new Set(pool.filter((t) => valid.skill.has(t)))];
+
+  const unknown = (name: string, vocabulary: Set<string>) =>
+    new Error(
+      `no usable ${name} in [${pool.join(', ')}] - expected one of: ${[...vocabulary].sort().join(', ')}`,
+    );
+
+  if (!difficultyTag) throw unknown('difficultyTag', valid.difficulty);
+  if (!cognitiveTag) throw unknown('cognitiveTag', valid.cognitive);
+  if (skills.length === 0) throw unknown('skillTags', valid.skill);
+
+  const moved =
+    difficultyTag !== q.difficultyTag ||
+    cognitiveTag !== q.cognitiveTag ||
+    skills.length !== ownSkills.length;
+
+  return { difficultyTag, cognitiveTag, skills, moved };
+}
+
+/**
+ * A second attempt at the questions that parsed but were unusable.
+ *
+ * Deliberately one round and one call: the batch already cost several, and a
+ * question the model cannot fix when told exactly what is wrong with it is not
+ * going to come good on the third ask. Anything still failing is reported
+ * unchanged, so this can only ever add questions, never lose them.
+ */
+async function repairRejected(args: {
+  call: CallParams;
+  opts: GenerateOptions;
+  providerDef: { supportsJsonMode: boolean };
+  systemPrompt: string;
+  questions: LlmQuestion[];
+  rejected: Array<{ index: number; reason: string }>;
+  ctx: { runId: string; model: string; validTags: ValidTags; retagged: { count: number } };
+  tokensPerQuestion: number;
+}): Promise<{
+  rows: ReturnType<typeof toQuestionRow>[];
+  stillRejected: Array<{ index: number; reason: string }>;
+  attempts: number;
+  latencyMs: number;
+}> {
+  const { rejected, questions } = args;
+  const nothing = { rows: [], stillRejected: rejected, attempts: 0, latencyMs: 0 };
+
+  // Beyond this the prompt is longer than the batch that produced it, and the
+  // reply is more likely to be truncated than correct.
+  if (rejected.length > 20) return nothing;
+
+  const listing = rejected
+    .map((r, i) => `--- Question ${i + 1}\nProblem: ${r.reason}\nYour JSON:\n${JSON.stringify(questions[r.index])}`)
+    .join('\n\n');
+
+  const messages: ChatMessage[] = [
+    { role: 'system', content: args.systemPrompt },
+    {
+      role: 'user',
+      content:
+        `${rejected.length} of the questions you produced were rejected. Each is listed below with the exact ` +
+        `reason and the JSON you sent.\n\n${listing}\n\n` +
+        'Fix ONLY the stated problem in each. Keep the question, the options and the answer entirely as they are - ' +
+        'this is a metadata correction, not a rewrite. Use only codes from the TAG VOCABULARY above.\n' +
+        `Return {"questions": [...]} containing all ${rejected.length} corrected questions in the same order. ` +
+        'Output only the JSON object, no fences and no commentary.',
+    },
+  ];
+
+  let response;
+  try {
+    response = await chatComplete({
+      ...args.call,
+      model: args.opts.model,
+      messages,
+      temperature: 0.1,
+      jsonMode: args.providerDef.supportsJsonMode,
+      maxTokens: Math.min(32000, args.tokensPerQuestion * Math.max(1, rejected.length)),
+    });
+  } catch {
+    // The repair is a bonus, never a reason to fail a run that produced work.
+    return nothing;
+  }
+
+  let corrected: LlmQuestion[];
+  try {
+    corrected = llmResponseSchema.parse(extractJson(response.text)).questions;
+  } catch {
+    return { ...nothing, attempts: 1, latencyMs: response.latencyMs };
+  }
+
+  const rows: ReturnType<typeof toQuestionRow>[] = [];
+  const stillRejected: Array<{ index: number; reason: string }> = [];
+
+  rejected.forEach((original, i) => {
+    const fixed = corrected[i];
+    if (!fixed) return stillRejected.push(original);
+    try {
+      rows.push(toQuestionRow(fixed, args.ctx));
+    } catch (err) {
+      // Report the original complaint, not the repair's: the admin cares what
+      // was wrong with the question, not that a retry also failed.
+      stillRejected.push(original);
+      void err;
+    }
+  });
+
+  return { rows, stillRejected, attempts: 1, latencyMs: response.latencyMs };
+}
+
+/**
  * Converts one validated LLM question into the row shape, re-validating the
  * answer key against the declared format and sanitising every SVG on the way
  * in. Throws with a human-readable reason, which is surfaced per-question to
  * the admin rather than failing the whole batch.
  */
-function toQuestionRow(q: LlmQuestion, ctx: { runId: string; model: string; validTags: ValidTags }) {
+function toQuestionRow(
+  q: LlmQuestion,
+  ctx: { runId: string; model: string; validTags: ValidTags; retagged: { count: number } },
+) {
   // Tags must exist in the vocabulary, otherwise analytics silently splits into
-  // buckets nobody ever looks at.
-  if (!ctx.validTags.difficulty.has(q.difficultyTag)) {
-    throw new Error(`unknown difficultyTag "${q.difficultyTag}"`);
-  }
-  if (!ctx.validTags.cognitive.has(q.cognitiveTag)) {
-    throw new Error(`unknown cognitiveTag "${q.cognitiveTag}"`);
-  }
-  const skills = q.skillTags.filter((s) => ctx.validTags.skill.has(s));
-  if (skills.length === 0) {
-    throw new Error(`no recognised skillTags in [${q.skillTags.join(', ')}]`);
-  }
+  // buckets nobody ever looks at. Misfiled ones are moved to the axis they
+  // belong to first; see sortTagsIntoAxes.
+  const { difficultyTag, cognitiveTag, skills, moved } = sortTagsIntoAxes(q, ctx.validTags);
+  if (moved) ctx.retagged.count++;
 
   const content = normalizeContent({ version: CONTENT_VERSION, blocks: q.content.blocks });
 
@@ -157,8 +296,8 @@ function toQuestionRow(q: LlmQuestion, ctx: { runId: string; model: string; vali
     options: options as object,
     answerKey: answerKey as object,
     explanation: explanation as object,
-    difficultyTag: q.difficultyTag,
-    cognitiveTag: q.cognitiveTag,
+    difficultyTag,
+    cognitiveTag,
     skillTags: skills,
     subject: q.subject,
     topic: q.topic ?? null,
@@ -383,16 +522,48 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
     const parsedResponse = { questions: collected };
 
     const validTags = await loadValidTags();
+    const retagged = { count: 0 };
     const rejected: Array<{ index: number; reason: string }> = [];
     const rows: ReturnType<typeof toQuestionRow>[] = [];
 
     parsedResponse.questions.forEach((q, index) => {
       try {
-        rows.push(toQuestionRow(q, { runId: run.id, model: opts.model, validTags }));
+        rows.push(toQuestionRow(q, { runId: run.id, model: opts.model, validTags, retagged }));
       } catch (err) {
         rejected.push({ index, reason: err instanceof Error ? err.message : String(err) });
       }
     });
+
+    // One more round for the ones that failed. The schema-level repair above
+    // only fires when the whole reply is malformed; a question that parses but
+    // is unusable - a tag that is not in the vocabulary, an answer key naming
+    // an option that does not exist - never got a second chance, and those are
+    // the failures an admin actually sees. Sending the model its own question
+    // back with the specific complaint fixes most of them, and the ones it
+    // cannot fix are reported exactly as before.
+    if (rejected.length > 0) {
+      const recovered = await repairRejected({
+        call,
+        opts,
+        providerDef,
+        systemPrompt,
+        questions: parsedResponse.questions,
+        rejected,
+        ctx: { runId: run.id, model: opts.model, validTags, retagged },
+        tokensPerQuestion,
+      });
+      if (recovered.rows.length > 0) {
+        rows.push(...recovered.rows);
+        attempts += recovered.attempts;
+        latencyMs += recovered.latencyMs;
+        warnings.push(
+          `${recovered.rows.length} of ${rejected.length} rejected question${rejected.length === 1 ? '' : 's'} ` +
+            'were recovered by sending the model its own validation errors.',
+        );
+        // Keep only the ones still broken.
+        rejected.splice(0, rejected.length, ...recovered.stillRejected);
+      }
+    }
 
     if (rows.length > 0) {
       await prisma.question.createMany({ data: rows as never });
@@ -418,6 +589,13 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
       throw new LlmError(
         `All ${parsedResponse.questions.length} questions failed validation:\n` +
           rejected.map((r) => `Q${r.index + 1}: ${r.reason}`).join('\n'),
+      );
+    }
+
+    if (retagged.count > 0) {
+      warnings.push(
+        `Tags corrected on ${retagged.count} question${retagged.count === 1 ? '' : 's'}: the model put a skill on the ` +
+          'cognitive axis, or the reverse. They were filed correctly rather than rejected.',
       );
     }
 
@@ -502,12 +680,13 @@ export async function importQuestions(opts: {
   });
 
   const validTags = await loadValidTags();
+  const retagged = { count: 0 };
   const rejected: Array<{ index: number; reason: string }> = [];
   const rows: ReturnType<typeof toQuestionRow>[] = [];
 
   parsedResponse.questions.forEach((q, index) => {
     try {
-      rows.push(toQuestionRow(q, { runId: run.id, model: run.model, validTags }));
+      rows.push(toQuestionRow(q, { runId: run.id, model: run.model, validTags, retagged }));
     } catch (err) {
       rejected.push({ index, reason: err instanceof Error ? err.message : String(err) });
     }
@@ -541,8 +720,19 @@ export async function importQuestions(opts: {
     parsed: parsedResponse.questions.length,
     needingImages: rows.filter((r) => r.imageRequired).length,
     rejected,
-    warnings: rejected.length
-      ? [`${rejected.length} of ${parsedResponse.questions.length} questions were skipped - see the list below.`]
-      : [],
+    warnings: [
+      ...(rejected.length
+        ? [`${rejected.length} of ${parsedResponse.questions.length} questions were skipped - see the list below.`]
+        : []),
+      ...(retagged.count > 0
+        ? [
+            `Tags corrected on ${retagged.count} question${retagged.count === 1 ? '' : 's'}: a skill was on the ` +
+              'cognitive axis, or the reverse.',
+          ]
+        : []),
+    ],
   };
 }
+
+/** Exposed for the axis-sorting checks; not part of the module's API. */
+export const __testing = { sortTagsIntoAxes, planBatches };

@@ -169,9 +169,13 @@ function SvgBlock({ svg, caption }: { svg: string; caption?: string }) {
         capped so a diagram never dominates the page, and let the viewBox scale
         it. Without this a viewBox-only figure collapses to a few pixels.
       */}
+      {/*
+        svg-host supplies the stroke/fill defaults a model-authored diagram
+        usually forgets; see the note in index.css.
+      */}
       <div
-        className="inline-block max-w-full overflow-x-auto rounded-lg border border-line bg-white p-3
-                   [&>svg]:w-full [&>svg]:h-auto [&>svg]:max-w-[460px] [&>svg]:block"
+        className="svg-host inline-block max-w-full overflow-x-auto rounded-lg border border-line bg-white p-3
+                   text-ink [&>svg]:w-full [&>svg]:h-auto [&>svg]:max-w-[460px] [&>svg]:block"
         style={{ width: 'min(100%, 486px)' }}
         dangerouslySetInnerHTML={{ __html: safe }}
       />

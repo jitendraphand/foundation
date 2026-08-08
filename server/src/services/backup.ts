@@ -47,6 +47,99 @@ function run(cmd: string, args: string[], opts: { env?: NodeJS.ProcessEnv; cwd?:
 }
 
 /**
+ * Finding a pg_dump that can actually dump this server.
+ *
+ * pg_dump refuses to dump a server newer than itself, and Debian's
+ * `postgresql-client` metapackage installs whichever major version that
+ * release happened to ship - 15 on bookworm - while the database here is 16.
+ * The result is a backup that fails with
+ *
+ *   pg_dump: error: aborting because of server version mismatch
+ *
+ * which reads like a broken installation rather than a missing package.
+ *
+ * So the version is not assumed. The server is asked what it is, and a
+ * matching binary is looked for in the places distributions actually put
+ * them - Debian and Ubuntu keep every installed major side by side under
+ * /usr/lib/postgresql, which is exactly what makes this fixable at runtime.
+ * Only if none is found do we fall back to PATH, and then the error says
+ * which package to install.
+ */
+function majorOf(version: string): number | null {
+  const m = /(\d+)/.exec(version);
+  return m ? Number(m[1]) : null;
+}
+
+async function serverMajor(): Promise<number | null> {
+  try {
+    const rows = await prisma.$queryRawUnsafe<Array<{ server_version_num: string }>>(
+      'SHOW server_version_num',
+    );
+    const num = Number(rows?.[0]?.server_version_num);
+    // 160014 -> 16. Versions before 10 used a different scheme, which no
+    // supported deployment runs.
+    return Number.isFinite(num) ? Math.floor(num / 10_000) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The major version a binary reports, or null if it cannot be run at all. */
+function toolMajor(binary: string): Promise<number | null> {
+  return new Promise((resolve) => {
+    const child = spawn(binary, ['--version'], { stdio: ['ignore', 'pipe', 'ignore'] });
+    let out = '';
+    child.stdout.on('data', (d) => (out += d.toString()));
+    child.on('error', () => resolve(null));
+    child.on('close', () => resolve(majorOf(out.replace(/^\D+/, ''))));
+  });
+}
+
+const toolCache = new Map<string, string>();
+
+async function findPgTool(name: 'pg_dump' | 'pg_restore'): Promise<string> {
+  const cached = toolCache.get(name);
+  if (cached) return cached;
+
+  const want = await serverMajor();
+
+  // Ordered best-first. An explicit PG_BIN_DIR always wins, for a deployment
+  // that keeps its client tools somewhere of its own choosing.
+  const candidates: string[] = [];
+  if (process.env.PG_BIN_DIR) candidates.push(path.join(process.env.PG_BIN_DIR, name));
+  if (want) {
+    candidates.push(
+      `/usr/lib/postgresql/${want}/bin/${name}`, // Debian, Ubuntu
+      `/usr/pgsql-${want}/bin/${name}`, // RHEL, Rocky, Alma
+      `/opt/homebrew/opt/postgresql@${want}/bin/${name}`, // macOS, Apple silicon
+      `/usr/local/opt/postgresql@${want}/bin/${name}`, // macOS, Intel
+    );
+  }
+  candidates.push(name); // whatever is on PATH
+
+  let best: { binary: string; major: number } | null = null;
+  for (const candidate of candidates) {
+    const major = await toolMajor(candidate);
+    if (major === null) continue;
+    // Newer than the server is fine; older is not.
+    if (want && major < want) {
+      if (!best) best = { binary: candidate, major };
+      continue;
+    }
+    toolCache.set(name, candidate);
+    return candidate;
+  }
+
+  const found = best ? `Only ${name} ${best.major} is installed` : `No ${name} was found`;
+  throw new Error(
+    `${found}, but the database is PostgreSQL ${want ?? 'newer'}. ` +
+      `${name} cannot read a server newer than itself. Install the matching client - ` +
+      `on Debian or Ubuntu "apt install postgresql-client-${want ?? 16}" - ` +
+      'or set PG_BIN_DIR to the directory that holds it.',
+  );
+}
+
+/**
  * Connection settings for pg_dump.
  *
  * DATABASE_URL is the one place the database is configured, so derive the
@@ -175,7 +268,8 @@ export async function createBackup(opts: { createdById?: string; includeAssets?:
 
   try {
     // 1. Native dump.
-    await run('pg_dump', ['--format=custom', '--no-owner', '--no-privileges', '--file', path.join(workDir, 'db.dump')], {
+    const pgDump = await findPgTool('pg_dump');
+    await run(pgDump, ['--format=custom', '--no-owner', '--no-privileges', '--file', path.join(workDir, 'db.dump')], {
       env: pgEnv(),
     });
 

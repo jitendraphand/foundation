@@ -62,7 +62,11 @@ Content is an ordered list of typed blocks. Choose the right block; never put La
 
 3. Diagrams you draw yourself - inline SVG. Use for geometry, figures, labelled apparatus, shapes, angles:
    { "type": "svg", "svg": "<svg viewBox=\\"0 0 200 120\\" xmlns=\\"http://www.w3.org/2000/svg\\">...</svg>", "caption": "Triangle ABC" }
-   REQUIREMENTS: always set viewBox; never set a fixed pixel width/height; use explicit dark colours that read on a white background; label points with <text>; keep it under 200 lines. No <script>, no <foreignObject>, no external images - these are stripped and the question is rejected.
+   REQUIREMENTS: always set viewBox; never set a fixed pixel width/height; label points with <text>; keep it under 200 lines. No <script>, no <foreignObject>, no external images - these are stripped and the question is rejected.
+   EVERY drawn element MUST carry an explicit stroke. SVG's default stroke is "none", so <line x1=".." y1=".." x2=".." y2=".."/> with no stroke attribute draws NOTHING and the diagram arrives blank.
+   Correct:   <line x1="0" y1="50" x2="200" y2="0" stroke="#0b0b0b" stroke-width="2"/>
+   Wrong:     <line x1="0" y1="50" x2="200" y2="0"/>
+   Set stroke and stroke-width on every line, polyline, polygon and open path, or once on a <g> wrapping them. Use dark colours that read on a white background. Give a path that is a curve rather than a filled region fill="none".
 
 4. Structural / flow / tree diagrams - Mermaid:
    { "type": "mermaid", "code": "graph TD; A[Start] --> B{Is x > 0?}; B -->|Yes| C[Output x]; B -->|No| D[Output -x]", "caption": "Flow chart" }

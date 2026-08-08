@@ -76,6 +76,36 @@
 /* Mermaid renders into a div; keep it from overflowing its card. */
 .mermaid-host svg { max-width: 100%; height: auto; }
 
+/* --- Model-authored SVG ----------------------------------------------------
+ *
+ * SVG's initial `stroke` is `none`, so a `<line>`, `<polyline>` or open
+ * `<path>` written without a stroke attribute draws absolutely nothing. Models
+ * omit it constantly - a velocity-time graph arrives as a correct pair of axes
+ * and a correct line, and renders as an empty white box, which looks like the
+ * renderer is broken rather than the diagram.
+ *
+ * The default therefore goes on the root. `stroke` and `fill` are inherited
+ * properties, so every descendant that did not set one picks this up, while
+ * any element - or any `<g>` wrapping a group of them - that *does* set one
+ * still wins. That ordering is what makes this safe: a well-formed diagram
+ * with `<g stroke="#2a78d6">` is completely unaffected.
+ *
+ * currentColor rather than a fixed black so diagrams follow the surrounding
+ * text colour.
+ */
+.svg-host svg { stroke: currentColor; fill: none; }
+
+/* Text is filled, never stroked - a stroke on glyphs smears them. */
+.svg-host svg :is(text, tspan, textPath) { fill: currentColor; stroke: none; }
+
+/* Shapes are area marks: they keep SVG's own default of a solid fill, so a
+ * bare <rect> or <circle> still reads as a filled shape rather than vanishing
+ * under the fill:none above. */
+.svg-host svg :is(rect, circle, ellipse, polygon):not([fill]) { fill: currentColor; }
+
+/* Markers (arrowheads) are filled by convention. */
+.svg-host svg marker :is(path, polygon, circle):not([fill]) { fill: currentColor; }
+
 /* --- Activity flashcards ---------------------------------------------------
  * Cards are read, not filled in, so they get more colour and more air than the
  * rest of the admin chrome.
@@ -112,7 +142,7 @@
 .flashcard-body table { background: #ffffff; @apply rounded-lg overflow-hidden; }
 .flashcard-body th { color: var(--accent-ink, #52514e); }
 .flashcard-body img { @apply rounded-xl mx-auto; }
-.flashcard-body figure > svg,
+.flashcard-body .svg-host,
 .flashcard-body .mermaid-host { background: #ffffff; @apply rounded-xl p-3; }
 .flashcard-body pre { background: #ffffff; @apply rounded-xl; }
 
