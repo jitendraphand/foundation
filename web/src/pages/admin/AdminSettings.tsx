@@ -682,7 +682,20 @@ function Classes() {
   if (!data) return <PageLoader label="Loading" />;
 
   return (
-    <div className="grid md:grid-cols-2 gap-4">
+    <div className="space-y-4">
+      {/*
+        The old label read "Hide from signup" with nothing to say what that
+        meant. It controls one thing: whether this grade or division is offered
+        in the dropdown when a student creates their own account. Existing
+        students keep theirs, and an administrator can still assign it.
+      */}
+      <Alert tone="info">
+        These are the grades and divisions a student can choose when they create their own account. Clearing the tick
+        takes one off that form without affecting anybody already in it — useful for a class that has left, or one you
+        want to assign yourself rather than let students pick.
+      </Alert>
+
+      <div className="grid md:grid-cols-2 gap-4">
       {([['Grades', data.grades], ['Divisions', data.divisions]] as const).map(([title, rows]) => (
         <Card key={title} title={title} padded={false}>
           <ul className="divide-y divide-line">
@@ -692,14 +705,21 @@ function Classes() {
                   {row.label}
                   <span className="ml-2 font-mono text-xs text-ink-faint">{row.code}</span>
                 </span>
-                <button type="button" className="btn-ghost btn-sm" onClick={() => toggle(row)}>
-                  {row.isActive ? 'Hide from signup' : 'Show on signup'}
-                </button>
+                <label className="flex items-center gap-2 text-xs text-ink-muted whitespace-nowrap cursor-pointer">
+                  <input
+                    type="checkbox"
+                    className="accent-series-1"
+                    checked={row.isActive}
+                    onChange={() => toggle(row)}
+                  />
+                  Offered at signup
+                </label>
               </li>
             ))}
           </ul>
         </Card>
       ))}
+      </div>
     </div>
   );
 }

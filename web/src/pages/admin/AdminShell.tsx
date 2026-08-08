@@ -49,7 +49,6 @@ export default function AdminShell() {
 
           <div className="flex items-center gap-3 shrink-0">
             <span className="hidden sm:block text-xs text-ink-muted">{user?.username}</span>
-            <Link to="/dashboard" className="btn-ghost btn-sm hidden sm:inline-flex">Student view</Link>
             <button
               type="button"
               className="btn-ghost btn-sm"

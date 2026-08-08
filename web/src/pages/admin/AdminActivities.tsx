@@ -78,17 +78,6 @@ export default function AdminActivities() {
     }
   };
 
-  const resetAll = async (activity: AdminActivity) => {
-    if (!confirm(`Ask everyone to go through "${activity.title}" again?`)) return;
-    setError(null);
-    try {
-      const res = await api.post<{ message: string }>(`/api/admin/activities/${activity.id}/reset`, {});
-      setNotice(res.message);
-      await load();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not reset the activity.');
-    }
-  };
 
   return (
     <div className="space-y-5">
@@ -200,9 +189,6 @@ export default function AdminActivities() {
                       )}
                       <button type="button" className="btn-ghost btn-sm" onClick={() => setViewing(a)}>
                         Who
-                      </button>
-                      <button type="button" className="btn-ghost btn-sm" onClick={() => void resetAll(a)}>
-                        Reset
                       </button>
                       <button type="button" className="btn-ghost btn-sm text-bad" onClick={() => void remove(a)}>
                         Delete
@@ -767,15 +753,6 @@ function CompletionsModal({
     void load();
   }, [load]);
 
-  const resetOne = async (userId: string) => {
-    try {
-      await api.post(`/api/admin/activities/${activity.id}/reset`, { userId });
-      await load();
-      onChanged();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not reset that student.');
-    }
-  };
 
   return (
     <Modal open onClose={onClose} title={`${activity.title} — who has done it`} wide>
@@ -802,7 +779,6 @@ function CompletionsModal({
                     <th className="text-center">Cards</th>
                     <th className="text-center">Time</th>
                     <th>State</th>
-                    <th />
                   </tr>
                 </thead>
                 <tbody>
@@ -825,13 +801,6 @@ function CompletionsModal({
                           <span className="text-warn">Part way</span>
                         ) : (
                           <span className="text-ink-faint">Not started</span>
-                        )}
-                      </td>
-                      <td className="text-right">
-                        {row.state !== 'not_started' && (
-                          <button type="button" className="btn-ghost btn-sm" onClick={() => void resetOne(row.user.id)}>
-                            Reset
-                          </button>
                         )}
                       </td>
                     </tr>

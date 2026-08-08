@@ -12,8 +12,8 @@ import { ALL_PERMISSIONS } from './lib/permissions.js';
 
 const DIFFICULTY = [
   { code: 'easy', label: 'Easy', weight: 1, sortOrder: 1, description: 'Single step; direct recall or direct substitution.' },
-  { code: 'moderate', label: 'Moderate', weight: 2, sortOrder: 2, description: 'Two or three steps, or one step with a twist.' },
-  { code: 'difficult', label: 'Difficult', weight: 3, sortOrder: 3, description: 'Multi-step, or requires combining two ideas.' },
+  { code: 'medium', label: 'Medium', weight: 2, sortOrder: 2, description: 'Two or three steps, or one step with a twist.' },
+  { code: 'hard', label: 'Hard', weight: 3, sortOrder: 3, description: 'Multi-step, or requires combining two ideas.' },
 ];
 
 const COGNITIVE = [
@@ -63,12 +63,13 @@ async function seedClasses() {
     sortOrder: i + 1,
   }));
 
-  const divisions = ['A', 'B', 'C', 'D', 'E', 'F'].map((d, i) => ({
-    kind: 'DIVISION',
-    code: d,
-    label: `Division ${d}`,
-    sortOrder: i + 1,
-  }));
+  // The school runs two streams rather than lettered classes. Still rows
+  // rather than an enum, so more can be added from Settings without a
+  // migration.
+  const divisions = [
+    { kind: 'DIVISION', code: 'SCIENCE', label: 'Science Foundation', sortOrder: 1 },
+    { kind: 'DIVISION', code: 'SPORTS', label: 'Sports Foundation', sortOrder: 2 },
+  ];
 
   for (const row of [...grades, ...divisions]) {
     await prisma.schoolClass.upsert({

@@ -38,7 +38,7 @@ export const IMPORT_TEMPLATE = {
       format: 'MCQ_MULTI',
       subject: 'Mathematics',
       topic: 'Quadratic equations',
-      difficultyTag: 'moderate',
+      difficultyTag: 'medium',
       cognitiveTag: 'application',
       skillTags: ['algebraic_manipulation', 'numerical_computation'],
       estimatedSeconds: 90,

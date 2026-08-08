@@ -73,7 +73,7 @@ export function buildUserPrompt(spec: GenerateSpec, template = DEFAULT_USER_TEMP
     subtopic: spec.subtopic || 'any appropriate subtopic',
     grade: spec.grade || 'unspecified',
     marksPerQuestion: spec.marksPerQuestion,
-    difficultyMix: describeMix(spec.difficultyMix, 'a balanced spread of easy, moderate and difficult'),
+    difficultyMix: describeMix(spec.difficultyMix, 'a balanced spread of easy, medium and hard'),
     cognitiveMix: describeMix(spec.cognitiveMix, 'a balanced spread across the cognitive levels'),
     formats: spec.formats?.length ? spec.formats.join(', ') : 'MCQ_SINGLE',
     skillFocus: spec.skillFocus?.length ? spec.skillFocus.join(', ') : 'any relevant skills',

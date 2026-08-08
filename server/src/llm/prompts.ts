@@ -24,7 +24,7 @@ A Question is:
   "options":     [ { "id": "a", "blocks": [ Block, ... ] }, ... ],
   "answerKey":   AnswerKey,
   "explanation": { "blocks": [ Block, ... ] },
-  "difficultyTag": "easy" | "moderate" | "difficult",
+  "difficultyTag": "easy" | "medium" | "hard",
   "cognitiveTag":  "memory" | "conceptual" | "application" | "reasoning" | "analysis",
   "skillTags":     [ one or more SkillTag ],
   "subject": "...", "topic": "...", "subtopic": "...",
@@ -140,8 +140,8 @@ Aim for AT MOST one in ten questions needing a real picture. If you find yoursel
 
 difficultyTag (pick one):
   easy       - single step, direct recall or direct substitution
-  moderate   - two or three steps, or one step with a small twist
-  difficult  - multi-step, or requires combining two ideas
+  medium     - two or three steps, or one step with a small twist
+  hard       - multi-step, or requires combining two ideas
 
 cognitiveTag (pick one - what the student must DO):
   memory      - recall a fact, definition, formula or date
@@ -160,7 +160,7 @@ skillTags (pick one to three - which ABILITY is exercised):
   factual_gk              - general knowledge, current affairs, static facts
   procedural              - following or ordering the steps of a method or experiment
 
-These tags drive each student's weak-area report, so tag honestly and precisely. Do not label everything "moderate"/"application".
+These tags drive each student's weak-area report, so tag honestly and precisely. Do not label everything "medium"/"application".
 
 # QUALITY BAR
 
