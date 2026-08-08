@@ -38,8 +38,8 @@ ARM)** instance with `docker compose up -d`.
 
 ### For administrators
 - **Set test** — generate questions from OpenAI, OpenRouter, NVIDIA NIM,
-  Hugging Face Inference Providers, Amazon Bedrock, or any other
-  OpenAI-compatible endpoint. Full control of
+  Hugging Face, Amazon Bedrock, Azure OpenAI, Google (Gemini or Vertex AI),
+  Oracle Cloud, or any other OpenAI-compatible endpoint. Full control of
   the system prompt, the model, the difficulty and cognitive mix, and the exact
   user message (with a preview of precisely what will be sent).
 - **Import** — when the provider is down, out of credit or unreachable, load
@@ -417,7 +417,9 @@ server/          Fastify API
   prisma/        schema + migrations
   src/lib/       content blocks, grading, analytics, crypto, passwords
   src/llm/       provider adapters, strict-JSON contract, prompts
-                 (bedrock.ts + aws-sigv4.ts: the one non-OpenAI protocol)
+                 bedrock.ts + aws-sigv4.ts, oci.ts + oci-signer.ts: the two
+                 providers with their own protocol and their own signing
+                 google-auth.ts: service-account JWT exchange for Vertex
   src/routes/    auth, student, admin/*
   src/services/  attempt lifecycle, backup/restore
 web/             React frontend

@@ -3,6 +3,7 @@ import { decryptSecret } from '../lib/crypto.js';
 import { LlmError, DEFAULT_AZURE_API_VERSION } from './providers.js';
 import { accessTokenFor, parseServiceAccount, vertexBaseUrl } from './google-auth.js';
 import type { BedrockConfig } from './bedrock.js';
+import type { OciCredentials } from './oci-signer.js';
 
 /**
  * Turning a stored credential into the parameters a call needs.
@@ -33,6 +34,19 @@ export interface AzureMeta {
   apiVersion?: string;
 }
 
+/**
+ * OCI needs five identifiers alongside the private key. None is secret - they
+ * are OCIDs and a fingerprint, all visible in the console - so they live in
+ * meta and only the PEM is encrypted.
+ */
+export interface OciMeta {
+  tenancyId: string;
+  userId: string;
+  fingerprint: string;
+  region: string;
+  compartmentId: string;
+}
+
 /** Vertex is regional and scoped to a project, both read from the key file. */
 export interface VertexMeta {
   projectId: string;
@@ -44,6 +58,7 @@ export interface CallParams {
   baseUrl: string;
   apiKey: string;
   bedrock?: BedrockConfig;
+  oci?: { credentials: OciCredentials; baseUrl?: string };
   dialect?: 'openai' | 'azure' | 'bedrock' | 'oci';
   azure?: { apiVersion: string };
 }
@@ -100,6 +115,22 @@ export async function callParamsFor(
       // normally it is the regional one derived when the credential was saved.
       baseUrl: credential.baseUrl || vertexBaseUrl(meta.projectId, meta.region),
       apiKey: await accessTokenFor(account),
+    };
+  }
+
+  if (credential.provider === 'oci') {
+    const meta = credential.meta as OciMeta | null;
+    if (!meta?.tenancyId || !meta.userId || !meta.fingerprint || !meta.region || !meta.compartmentId) {
+      throw new LlmError('This Oracle Cloud credential is incomplete. Delete it and add it again.');
+    }
+    return {
+      baseUrl: credential.baseUrl,
+      apiKey: '',
+      dialect: 'oci',
+      oci: {
+        credentials: { ...meta, privateKey: secret },
+        baseUrl: credential.baseUrl || undefined,
+      },
     };
   }
 

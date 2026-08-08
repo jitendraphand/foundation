@@ -181,6 +181,29 @@ export const PROVIDERS: Record<string, ProviderDef> = {
     supportsJsonMode: true,
   },
 
+  oci: {
+    id: 'oci',
+    label: 'Oracle Cloud Generative AI',
+    // Derived from the region when the credential is saved.
+    defaultBaseUrl: '',
+    docsUrl: 'https://docs.oracle.com/en-us/iaas/Content/generative-ai/home.htm',
+    keyUrl: 'https://cloud.oracle.com/identity/domains/my-profile/api-keys',
+    modelHint:
+      'The model OCID or its short name, e.g. meta.llama-3.3-70b-instruct or cohere.command-r-plus-08-2024. ' +
+      'Models are available in some regions only.',
+    suggestedModels: [
+      'meta.llama-3.3-70b-instruct',
+      'meta.llama-3.2-90b-vision-instruct',
+      'cohere.command-r-plus-08-2024',
+      'cohere.command-r-08-2024',
+      'xai.grok-3',
+    ],
+    // The chat action has no JSON mode; the contract is held by the prompt and
+    // the repair rounds, as with Bedrock.
+    supportsJsonMode: false,
+    dialect: 'oci',
+  },
+
   custom: {
     id: 'custom',
     label: 'Other OpenAI-compatible endpoint',
@@ -210,7 +233,7 @@ export function describeKeyProblem(provider: string, key: string): { error?: str
   // contains braces, newlines and a PEM block. Every check below is about the
   // shape of a bearer token and would reject a perfectly good key file; the
   // file gets its own, stricter validation in google-auth.ts instead.
-  if (provider === 'vertex') return {};
+  if (provider === 'vertex' || provider === 'oci') return {};
 
   if (/\.\.\.|…/.test(key)) {
     return {
@@ -269,6 +292,15 @@ export interface ChatRequest {
    * request shape around two protocols.
    */
   bedrock?: import('./bedrock.js').BedrockConfig;
+
+  /**
+   * Set for Oracle Cloud only. Like Bedrock it has its own protocol, and
+   * unlike everything else it also signs each request.
+   */
+  oci?: {
+    credentials: import('./oci-signer.js').OciCredentials;
+    baseUrl?: string;
+  };
 
   /** See ProviderDef.dialect. Absent means the ordinary OpenAI shape. */
   dialect?: ProviderDef['dialect'];
@@ -332,6 +364,18 @@ export async function chatComplete(req: ChatRequest): Promise<ChatResponse> {
     const { bedrockChat } = await import('./bedrock.js');
     return bedrockChat({
       config: req.bedrock,
+      modelId: req.model,
+      messages: req.messages,
+      temperature: req.temperature,
+      maxTokens: req.maxTokens,
+    });
+  }
+
+  if (req.oci) {
+    const { ociChat } = await import('./oci.js');
+    return ociChat({
+      credentials: req.oci.credentials,
+      baseUrl: req.oci.baseUrl,
       modelId: req.model,
       messages: req.messages,
       temperature: req.temperature,
@@ -444,7 +488,7 @@ export async function chatComplete(req: ChatRequest): Promise<ChatResponse> {
 
 /** Cheap credential check used by the "Test connection" button. */
 export async function pingProvider(
-  call: Pick<ChatRequest, 'baseUrl' | 'apiKey' | 'model' | 'bedrock'>,
+  call: Pick<ChatRequest, 'baseUrl' | 'apiKey' | 'model' | 'bedrock' | 'oci' | 'dialect' | 'azure'>,
 ): Promise<{ ok: boolean; message: string; latencyMs?: number }> {
   try {
     const res = await chatComplete({

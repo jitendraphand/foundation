@@ -208,6 +208,10 @@ mixed-content block.
 | NVIDIA NIM | `https://integrate.api.nvidia.com/v1` | <https://build.nvidia.com/> | `meta/llama-3.3-70b-instruct` |
 | Hugging Face | `https://router.huggingface.co/v1` | <https://huggingface.co/settings/tokens> | `meta-llama/Llama-3.3-70B-Instruct` |
 | Amazon Bedrock | derived from the region | AWS console, see below | `us.anthropic.claude-sonnet-4-20250514-v1:0` |
+| Azure OpenAI | derived from the resource | Azure portal → Keys and Endpoint | your **deployment** name, e.g. `exam-writer` |
+| Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai` | <https://aistudio.google.com/apikey> | `gemini-2.5-pro` |
+| Google Vertex AI | derived from project + region | service-account JSON, see below | `google/gemini-2.5-pro` |
+| Oracle Cloud | derived from the region | OCI console → API keys, see below | `meta.llama-3.3-70b-instruct` |
 | Other | anything OpenAI-compatible | Groq, Together, a local Ollama, … | whatever it expects |
 
 OpenAI's reasoning models (`o1`/`o3`/`o4`/`gpt-5` lines) are detected
@@ -283,6 +287,39 @@ version suffix are part of the id.
 
 Costs are billed to the AWS account per token, with no free tier — check the
 pricing page for the model before generating a few hundred questions.
+
+### The other clouds
+
+Each of these needs something beyond a key, and each fails in its own
+characteristic way when it is wrong.
+
+**Azure OpenAI.** The model box wants the **deployment name** you chose in
+Azure AI Foundry, not the underlying model — if you deployed `gpt-4o` as
+`exam-writer`, put `exam-writer`. Give the resource name (the part before
+`.openai.azure.com`) or paste the whole endpoint URL from the portal; the key
+is either of the two under *Keys and Endpoint*. The API version is pinned to a
+date and defaults to a current one, which only needs changing on an older
+resource.
+
+**Google, two ways.** *Gemini (AI Studio key)* is an ordinary API key and needs
+nothing else — use it unless your school's policy requires a GCP project.
+*Vertex AI* takes the service-account JSON file itself: create a service
+account with the **Vertex AI User** role, download a JSON key, and paste the
+whole file. The project is read out of the file, so you only choose a region.
+Vertex has no long-lived key — the file is exchanged for an hour-long token
+behind the scenes and re-used until it expires.
+
+**Oracle Cloud.** Four identifiers plus a private key, all from *Identity → My
+profile → API keys*: tenancy OCID, user OCID, the fingerprint shown beside the
+key, and the `.pem` file downloaded when it was created (it must not be
+passphrase-protected). The compartment defaults to the tenancy root. The user
+also needs a policy allowing `use generative-ai-family` in that compartment —
+without it, OCI answers a bare 404 that is indistinguishable from a model that
+does not exist, which is why that error says so.
+
+Models are per-region on all of these. A model enabled in one region is not
+enabled in the next, and that is by far the commonest cause of a credential
+that saves cleanly and then fails on the first real call.
 
 ### When the provider is unavailable
 

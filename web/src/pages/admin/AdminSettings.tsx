@@ -164,6 +164,9 @@ function describeProvider(credential: Credential, providers: ProviderDef[]): str
   if (credential.provider === 'vertex' && meta?.projectId) {
     return `${name} · ${meta.projectId} · ${meta.region ?? ''}`.trim();
   }
+  if (credential.provider === 'oci' && meta?.region) {
+    return `${name} · ${meta.region}`;
+  }
   if (credential.provider === 'azure') {
     // The resource name is the hostname, which is the identifying part.
     const host = (() => {
@@ -328,6 +331,11 @@ function AddCredentialModal({ providers, onClose, onAdded }: { providers: Provid
   // Azure only.
   const [resourceName, setResourceName] = useState('');
   const [apiVersion, setApiVersion] = useState('2024-10-21');
+  // Oracle Cloud only.
+  const [tenancyId, setTenancyId] = useState('');
+  const [userId, setUserId] = useState('');
+  const [fingerprint, setFingerprint] = useState('');
+  const [compartmentId, setCompartmentId] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -335,9 +343,10 @@ function AddCredentialModal({ providers, onClose, onAdded }: { providers: Provid
   const isBedrock = provider === 'bedrock';
   const isAzure = provider === 'azure';
   const isVertex = provider === 'vertex';
+  const isOci = provider === 'oci';
   // Bedrock, Azure and Vertex all derive their endpoint from something else -
   // a region, a resource, a project - so none of them shows a base URL box.
-  const derivesEndpoint = isBedrock || isAzure || isVertex;
+  const derivesEndpoint = isBedrock || isAzure || isVertex || isOci;
 
   // What the label box was last filled in with on the admin's behalf. Changing
   // provider should move a label nobody has touched along with it - otherwise
@@ -360,7 +369,9 @@ function AddCredentialModal({ providers, onClose, onAdded }: { providers: Provid
     // AWS and Google name their regions differently, so carrying us-east-1
     // across to Vertex would offer a region that does not exist there.
     setRegion((current) =>
-      provider === 'vertex'
+      provider === 'oci'
+        ? (current && /^[a-z]{2}-[a-z]+-\d$/.test(current) && current !== 'us-east-1' ? current : 'us-chicago-1')
+        : provider === 'vertex'
         ? (current && !/^[a-z]{2}-[a-z]+-\d$/.test(current) ? current : 'us-central1')
         : provider === 'bedrock'
           ? (current && !/^[a-z]+-[a-z]+\d$/.test(current) ? current : 'us-east-1')
@@ -393,6 +404,15 @@ function AddCredentialModal({ providers, onClose, onAdded }: { providers: Provid
           : {}),
         ...(isAzure ? { resourceName: resourceName.trim(), apiVersion: apiVersion.trim() } : {}),
         ...(isVertex ? { region: region.trim() } : {}),
+        ...(isOci
+          ? {
+              region: region.trim(),
+              tenancyId: tenancyId.trim(),
+              userId: userId.trim(),
+              fingerprint: fingerprint.trim(),
+              compartmentId: compartmentId.trim() || undefined,
+            }
+          : {}),
       });
       onAdded(res.warning);
     } catch (err) {
@@ -483,11 +503,33 @@ function AddCredentialModal({ providers, onClose, onAdded }: { providers: Provid
           </>
         )}
 
+        {isOci && (
+          <>
+            <p className="text-xs text-ink-muted -mb-1">
+              All four values below are on the API key page in the Oracle Cloud console, and in the configuration
+              snippet it offers to generate there. None of them is secret — only the private key is.
+            </p>
+            <Field label="Tenancy OCID" required>
+              <input className="input font-mono text-[11px]" value={tenancyId} onChange={(e) => setTenancyId(e.target.value)} placeholder="ocid1.tenancy.oc1..&hellip;" required />
+            </Field>
+            <Field label="User OCID" required>
+              <input className="input font-mono text-[11px]" value={userId} onChange={(e) => setUserId(e.target.value)} placeholder="ocid1.user.oc1..&hellip;" required />
+            </Field>
+            <Field label="Key fingerprint" required hint="Shown beside the API key: sixteen pairs of hex digits.">
+              <input className="input font-mono text-[11px]" value={fingerprint} onChange={(e) => setFingerprint(e.target.value)} placeholder="20:3b:97:&hellip;" required />
+            </Field>
+            <Field label="Compartment OCID" hint="Which compartment to bill and scope the call to. Leave empty to use the tenancy root.">
+              <input className="input font-mono text-[11px]" value={compartmentId} onChange={(e) => setCompartmentId(e.target.value)} placeholder="ocid1.compartment.oc1..&hellip;" />
+            </Field>
+          </>
+        )}
+
         <Field
           label={
             isBedrock ? (awsAuthMode === 'sigv4' ? 'Secret access key' : 'Bedrock API key')
             : isAzure ? 'Azure API key'
             : isVertex ? 'Service account JSON'
+            : isOci ? 'Private key (PEM)'
             : 'API key'
           }
           required
@@ -501,18 +543,21 @@ function AddCredentialModal({ providers, onClose, onAdded }: { providers: Provid
                 : isVertex
                   ? 'Paste the whole JSON key file you downloaded from IAM & Admin → Service Accounts → Keys, ' +
                     'braces and all. The project is read out of the file. Encrypted before it is stored.'
+                  : isOci
+                    ? 'The .pem file downloaded when you created the API key, starting with -----BEGIN. ' +
+                      'It must not be passphrase-protected. Encrypted before it is stored.'
                   : 'Paste the whole key. Providers show it in full only once, then display a shortened version ' +
                     'like sk-or-v1-… — that shortened form is not a key and will not work. Encrypted before it is stored.'
           }
         >
           {/* The service-account file is far too long for a single line, and
               an admin needs to see they pasted the whole thing. */}
-          {isVertex ? (
+          {isVertex || isOci ? (
             <textarea
               className="input font-mono text-[11px] h-32"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
-              placeholder='{ "type": "service_account", "project_id": "...", ... }'
+              placeholder={isOci ? '-----BEGIN PRIVATE KEY-----\n...' : '{ "type": "service_account", "project_id": "...", ... }'}
               required
               autoComplete="off"
             />
@@ -521,21 +566,23 @@ function AddCredentialModal({ providers, onClose, onAdded }: { providers: Provid
           )}
         </Field>
 
-        {isBedrock || isVertex ? (
+        {isBedrock || isVertex || isOci ? (
           <Field
             label="Region"
             required
             hint={
               isVertex
                 ? 'Vertex is regional and models are enabled per region, e.g. us-central1 or europe-west4.'
-                : 'Bedrock has a separate endpoint in every region, and models are enabled per region. Use the one where you turned the model on.'
+                : isOci
+                  ? 'Oracle regions look like us-chicago-1 or eu-frankfurt-1, and models are available in some only.'
+                  : 'Bedrock has a separate endpoint in every region, and models are enabled per region. Use the one where you turned the model on.'
             }
           >
             <input
               className="input font-mono text-xs"
               value={region}
               onChange={(e) => setRegion(e.target.value)}
-              placeholder={isVertex ? 'us-central1' : 'us-east-1'}
+              placeholder={isVertex ? 'us-central1' : isOci ? 'us-chicago-1' : 'us-east-1'}
               required
             />
           </Field>

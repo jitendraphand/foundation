@@ -6,6 +6,7 @@ import { audit } from '../../middleware/auth.js';
 import { encryptSecret, keyHint } from '../../lib/crypto.js';
 import { PROVIDERS, describeKeyProblem, pingProvider, DEFAULT_AZURE_API_VERSION } from '../../llm/providers.js';
 import { parseServiceAccount, vertexBaseUrl } from '../../llm/google-auth.js';
+import { looksLikeOcid } from '../../llm/oci-signer.js';
 import { callParamsFor, packIamSecret } from '../../llm/credentials.js';
 import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_TEMPLATE } from '../../llm/prompts.js';
 import { COMMON_TIMEZONES, WINDOW_PRESETS, isValidTimezone, zonedNow, formatMinute } from '../../lib/availability.js';
@@ -135,6 +136,65 @@ function buildVertexFields(body: { apiKey: string; region?: string }):
   };
 }
 
+/**
+ * Oracle needs five identifiers plus a private key. Normally all of them are
+ * pasted from the config file Oracle offers to generate on the API key page,
+ * so each is validated for what it actually is - a tenancy OCID in the user
+ * box is the easiest mistake to make and produces a bare 401.
+ */
+function buildOciFields(body: {
+  apiKey: string;
+  tenancyId?: string;
+  userId?: string;
+  fingerprint?: string;
+  region?: string;
+  compartmentId?: string;
+}):
+  | { baseUrl: string; meta: { tenancyId: string; userId: string; fingerprint: string; region: string; compartmentId: string } }
+  | { error: string } {
+  const region = (body.region || '').trim().toLowerCase();
+  if (!region) {
+    return { error: 'Oracle Cloud needs a region, for example us-chicago-1 or eu-frankfurt-1. Models are available per region.' };
+  }
+  if (!/^[a-z]{2}-[a-z]+-\d$/.test(region)) {
+    return { error: `"${region}" does not look like an OCI region. They look like us-chicago-1, eu-frankfurt-1 or ap-mumbai-1.` };
+  }
+
+  const tenancyId = (body.tenancyId || '').trim();
+  const userId = (body.userId || '').trim();
+  const compartmentId = (body.compartmentId || '').trim() || tenancyId;
+
+  for (const [value, kind] of [
+    [tenancyId, 'tenancy'],
+    [userId, 'user'],
+    [compartmentId, 'compartment'],
+  ] as const) {
+    const problem = looksLikeOcid(value, kind);
+    if (problem) return { error: problem };
+  }
+
+  const fingerprint = (body.fingerprint || '').trim().toLowerCase();
+  if (!/^([0-9a-f]{2}:){15}[0-9a-f]{2}$/.test(fingerprint)) {
+    return {
+      error:
+        'The fingerprint should be sixteen pairs of hex digits separated by colons, exactly as shown beside the API key in the console.',
+    };
+  }
+
+  if (!/^-----BEGIN [A-Z ]*PRIVATE KEY-----/.test(body.apiKey.trim())) {
+    return {
+      error:
+        'Paste the private key PEM file that was downloaded when you created the API key, starting with -----BEGIN. ' +
+        'It must not be passphrase-protected.',
+    };
+  }
+
+  return {
+    baseUrl: `https://inference.generativeai.${region}.oci.oraclecloud.com`,
+    meta: { tenancyId, userId, fingerprint, region, compartmentId },
+  };
+}
+
 export default async function adminSettingsRoutes(app: FastifyInstance) {
   // --- LLM API credentials -------------------------------------------------
 
@@ -172,6 +232,12 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
         // Azure: the resource, and the dated API surface it exposes.
         resourceName: z.string().trim().max(120).optional(),
         apiVersion: z.string().trim().max(40).optional(),
+
+        // Oracle Cloud: the identity triple, plus what to bill.
+        tenancyId: z.string().trim().max(200).optional(),
+        userId: z.string().trim().max(200).optional(),
+        fingerprint: z.string().trim().max(100).optional(),
+        compartmentId: z.string().trim().max(200).optional(),
       })
       // A service-account JSON file is far longer than any bearer token.
       .extend({ apiKey: z.string().trim().min(8).max(8192) })
@@ -198,6 +264,13 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
 
     if (body.provider === 'vertex') {
       const built = buildVertexFields(body);
+      if ('error' in built) return reply.code(400).send({ error: built.error });
+      derivedBaseUrl = built.baseUrl;
+      derivedMeta = built.meta;
+    }
+
+    if (body.provider === 'oci') {
+      const built = buildOciFields(body);
       if ('error' in built) return reply.code(400).send({ error: built.error });
       derivedBaseUrl = built.baseUrl;
       derivedMeta = built.meta;
