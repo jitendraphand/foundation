@@ -153,7 +153,11 @@ function BreakdownCharts({ breakdown }: { breakdown: Breakdown }) {
     { title: 'By difficulty', cells: breakdown.byDifficulty ?? {} },
     { title: 'By question type', cells: breakdown.byCognitive ?? {} },
     { title: 'By skill', cells: breakdown.bySkill ?? {} },
-    { title: 'By topic', cells: breakdown.byTopic ?? {} },
+    // No topic breakdown here. A topic split on one paper is three or four
+    // questions per row, which is too little to mean anything - a student
+    // reading "Kinematics 33%" off one wrong answer draws a conclusion the
+    // data does not support. Difficulty, question type and skill hold across
+    // the whole paper, so they survive that objection.
   ].filter((s) => Object.keys(s.cells).length > 0);
 
   if (sections.length === 0) return null;

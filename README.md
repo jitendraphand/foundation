@@ -21,8 +21,13 @@ ARM)** instance with `docker compose up -d`.
 - Every account also gets a permanent user ID (`USR-00001`). Names, spellings
   and even usernames can be corrected later; the user ID never changes, so
   results stay attached to the right person.
-- Dashboard showing live tests, past scores, a percentage trend chart, a
-  per-subject breakdown, and the areas they are weakest in.
+- Dashboard showing live tests, past scores, a percentage trend chart and the
+  skills they are weakest in. Deliberately no average-by-subject and no
+  by-topic split: both invite "am I a maths person" off two or three papers,
+  which the sample cannot support, and it is the kind of label a fourteen-year-
+  old keeps. The weak-skill list answers the useful version — what to practise
+  next — without handing out an identity. Teachers still get both, across a
+  whole class, where the sample is large enough to mean something.
 - Timed test runner showing **one question at a time**, with a numbered pane to
   jump straight to any question — a sidebar on a laptop, a one-line bar under
   the header on a phone that opens the grid where a thumb can reach it. Server-authoritative clock, continuous

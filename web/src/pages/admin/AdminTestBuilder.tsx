@@ -353,7 +353,6 @@ function QuestionPicker({ test, locked, onChanged }: { test: TestDetail; locked:
                       <Badge>{question.format.replace('_', ' ').toLowerCase()}</Badge>
                       <Badge>{humanizeTag(question.difficultyTag)}</Badge>
                       <Badge>{humanizeTag(question.cognitiveTag)}</Badge>
-                      {question.topic && <span className="text-[11px] text-ink-faint">{question.topic}</span>}
                     </div>
                   </div>
                 </li>

@@ -105,7 +105,6 @@ export default function StudentDashboard() {
       ) : (
         <>
           <ProgressChart results={results} />
-          <SubjectChart results={results} />
           <ResultsTable results={results} />
         </>
       )}
@@ -292,40 +291,18 @@ function ProgressChart({ results }: { results: ResultRow[] }) {
   );
 }
 
-function SubjectChart({ results }: { results: ResultRow[] }) {
-  const bySubject = new Map<string, { total: number; count: number }>();
-  for (const r of results) {
-    const entry = bySubject.get(r.subject) ?? { total: 0, count: 0 };
-    entry.total += r.percentage;
-    entry.count += 1;
-    bySubject.set(r.subject, entry);
-  }
-
-  const categories = [...bySubject.keys()];
-  if (categories.length < 2) return null; // one bar is a stat tile, not a chart
-
-  const values = categories.map((c) => {
-    const entry = bySubject.get(c)!;
-    return Math.round((entry.total / entry.count) * 10) / 10;
-  });
-
-  return (
-    <Card title="Average by subject">
-      <BarChart
-        categories={categories}
-        // One series, one colour for every bar - never a value ramp.
-        series={[{ name: 'Average percentage', values }]}
-        yMax={100}
-        yLabel="Percentage"
-        formatValue={(n) => `${n}%`}
-        showValues={categories.length <= 8}
-        reference={{ value: 35, label: 'Pass mark' }}
-        height={250}
-        table={<DataTable headers={['Subject', 'Average %', 'Tests']} rows={categories.map((c, i) => [c, values[i], bySubject.get(c)!.count])} />}
-      />
-    </Card>
-  );
-}
+/*
+ * "Average by subject" used to live here and has been removed.
+ *
+ * It invites exactly one comparison - am I a maths person or an English person
+ * - off two or three papers per subject, which is far too little to support
+ * it, and it is the kind of label a fourteen-year-old keeps. The per-skill
+ * weak-area list below answers the useful version of the same question, "what
+ * should I practise next", without handing out an identity.
+ *
+ * The same chart over a whole cohort is genuinely useful and still exists, on
+ * the admin overview, where the sample is a class rather than one child.
+ */
 
 function ResultsTable({ results }: { results: ResultRow[] }) {
   return (

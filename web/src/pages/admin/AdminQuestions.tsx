@@ -441,7 +441,6 @@ function QuestionCard({
             )}
             <span className="ml-auto text-[11px] text-ink-faint truncate max-w-[220px]">
               {question.subject}
-              {question.topic ? ` · ${question.topic}` : ''}
               {question.sourceModel ? ` · ${question.sourceModel}` : ''}
             </span>
           </div>
