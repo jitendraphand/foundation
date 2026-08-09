@@ -4,10 +4,10 @@ import { Prisma } from '@prisma/client';
 import { prisma } from '../db.js';
 import { authenticate, requireActivitiesComplete, requireFreshPassword } from '../middleware/auth.js';
 import { finalizeAttempt, buildLayout, publicQuestion, remainingMs, resultsAreVisible, sweepExpiredAttempts } from '../services/attempt.js';
-import { generateStepUp } from '../llm/step-up.js';
+import { generateStepUp, stepUpAllowanceFor } from '../llm/step-up.js';
 import { proctoringFor, proctorStateOf, recordProctorEvent } from '../services/proctoring.js';
 import { LlmError } from '../llm/providers.js';
-import { findWeakAreas, type Breakdown } from '../lib/analytics.js';
+import { findWeakAreas, STUDENT_AXES, type Breakdown } from '../lib/analytics.js';
 import { evaluateAvailability } from '../lib/availability.js';
 import { getSchoolTimezone } from '../services/settings.js';
 import { validateResponse } from '../lib/grading.js';
@@ -160,7 +160,8 @@ export default async function studentRoutes(app: FastifyInstance) {
 
     const weakAreas = findWeakAreas(
       released.map((a) => a.breakdown as unknown as Breakdown).filter(Boolean),
-      { minSample: 3, accuracyThreshold: 0.7, limit: 6 },
+      // No topic or subtopic: see the note on findWeakAreas.
+      { minSample: 3, accuracyThreshold: 0.7, limit: 6, axes: STUDENT_AXES },
     );
 
     return {
@@ -675,11 +676,25 @@ export default async function studentRoutes(app: FastifyInstance) {
 
     try {
       const result = await generateStepUp({ question, mode: body.mode, studentId: userId });
-      return { ok: true, ...result };
+      // What is left afterwards, so the buttons can say so without a second
+      // round trip.
+      const allowance = await stepUpAllowanceFor(userId);
+      return { ok: true, ...result, allowance };
     } catch (err) {
       if (err instanceof LlmError) return reply.code(502).send({ error: err.message });
       throw err;
     }
+  });
+
+  /**
+   * How many Step-up tests this student has left today.
+   *
+   * Read by the result screen so the buttons can say "2 left today" rather than
+   * looking available and then refusing. Cheap: one count against an indexed
+   * column.
+   */
+  app.get('/api/step-up/allowance', async (request) => {
+    return { allowance: await stepUpAllowanceFor(request.user!.sub) };
   });
 }
 

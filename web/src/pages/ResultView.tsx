@@ -301,9 +301,29 @@ function QuestionReview({ question, index, showAnswers }: { question: PaperQuest
  * comparing their working against the explanation should not lose it by
  * clicking through.
  */
+interface Allowance {
+  /** Papers a day; 0 means no limit. */
+  quota: number;
+  used: number;
+  /** null when there is no limit. */
+  remaining: number | null;
+}
+
 function StepUp({ questionId }: { questionId: string }) {
   const [busy, setBusy] = useState<'SAME' | 'LADDER' | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [allowance, setAllowance] = useState<Allowance | null>(null);
+
+  // Asked once. A student out of Step-ups should be told before pressing the
+  // button, not after waiting for a tab that then reports a refusal.
+  useEffect(() => {
+    api
+      .get<{ allowance: Allowance }>('/api/step-up/allowance')
+      .then((res) => setAllowance(res.allowance))
+      .catch(() => undefined);
+  }, []);
+
+  const spent = allowance?.remaining === 0;
 
   const start = async (mode: 'SAME' | 'LADDER') => {
     setBusy(mode);
@@ -314,7 +334,8 @@ function StepUp({ questionId }: { questionId: string }) {
     if (tab) tab.document.write('<title>Building your Step-up test…</title><p style="font:14px system-ui;padding:2rem">Writing five questions for you. This takes a few seconds.</p>');
 
     try {
-      const built = await api.post<{ testId: string }>('/api/step-up', { questionId, mode });
+      const built = await api.post<{ testId: string; allowance?: Allowance }>('/api/step-up', { questionId, mode });
+      if (built.allowance) setAllowance(built.allowance);
       // Start it here rather than server-side, so the paper opens through the
       // same route as any other test and keeps its checks - attempt limits,
       // availability, the activity gate.
@@ -332,14 +353,34 @@ function StepUp({ questionId }: { questionId: string }) {
 
   return (
     <div className="mt-4 rounded-lg border border-line bg-surface-sunken p-3">
-      <p className="text-xs text-ink-muted mb-2">Want more practice on this?</p>
-      <div className="flex flex-wrap gap-2">
-        <button type="button" className="btn-secondary btn-sm" disabled={busy !== null} onClick={() => void start('SAME')}>
+      <p className="text-xs text-ink-muted mb-2">
+        {spent ? 'You have used all of today’s practice tests.' : 'Want more practice on this?'}
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          className="btn-secondary btn-sm"
+          disabled={busy !== null || spent}
+          onClick={() => void start('SAME')}
+        >
           {busy === 'SAME' ? <Spinner label="Writing" /> : '5 more like this'}
         </button>
-        <button type="button" className="btn-secondary btn-sm" disabled={busy !== null} onClick={() => void start('LADDER')}>
+        <button
+          type="button"
+          className="btn-secondary btn-sm"
+          disabled={busy !== null || spent}
+          onClick={() => void start('LADDER')}
+        >
           {busy === 'LADDER' ? <Spinner label="Writing" /> : 'Build up to this'}
         </button>
+        {/* Only when there is a limit, and only once it is worth knowing. */}
+        {allowance?.remaining !== null && allowance !== null && (
+          <span className="text-[11px] text-ink-faint">
+            {allowance.remaining === 0
+              ? 'Come back tomorrow.'
+              : `${allowance.remaining} left today`}
+          </span>
+        )}
       </div>
       {error && <p className="text-xs text-bad mt-2">{error}</p>}
     </div>

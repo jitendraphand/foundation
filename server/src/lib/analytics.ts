@@ -88,8 +88,13 @@ export function buildBreakdown(rows: GradedRow[]): Breakdown {
 
 // --- Weak-area detection ---------------------------------------------------
 
+export const ALL_AXES = ['difficulty', 'cognitive', 'skill', 'topic', 'subtopic'] as const;
+
+/** What a student is shown: the axes that hold across a whole paper. */
+export const STUDENT_AXES = ['difficulty', 'cognitive', 'skill'] as const;
+
 export interface WeakArea {
-  axis: 'difficulty' | 'cognitive' | 'skill' | 'topic' | 'subtopic';
+  axis: (typeof ALL_AXES)[number];
   key: string;
   accuracy: number;
   correct: number;
@@ -107,17 +112,34 @@ export interface WeakArea {
  */
 export function findWeakAreas(
   breakdowns: Breakdown[],
-  opts: { minSample?: number; accuracyThreshold?: number; limit?: number } = {},
+  opts: {
+    minSample?: number;
+    accuracyThreshold?: number;
+    limit?: number;
+    /**
+     * Which axes to look at. The student's own "where to focus next" asks for
+     * difficulty, cognitive and skill only: a topic row there reads as "you are
+     * bad at the Nervous System", drawn from the handful of questions on it that
+     * happened to be on one paper, which is a conclusion the data cannot carry.
+     * The teacher keeps every axis, because they have the whole cohort and know
+     * how many questions are behind each row.
+     *
+     * Filtered here rather than by the caller afterwards, so `limit` still
+     * returns that many rows instead of however many survive.
+     */
+    axes?: ReadonlyArray<WeakArea['axis']>;
+  } = {},
 ): WeakArea[] {
   const minSample = opts.minSample ?? 3;
   const threshold = opts.accuracyThreshold ?? 0.7;
   const limit = opts.limit ?? 12;
+  const wanted = opts.axes ?? ALL_AXES;
 
   const merged: Record<string, Record<string, { correct: number; total: number }>> = {
     difficulty: {}, cognitive: {}, skill: {}, topic: {}, subtopic: {},
   };
 
-  const axisMap: Array<[keyof Breakdown, string]> = [
+  const axisMap: Array<[keyof Breakdown, WeakArea['axis']]> = [
     ['byDifficulty', 'difficulty'],
     ['byCognitive', 'cognitive'],
     ['bySkill', 'skill'],
@@ -127,6 +149,7 @@ export function findWeakAreas(
 
   for (const b of breakdowns) {
     for (const [field, axis] of axisMap) {
+      if (!wanted.includes(axis)) continue;
       for (const [key, cell] of Object.entries(b[field] ?? {})) {
         const acc = (merged[axis][key] ??= { correct: 0, total: 0 });
         acc.correct += cell.correct;

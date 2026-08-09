@@ -562,10 +562,28 @@ original question with its options and tags) and `{{count}}`. Everything around
 them is ordinary prose — rewrite it freely, and delete a placeholder if you
 would rather write that part yourself.
 
-It is limited to six a student an hour, and a student can only build on a
-question from a paper they actually sat whose results have been released — both
-because this spends the school's API budget, and because otherwise it would be
-a way to read questions out of the bank by guessing ids.
+**Each student may build** sets the daily allowance — five by default, counted
+from midnight in the school timezone. This is the one feature a student can
+spend the school's API budget on themselves, several times an afternoon, with
+nobody approving it, so it has a number rather than only a rate limit: six an
+hour is 144 a day, which is not a budget. The student is told how many they have
+left, and the buttons grey out when they run out rather than failing after the
+wait. Set it to **0** for no limit, and watch the provider bill.
+
+An install configured before this existed takes the default of five rather than
+"unlimited", so upgrading tightens rather than loosens. Deleting a Step-up paper
+does not refund it: the call was still made.
+
+A student can only build on a question from a paper they actually sat whose
+results have been released — otherwise this would be a way to read questions out
+of the bank by guessing ids. There is still a hard limit of six an hour on top,
+as a brake on a runaway client.
+
+Neither the questions nor the options are shuffled on a Step-up paper. There is
+nobody to copy from — it is generated for one student — and shuffling actively
+breaks it: a ladder is meaningless out of order, and "which labelled part
+receives signals?" with options A–D matching the labels on the diagram becomes
+nonsense when option A is shown as D.
 
 The generated questions belong to the student, so they never appear in anyone's
 review queue, and the papers are practice tests: segregated from class results
@@ -879,6 +897,22 @@ score, breakdown and — if the test allows it — the correct answers. Clicking
 
 Practice tests are exempt: their results are always immediate, so the release
 buttons do not appear for them.
+
+### What a student sees about their own weaknesses
+
+Their dashboard has a **Where to focus next** panel, built from the questions
+they have actually answered on released papers. It reports three things:
+difficulty, question type and skill.
+
+Deliberately not topic or subtopic. Those hold across a syllabus but not across
+one child's handful of answers: "Nervous System 0%" off two wrong questions is a
+conclusion the data cannot carry, and a fourteen-year-old reading it has no way
+to know that. Difficulty, question type and skill accumulate across every paper
+they sit, so they mean something by the time they appear.
+
+Their teacher keeps every axis — under **Students → Performance** and on each
+student's own page — because a teacher has the whole cohort behind each row and
+can see how many questions it rests on.
 
 ### Backups
 

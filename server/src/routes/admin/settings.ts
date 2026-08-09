@@ -7,7 +7,7 @@ import { encryptSecret, keyHint } from '../../lib/crypto.js';
 import { PROVIDERS, describeKeyProblem, pingProvider, DEFAULT_AZURE_API_VERSION } from '../../llm/providers.js';
 import { parseServiceAccount, vertexBaseUrl } from '../../llm/google-auth.js';
 import { looksLikeOcid } from '../../llm/oci-signer.js';
-import { getStepUpConfig, setStepUpConfig } from '../../llm/step-up.js';
+import { getStepUpConfig, setStepUpConfig, DEFAULT_STEP_UP_QUOTA } from '../../llm/step-up.js';
 import { getImageConfig, setImageConfig } from '../../llm/images.js';
 import { capabilitiesOf, imageProblem, imageSupportOf } from '../../llm/capabilities.js';
 import { callParamsFor, packIamSecret } from '../../llm/credentials.js';
@@ -556,6 +556,8 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
       .object({
         credentialId: z.string().uuid().nullable(),
         model: z.string().max(200).optional(),
+        /** Papers per student per school day. 0 removes the limit entirely. */
+        dailyQuota: z.number().int().min(0).max(100).optional(),
       })
       .parse(request.body);
 
@@ -575,15 +577,20 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: 'Choose a model, or set a default model on that credential first.' });
     }
 
-    await setStepUpConfig({ credentialId: credential.id, model });
+    const dailyQuota = body.dailyQuota ?? DEFAULT_STEP_UP_QUOTA;
+    await setStepUpConfig({ credentialId: credential.id, model, dailyQuota });
     await audit(request.user!.sub, 'settings.step_up', {
-      ip: request.ip, detail: { credentialId: credential.id, model },
+      ip: request.ip, detail: { credentialId: credential.id, model, dailyQuota },
     });
 
     return {
       ok: true,
-      config: { credentialId: credential.id, model },
-      message: `Step-up tests will use ${credential.label} (${model}).`,
+      config: { credentialId: credential.id, model, dailyQuota },
+      message:
+        `Step-up tests will use ${credential.label} (${model}), ` +
+        (dailyQuota > 0
+          ? `${dailyQuota} per student per day.`
+          : 'with no daily limit per student — watch the provider bill.'),
     };
   });
 

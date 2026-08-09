@@ -1,4 +1,6 @@
 import { prisma } from '../db.js';
+import { zonedNow } from '../lib/availability.js';
+import { getSchoolTimezone } from '../services/settings.js';
 import { callParamsFor } from './credentials.js';
 import { LlmError, PROVIDERS } from './providers.js';
 import { chatWithFallback } from './resilience.js';
@@ -117,15 +119,38 @@ async function stepUpPrompts(): Promise<{ systemPrompt: string; userTemplate: st
 /** Which provider Step-up uses, chosen by an administrator. */
 export const STEP_UP_SETTING = 'stepup.provider';
 
+/**
+ * How many Step-up papers one student may generate in a school day, unless an
+ * administrator says otherwise.
+ *
+ * Step-up is the one feature a student can spend the school's API budget on
+ * themselves, several times an afternoon, without anybody approving it. The
+ * rate limit already stops a runaway loop, but 6 an hour is 144 a day, which is
+ * not a budget - it is an absence of one. Five is enough for the purpose (a
+ * student works through the questions they got wrong on one paper) and small
+ * enough that a class of thirty cannot surprise anybody with a bill.
+ */
+export const DEFAULT_STEP_UP_QUOTA = 5;
+
 export interface StepUpConfig {
   credentialId: string;
   model?: string;
+  /** Papers per student per school day. 0 means no limit at all. */
+  dailyQuota?: number;
 }
 
 export async function getStepUpConfig(): Promise<StepUpConfig | null> {
   const row = await prisma.setting.findUnique({ where: { key: STEP_UP_SETTING } }).catch(() => null);
   const value = row?.value as Partial<StepUpConfig> | null;
-  return value?.credentialId ? { credentialId: value.credentialId, model: value.model } : null;
+  if (!value?.credentialId) return null;
+  return {
+    credentialId: value.credentialId,
+    model: value.model,
+    // Absent means this was configured before quotas existed. The default
+    // applies rather than "unlimited", which would leave exactly the installs
+    // that never chose a number with no limit at all.
+    dailyQuota: typeof value.dailyQuota === 'number' ? value.dailyQuota : DEFAULT_STEP_UP_QUOTA,
+  };
 }
 
 export async function setStepUpConfig(config: StepUpConfig | null): Promise<void> {
@@ -133,12 +158,70 @@ export async function setStepUpConfig(config: StepUpConfig | null): Promise<void
     await prisma.setting.deleteMany({ where: { key: STEP_UP_SETTING } });
     return;
   }
-  const value = { credentialId: config.credentialId, ...(config.model ? { model: config.model } : {}) };
+  const value = {
+    credentialId: config.credentialId,
+    ...(config.model ? { model: config.model } : {}),
+    dailyQuota: config.dailyQuota ?? DEFAULT_STEP_UP_QUOTA,
+  };
   await prisma.setting.upsert({
     where: { key: STEP_UP_SETTING },
     update: { value },
     create: { key: STEP_UP_SETTING, value },
   });
+}
+
+/** Marks a test as one Step-up built, so the quota has something to count. */
+const STEP_UP_MARK = { stepUp: true };
+
+/**
+ * The start of today, in the school's own timezone.
+ *
+ * Not UTC midnight: in India that falls at half past five in the morning, so a
+ * student's allowance would appear to reset in the middle of the night and then
+ * again mid-afternoon relative to what they expect. Seconds are dropped, which
+ * can only widen the day by under a minute.
+ *
+ * A day on which the clocks change is an hour out. For a quota that is not
+ * worth the arithmetic.
+ */
+async function startOfSchoolDay(now = new Date()): Promise<Date> {
+  const timezone = await getSchoolTimezone();
+  const { minuteOfDay } = zonedNow(timezone, now);
+  const start = new Date(now.getTime() - minuteOfDay * 60_000);
+  start.setSeconds(0, 0);
+  return start;
+}
+
+export interface StepUpAllowance {
+  /** Papers a day. 0 means no limit. */
+  quota: number;
+  used: number;
+  /** null when there is no limit. */
+  remaining: number | null;
+}
+
+/**
+ * How much of today's allowance this student has left.
+ *
+ * Counts papers built, including any since deleted: a student who deletes a
+ * Step-up paper has still spent the call that made it, and refunding it would
+ * be a way round the limit.
+ */
+export async function stepUpAllowanceFor(studentId: string): Promise<StepUpAllowance> {
+  const config = await getStepUpConfig();
+  const quota = config?.dailyQuota ?? DEFAULT_STEP_UP_QUOTA;
+  if (quota <= 0) return { quota: 0, used: 0, remaining: null };
+
+  const used = await prisma.test.count({
+    where: {
+      createdById: studentId,
+      kind: 'PRACTICE',
+      meta: { path: ['stepUp'], equals: true },
+      createdAt: { gte: await startOfSchoolDay() },
+    },
+  });
+
+  return { quota, used, remaining: Math.max(0, quota - used) };
 }
 
 export interface StepUpResult {
@@ -164,6 +247,17 @@ export async function generateStepUp(args: {
   if (!config) {
     throw new LlmError(
       'Step-up tests are not set up yet. Ask your teacher to choose a provider for them in Settings.',
+    );
+  }
+
+  // Checked before anything is spent. The message names the number, because
+  // "you have reached your limit" without one leaves a fourteen-year-old with
+  // nothing to do but press the button again.
+  const allowance = await stepUpAllowanceFor(args.studentId);
+  if (allowance.remaining === 0) {
+    throw new LlmError(
+      `You have used all ${allowance.quota} of today's Step-up tests. You can build more tomorrow, or ask your ` +
+        'teacher for extra practice.',
     );
   }
 
@@ -291,9 +385,18 @@ export async function generateStepUp(args: {
         durationMinutes: Math.max(5, Math.ceil((rows.reduce((n, r) => n + r.estimatedSeconds, 0) * 1.5) / 60)),
         maxAttempts: 1,
         shuffleQuestions: false, // a ladder is meaningless out of order
-        shuffleOptions: true,
+        // Nor are the options shuffled. A Step-up paper is generated fresh for
+        // one student, so there is nobody to copy from and nothing to defend
+        // against - and shuffling actively harms it: "which labelled part
+        // receives signals?" with options A, B, C, D matching labels on the
+        // diagram becomes B, C, D, A, so option A reads "D". The model also
+        // writes a ladder's options in a deliberate order, easiest wrong answer
+        // first, and reordering throws that away.
+        shuffleOptions: false,
         showAnswersAfter: true,
         publishedAt: new Date(),
+        // What the daily allowance counts; see stepUpAllowanceFor.
+        meta: STEP_UP_MARK,
       },
     });
 

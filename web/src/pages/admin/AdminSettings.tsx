@@ -829,16 +829,18 @@ function AddCredentialModal({ providers, onClose, onAdded }: { providers: Provid
 function StepUpSettings({ credentials }: { credentials: Credential[] }) {
   const [credentialId, setCredentialId] = useState('');
   const [model, setModel] = useState('');
+  const [dailyQuota, setDailyQuota] = useState('5');
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     api
-      .get<{ config: { credentialId: string; model?: string } | null }>('/api/admin/step-up')
+      .get<{ config: { credentialId: string; model?: string; dailyQuota?: number } | null }>('/api/admin/step-up')
       .then((res) => {
         setCredentialId(res.config?.credentialId ?? '');
         setModel(res.config?.model ?? '');
+        setDailyQuota(String(res.config?.dailyQuota ?? 5));
       })
       .catch(() => undefined);
   }, []);
@@ -850,6 +852,7 @@ function StepUpSettings({ credentials }: { credentials: Credential[] }) {
       const res = await api.put<{ message: string }>('/api/admin/step-up', {
         credentialId: credentialId || null,
         model: model.trim() || undefined,
+        dailyQuota: Number(dailyQuota) || 0,
       });
       setNotice(res.message);
     } catch (err) {
@@ -890,6 +893,32 @@ function StepUpSettings({ credentials }: { credentials: Credential[] }) {
             placeholder={chosen?.defaultModel ?? ''}
             disabled={!credentialId}
           />
+        </Field>
+      </div>
+
+      <div className="mt-4">
+        <Field
+          label="Each student may build"
+          hint={
+            Number(dailyQuota) > 0
+              ? 'Per student, per day, counted from midnight in the school timezone. Students are told how many they have left.'
+              : 'No limit. A class of thirty pressing this all afternoon is a real bill — set a number unless you are watching it.'
+          }
+        >
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              min={0}
+              max={100}
+              className="input w-24"
+              value={dailyQuota}
+              onChange={(e) => setDailyQuota(e.target.value)}
+              disabled={!credentialId}
+            />
+            <span className="text-sm text-ink-muted">
+              {Number(dailyQuota) > 0 ? 'a day' : 'as many as they like'}
+            </span>
+          </div>
         </Field>
       </div>
 
