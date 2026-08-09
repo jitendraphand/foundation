@@ -773,6 +773,29 @@ is exactly what the backup feature is for. Download an archive regularly.
 
 ## 8. Troubleshooting
 
+### "Request failed (502)" on the sign-in page
+
+The page loads, so the web container is fine — 502 means Caddy cannot reach the
+**API** container. It is down or restarting, and the reason is always in its
+log:
+
+```bash
+docker compose ps            # is api "Up", or "Restarting"?
+docker compose logs api --tail=50
+```
+
+The API prints a framed explanation for the failures that actually happen —
+invalid secrets in `.env`, a database whose migration history disagrees with its
+tables, a database that never came up. Follow what it says.
+
+If `docker compose ps` shows **no api container at all**, the image did not
+build. Rebuild in the foreground so the error is visible instead of scrolling
+past:
+
+```bash
+docker compose build api
+```
+
 **The site does not load at all**
 
 ```bash

@@ -22,28 +22,45 @@ FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 
+# Runtime essentials, from Debian's own repository so this layer cannot fail
+# for a reason outside the machine.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      openssl ca-certificates tini \
+    && rm -rf /var/lib/apt/lists/*
+
 # pg_dump / pg_restore, for the backup feature.
 #
-# Pinned to the same major version as the database (postgres:16 in
-# docker-compose.yml), and taken from the PostgreSQL project's own apt
-# repository because Debian bookworm ships only version 15. pg_dump refuses to
-# dump a server newer than itself, so the distribution package produces
-# "aborting because of server version mismatch" on every backup.
+# Debian bookworm ships PostgreSQL client 15, and pg_dump refuses to dump a
+# server newer than itself - so against the postgres:16 database every backup
+# fails with "aborting because of server version mismatch". The matching client
+# comes from the PostgreSQL project's own apt repository.
 #
-# Keep PG_MAJOR in step with the database image if it is ever upgraded. The
-# server also picks a matching binary at runtime, so a mismatch degrades to a
-# clear error rather than a broken backup.
+# That repository is a third party, and reaching it is the one part of this
+# build that depends on a host nobody here controls. So it is attempted, not
+# required: if the key or the repo cannot be fetched, the build falls back to
+# Debian's client and carries on. The server picks a matching binary at runtime
+# and, finding none, fails the backup with a message naming the package to
+# install. A degraded backup is a far better outcome than an image that will
+# not build, which takes the whole system down with it.
+#
+# Keep PG_MAJOR in step with the database image if it is ever upgraded.
 ARG PG_MAJOR=16
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      openssl ca-certificates curl gnupg tini \
-    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-         | gpg --dearmor -o /usr/share/keyrings/pgdg.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
-         > /etc/apt/sources.list.d/pgdg.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends "postgresql-client-${PG_MAJOR}" \
-    && apt-get purge -y curl gnupg && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends curl gnupg; \
+    if curl -fsS --max-time 30 -o /tmp/pgdg.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+       && gpg --dearmor -o /usr/share/keyrings/pgdg.gpg /tmp/pgdg.asc; then \
+      echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
+        > /etc/apt/sources.list.d/pgdg.list; \
+      apt-get update || { echo "[build] PGDG unreachable, using Debian's client"; rm -f /etc/apt/sources.list.d/pgdg.list; apt-get update; }; \
+    else \
+      echo "[build] could not fetch the PGDG signing key, using Debian's client"; \
+    fi; \
+    apt-get install -y --no-install-recommends "postgresql-client-${PG_MAJOR}" \
+      || apt-get install -y --no-install-recommends postgresql-client; \
+    pg_dump --version; \
+    apt-get purge -y curl gnupg; \
+    rm -rf /var/lib/apt/lists/* /tmp/pgdg.asc
 
 COPY package.json package-lock.json* ./
 RUN npm install --omit=dev --no-audit --no-fund
