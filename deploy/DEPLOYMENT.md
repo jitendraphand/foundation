@@ -414,7 +414,13 @@ whole file. The project is read out of the file, so you only choose a region.
 Vertex has no long-lived key — the file is exchanged for an hour-long token
 behind the scenes and re-used until it expires.
 
-**Oracle Cloud.** Four identifiers plus a private key, all from *Identity → My
+**Oracle Cloud** caps a completion at 4096 tokens per model and rejects any
+request asking for more, rather than returning less. A run is therefore split
+into more, smaller calls there — two questions each, or one for a reasoning
+model — which is handled automatically and shows in the run's own notes. It is
+slower than the same run on Bedrock or OpenAI, not less reliable.
+
+**Oracle Cloud setup.** Four identifiers plus a private key, all from *Identity → My
 profile → API keys*: tenancy OCID, user OCID, the fingerprint shown beside the
 key, and the `.pem` file downloaded when it was created (it must not be
 passphrase-protected). The compartment defaults to the tenancy root. The user

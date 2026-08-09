@@ -168,8 +168,10 @@ export async function generateStepUp(args: {
             temperature: 0.5,
             jsonMode: providerDef.supportsJsonMode,
             // Five questions with worked explanations, plus room for a
-            // reasoning model to think first.
-            maxTokens: 12_000,
+            // reasoning model to think first - but never more than the
+            // provider will accept. Oracle rejects the whole call above its
+            // ceiling rather than truncating.
+            maxTokens: Math.min(12_000, providerDef.maxOutputTokens ?? 12_000),
           },
         },
       ],

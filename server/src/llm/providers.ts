@@ -33,6 +33,19 @@ export interface ProviderDef {
    *   oci     its own protocol and its own request signing; see oci.ts
    */
   dialect?: 'openai' | 'azure' | 'bedrock' | 'oci';
+  /**
+   * The largest completion this provider will accept a request for.
+   *
+   * Not a suggestion: OCI rejects the whole call with 400 when maxTokens is
+   * over its limit, so asking for more is not merely wasteful, it fails. Left
+   * undefined where the ceiling is high enough that our own 32k cap binds
+   * first.
+   *
+   * It also decides how many questions fit in one call - see planBatches -
+   * because clamping the request without shrinking the batch just moves the
+   * failure from a clear 400 to a truncated reply that will not parse.
+   */
+  maxOutputTokens?: number;
 }
 
 export const PROVIDERS: Record<string, ProviderDef> = {
@@ -202,6 +215,10 @@ export const PROVIDERS: Record<string, ProviderDef> = {
     // the repair rounds, as with Bedrock.
     supportsJsonMode: false,
     dialect: 'oci',
+    // Oracle caps completions per model and refuses the request outright above
+    // it: "Invalid 'maxTokens': Value is greater than maximum: 4096". 4096 is
+    // the ceiling for the Llama and Cohere models it hosts.
+    maxOutputTokens: 4096,
   },
 
   custom: {

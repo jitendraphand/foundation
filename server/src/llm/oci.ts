@@ -39,9 +39,19 @@ function apiFormatFor(modelId: string): 'COHERE' | 'GENERIC' {
   return /(^|\.)cohere\b|command/i.test(modelId) ? 'COHERE' : 'GENERIC';
 }
 
+/**
+ * Oracle refuses a request asking for more than the model allows - 400 with
+ * "Invalid 'maxTokens': Value is greater than maximum: 4096" - rather than
+ * quietly giving less. Callers size their own budget from the provider
+ * definition, but this clamps as well: a 400 here reads as a broken
+ * integration, and no caller should be able to cause one by asking for too
+ * much.
+ */
+const OCI_MAX_TOKENS = 4096;
+
 function toChatRequest(req: OciRequest) {
   const format = apiFormatFor(req.modelId);
-  const maxTokens = req.maxTokens ?? 8000;
+  const maxTokens = Math.min(req.maxTokens ?? 4000, OCI_MAX_TOKENS);
   const temperature = req.temperature ?? 0.4;
 
   if (format === 'COHERE') {

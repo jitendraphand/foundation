@@ -194,7 +194,7 @@ function sortTagsIntoAxes(
 async function repairRejected(args: {
   call: CallParams;
   opts: GenerateOptions;
-  providerDef: { supportsJsonMode: boolean };
+  providerDef: { supportsJsonMode: boolean; maxOutputTokens?: number };
   systemPrompt: string;
   questions: LlmQuestion[];
   rejected: Array<{ index: number; reason: string }>;
@@ -239,7 +239,7 @@ async function repairRejected(args: {
       messages,
       temperature: 0.1,
       jsonMode: args.providerDef.supportsJsonMode,
-      maxTokens: Math.min(32000, args.tokensPerQuestion * Math.max(1, rejected.length)),
+      maxTokens: tokenBudget(args.tokensPerQuestion, rejected.length, args.providerDef.maxOutputTokens),
     });
   } catch {
     // The repair is a bonus, never a reason to fail a run that produced work.
@@ -399,6 +399,33 @@ function firstLineOf(question: { content?: { blocks?: Array<Record<string, unkno
   return line.replace(/\s+/g, ' ').slice(0, 120);
 }
 
+/**
+ * How many questions one call may ask for, given what the provider will let us
+ * request as a completion.
+ *
+ * Ten is comfortable where the ceiling is generous. Oracle Cloud caps a
+ * completion at 4096 tokens and rejects anything larger outright, which at
+ * ~1400 tokens a question is two - so on OCI a run is more, smaller calls
+ * rather than one that fails.
+ *
+ * Clamping the token request alone would be worse than useless: the call would
+ * succeed and the reply would be cut off mid-JSON, turning a clear 400 into
+ * "the model did not return questions in the required format", which blames
+ * the model for our arithmetic.
+ */
+export function questionsPerCall(tokensPerQuestion: number, maxOutputTokens?: number): number {
+  if (!maxOutputTokens) return QUESTIONS_PER_CALL;
+  // A little headroom for the JSON envelope around the questions themselves.
+  const usable = Math.floor(maxOutputTokens * 0.9);
+  return Math.max(1, Math.min(QUESTIONS_PER_CALL, Math.floor(usable / tokensPerQuestion)));
+}
+
+/** The completion size to ask for, never above what the provider accepts. */
+export function tokenBudget(tokensPerQuestion: number, count: number, maxOutputTokens?: number): number {
+  const wanted = tokensPerQuestion * Math.max(1, count);
+  return Math.min(wanted, maxOutputTokens ?? 32_000, 32_000);
+}
+
 /** Splits a total into batches of at most QUESTIONS_PER_CALL. */
 export function planBatches(total: number, per = QUESTIONS_PER_CALL): number[] {
   const batches: number[] = [];
@@ -435,12 +462,15 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
   let systemPrompt = opts.systemPrompt?.trim() || DEFAULT_SYSTEM_PROMPT;
   if (opts.kind === 'PRACTICE') systemPrompt += PRACTICE_SYSTEM_SUFFIX;
 
-  const batches = planBatches(opts.spec.count);
-
   // A model that thinks out loud spends output tokens before it writes a word
   // of the answer, so it needs a bigger budget for the same number of
   // questions.
   const tokensPerQuestion = emitsReasoning(opts.model) ? 2600 : 1400;
+
+  // What this provider will actually accept decides the batch size, not the
+  // other way round.
+  const perCall = questionsPerCall(tokensPerQuestion, providerDef.maxOutputTokens);
+  const batches = planBatches(opts.spec.count, perCall);
 
   const run = await prisma.generationRun.create({
     data: {
@@ -461,7 +491,7 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
   const warnings: string[] = [];
   if (batches.length > 1) {
     warnings.push(
-      `Asked for ${opts.spec.count} questions in ${batches.length} calls of at most ${QUESTIONS_PER_CALL}, ` +
+      `Asked for ${opts.spec.count} questions in ${batches.length} calls of at most ${perCall}, ` +
         'because one reply cannot hold that many.',
     );
   }
@@ -494,7 +524,7 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
       const shared = {
         temperature: opts.temperature ?? 0.4,
         jsonMode: providerDef.supportsJsonMode,
-        maxTokens: Math.min(32000, tokensPerQuestion * Math.max(1, batchCount)),
+        maxTokens: tokenBudget(tokensPerQuestion, batchCount, providerDef.maxOutputTokens),
       };
 
       const first = await chatWithFallback(messages, {
@@ -550,7 +580,7 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
                   ...c.call,
                   temperature: 0.1,
                   jsonMode: providerDef.supportsJsonMode,
-                  maxTokens: Math.min(32000, tokensPerQuestion * Math.max(1, batchCount)),
+                  maxTokens: tokenBudget(tokensPerQuestion, batchCount, providerDef.maxOutputTokens),
                 },
               })),
             })
