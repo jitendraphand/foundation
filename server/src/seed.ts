@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { prisma } from './db.js';
 import { env } from './env.js';
 import { hashPassword } from './lib/password.js';
@@ -96,6 +97,40 @@ async function seedClasses() {
  *
  * A kind that already has a template is left completely alone, edits included.
  */
+/**
+ * How an improved default prompt reaches an install that already has the old
+ * one, without ever overwriting an administrator's own wording.
+ *
+ * The prompt is editable, so it lives in the database, and the seed used to
+ * refuse to touch a kind that already existed. That was safe and wrong: the
+ * shipped prompt is where the drawing contract and the JSON schema are stated,
+ * so an install that upgraded kept generating against last year's rules for
+ * ever, with nothing to say so.
+ *
+ * A fingerprint of the text as shipped is stored beside it. On the next seed,
+ * a field that still hashes to what we shipped is text nobody has touched, and
+ * is brought up to date; anything else is the admin's and is left exactly as it
+ * is. The two hashes below are the prompts shipped before this mechanism
+ * existed, so the first upgrade recognises them too.
+ */
+const PREVIOUSLY_SHIPPED = new Set([
+  'ab21e2e41fb75ccb', // REGULAR and STEP_UP, before a diagram had to be planned
+  '1b1e15725966255d', // PRACTICE - the same prompt plus the practice suffix
+]);
+
+function fingerprint(text: string): string {
+  return createHash('sha256').update(text).digest('hex').slice(0, 16);
+}
+
+function shippedMark(row: { systemPrompt: string; userTemplate: string }) {
+  return { shipped: { systemPrompt: fingerprint(row.systemPrompt), userTemplate: fingerprint(row.userTemplate) } };
+}
+
+function stillAsShipped(stored: string, recorded: string | undefined): boolean {
+  const hash = fingerprint(stored);
+  return hash === recorded || PREVIOUSLY_SHIPPED.has(hash);
+}
+
 async function seedPrompts() {
   const wanted = [
     {
@@ -125,14 +160,44 @@ async function seedPrompts() {
   ];
 
   let created = 0;
+  let refreshed = 0;
+  let kept = 0;
+
   for (const row of wanted) {
-    const existing = await prisma.promptTemplate.count({ where: { kind: row.kind } });
-    if (existing > 0) continue;
-    await prisma.promptTemplate.create({ data: { ...row, isDefault: true } });
-    created++;
+    const existing = await prisma.promptTemplate.findMany({ where: { kind: row.kind } });
+
+    if (existing.length === 0) {
+      await prisma.promptTemplate.create({ data: { ...row, isDefault: true, meta: shippedMark(row) } });
+      created++;
+      continue;
+    }
+
+    for (const template of existing) {
+      const recorded = (template.meta as { shipped?: Record<string, string> } | null)?.shipped ?? {};
+      const changes: Record<string, string> = {};
+      for (const field of ['systemPrompt', 'userTemplate'] as const) {
+        if (template[field] === row[field]) continue;
+        if (stillAsShipped(template[field], recorded[field])) changes[field] = row[field];
+      }
+      if (Object.keys(changes).length === 0) {
+        // Either already current, or the admin has made it their own.
+        if (template.systemPrompt !== row.systemPrompt || template.userTemplate !== row.userTemplate) kept++;
+        continue;
+      }
+      await prisma.promptTemplate.update({
+        where: { id: template.id },
+        data: { ...changes, version: { increment: 1 }, meta: shippedMark({ ...template, ...changes }) },
+      });
+      refreshed++;
+    }
   }
 
-  console.log(created ? `[seed] prompt templates: ${created} created` : '[seed] prompt templates already present');
+  const parts = [
+    created ? `${created} created` : '',
+    refreshed ? `${refreshed} updated to the current default` : '',
+    kept ? `${kept} left alone because they have been edited` : '',
+  ].filter(Boolean);
+  console.log(`[seed] prompt templates: ${parts.length ? parts.join(', ') : 'already current'}`);
 }
 
 async function seedAdmin() {

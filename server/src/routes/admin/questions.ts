@@ -1,15 +1,20 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
+import { env } from '../../env.js';
 import { prisma } from '../../db.js';
 import { audit, requirePermission } from '../../middleware/auth.js';
-import { normalizeContent, normalizeBlocks, blocksToText } from '../../lib/content.js';
+import { normalizeContent, normalizeBlocks, blocksToText, type Block } from '../../lib/content.js';
+import { figureIndex, isFigure } from '../../lib/diagram.js';
 import { validateAnswerKey } from '../../lib/grading.js';
 import { importQuestions, runGeneration, buildUserPrompt, sweepAbandonedRuns } from '../../llm/generate.js';
 import { IMPORT_TEMPLATE } from '../../llm/import-template.js';
 import { LlmError, PROVIDERS } from '../../llm/providers.js';
 import { capabilitiesOf } from '../../llm/capabilities.js';
 import { ownedBy, seesEverything, type Actor } from '../../lib/ownership.js';
-import { generateImage } from '../../llm/images.js';
+import { generateImage, pictureRequestFor } from '../../llm/images.js';
+import { redrawFigure } from '../../llm/redraw.js';
 import { imagePromptSchema } from '../../llm/schema.js';
 import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_TEMPLATE } from '../../llm/prompts.js';
 import { findWeakAreas, weakAreasToPromptHint, type Breakdown } from '../../lib/analytics.js';
@@ -752,6 +757,208 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
     });
 
     return { total: questions.length, questions };
+  });
+
+  /**
+   * Rewrites the picture request in place.
+   *
+   * The prompt the model wrote is a first draft, and the reviewer looking at
+   * the question is the person who knows what the picture actually has to show.
+   * Until now the only way to change it was the full JSON edit form, so in
+   * practice nobody did: they generated from wording they disagreed with, or
+   * gave up and drew it themselves.
+   *
+   * Placement is not editable here. Which option a picture belongs to is a
+   * structural fact about the question, not a matter of wording, and changing
+   * it in a prompt box would silently move the picture somewhere else.
+   */
+  app.patch('/api/admin/questions/:id/image-prompt', { preHandler: requirePermission('questions.review') }, async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    if (!(await mayTouch(request, id))) return reply.code(404).send({ error: 'Question not found.' });
+
+    const body = z
+      .object({
+        prompt: z.string().min(20).max(2000),
+        description: z.string().min(10).max(1000),
+        details: z.array(z.string().max(300)).max(20).default([]),
+        style: z.string().max(300).optional(),
+        widthPx: z.number().int().min(128).max(4096).optional(),
+        heightPx: z.number().int().min(128).max(4096).optional(),
+        altText: z.string().max(500).optional(),
+      })
+      .parse(request.body);
+
+    const question = await prisma.question.findFirst({ where: { id, deletedAt: null } });
+    if (!question) return reply.code(404).send({ error: 'Question not found.' });
+
+    // Everything not being edited is kept, so a question whose prompt came
+    // from an older shape does not lose the fields this form does not show.
+    const existing = (question.imagePrompt ?? {}) as Record<string, unknown>;
+    const merged = imagePromptSchema.parse({
+      ...existing,
+      ...body,
+      details: body.details.filter((d) => d.trim().length > 0),
+    });
+
+    await prisma.question.update({
+      where: { id },
+      data: { imagePrompt: merged as object, imageRequired: true },
+    });
+
+    await audit(request.user!.sub, 'question.image_prompt_edited', {
+      entity: 'Question', entityId: id, ip: request.ip,
+    });
+
+    return { ok: true, imagePrompt: merged, message: 'Prompt saved. Generating now uses your wording.' };
+  });
+
+  /**
+   * Draws a figure again, and hands back the candidate without saving it.
+   *
+   * See llm/redraw.ts for why this asks for the figure alone rather than
+   * regenerating the question, and why nothing is written until the reviewer
+   * has looked at what came back.
+   */
+  app.post('/api/admin/questions/:id/figure/redraw', {
+    preHandler: requirePermission('questions.review'),
+    config: { rateLimit: { max: 40, timeWindow: '10 minutes' } },
+  }, async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    if (!(await mayTouch(request, id))) return reply.code(404).send({ error: 'Question not found.' });
+
+    const body = z
+      .object({
+        index: z.number().int().min(0).optional(),
+        instructions: z.string().max(2000).optional(),
+        credentialId: z.string().uuid().optional(),
+        model: z.string().max(200).optional(),
+      })
+      .parse(request.body ?? {});
+
+    const question = await prisma.question.findFirst({ where: { id, deletedAt: null } });
+    if (!question) return reply.code(404).send({ error: 'Question not found.' });
+
+    const lock = await liveTestLock(id);
+    if (lock) return reply.code(409).send({ error: `This figure cannot be changed because ${lock}` });
+
+    const blocks = (question.content as { blocks: Block[] }).blocks;
+    const found = figureIndex(blocks);
+    const current = typeof body.index === 'number' ? (blocks[body.index] ?? null) : (found >= 0 ? blocks[found] : null);
+
+    try {
+      const result = await redrawFigure({ question, current, instructions: body.instructions, credentialId: body.credentialId, model: body.model });
+      return { ok: true, ...result };
+    } catch (err) {
+      if (err instanceof LlmError) return reply.code(502).send({ error: err.message });
+      throw err;
+    }
+  });
+
+  /** Puts a redrawn figure into the question, replacing the one at `index`. */
+  app.put('/api/admin/questions/:id/figure', { preHandler: requirePermission('questions.review') }, async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    if (!(await mayTouch(request, id))) return reply.code(404).send({ error: 'Question not found.' });
+    const body = z.object({ index: z.number().int().min(0), block: z.any() }).parse(request.body);
+
+    const question = await prisma.question.findFirst({ where: { id, deletedAt: null } });
+    if (!question) return reply.code(404).send({ error: 'Question not found.' });
+
+    const lock = await liveTestLock(id);
+    if (lock) return reply.code(409).send({ error: `This figure cannot be changed because ${lock}` });
+
+    const blocks = (question.content as { blocks: unknown[] }).blocks;
+    if (body.index >= blocks.length) return reply.code(400).send({ error: 'That figure is no longer there.' });
+
+    // Sanitised on the way in, exactly as a generated one is.
+    const [block] = normalizeBlocks([body.block]);
+    const next = blocks.map((b, i) => (i === body.index ? block : b));
+    const content = normalizeContent({ version: 1, blocks: next });
+
+    const updated = await prisma.question.update({
+      where: { id },
+      data: { content: content as object, isAdminEdited: true },
+    });
+
+    await audit(request.user!.sub, 'question.figure_replaced', {
+      entity: 'Question', entityId: id, ip: request.ip, detail: { index: body.index },
+    });
+
+    return { ok: true, question: updated, message: 'Figure replaced.' };
+  });
+
+  /**
+   * Throws the figure away and asks for a real picture in its place.
+   *
+   * Deliberately destructive and in that order: the drawing is removed from the
+   * question and, if it was a generated picture, the file behind it is deleted
+   * too, before anything new exists. A "replace" that leaves the old image on
+   * disk and half-attached is how a question ends up showing the wrong figure
+   * to a child when the new one fails to arrive.
+   *
+   * What is left is a question flagged as needing a picture, with the brief the
+   * drawing was made from already written into the prompt - so the panel that
+   * already knows how to generate, review and attach a picture takes over.
+   */
+  app.post('/api/admin/questions/:id/figure/to-picture', { preHandler: requirePermission('questions.review') }, async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    if (!(await mayTouch(request, id))) return reply.code(404).send({ error: 'Question not found.' });
+    const body = z.object({ index: z.number().int().min(0).optional() }).parse(request.body ?? {});
+
+    const question = await prisma.question.findFirst({ where: { id, deletedAt: null } });
+    if (!question) return reply.code(404).send({ error: 'Question not found.' });
+
+    const lock = await liveTestLock(id);
+    if (lock) return reply.code(409).send({ error: `This figure cannot be removed because ${lock}` });
+
+    const blocks = (question.content as { blocks: Block[] }).blocks;
+    const index = typeof body.index === 'number' ? body.index : figureIndex(blocks);
+    const figure = index >= 0 ? blocks[index] : undefined;
+    if (!figure || !isFigure(figure)) {
+      return reply.code(400).send({ error: 'There is no figure on this question to replace.' });
+    }
+
+    const stem = blocksToText(blocks.filter((_, i) => i !== index));
+    // A photograph being replaced already has the prompt that produced it, and
+    // that is a better starting point than anything derived from its alt text.
+    const previous = figure.type === 'image' ? imagePromptSchema.safeParse(question.imagePrompt) : null;
+    const wanted = previous?.success ? previous.data : pictureRequestFor(figure, stem);
+    const remaining = blocks.filter((_, i) => i !== index);
+    if (remaining.length === 0) {
+      return reply.code(400).send({ error: 'This question is nothing but that figure - edit the question instead.' });
+    }
+
+    // The file goes before the row, and the row before the question is saved:
+    // a leftover file is tidy-up, a row pointing at a missing file is a broken
+    // picture on a paper.
+    if (figure.type === 'image') {
+      const asset = await prisma.asset.findUnique({ where: { id: figure.assetId } });
+      if (asset) {
+        await fs.rm(path.join(env.UPLOAD_DIR, asset.storageKey), { force: true }).catch(() => undefined);
+        await prisma.asset.delete({ where: { id: asset.id } }).catch(() => undefined);
+      }
+    }
+
+    const updated = await prisma.question.update({
+      where: { id },
+      data: {
+        content: { version: 1, blocks: remaining } as object,
+        imageRequired: true,
+        imageFulfilled: false,
+        imagePrompt: wanted as object,
+        isAdminEdited: true,
+      },
+    });
+
+    await audit(request.user!.sub, 'question.figure_discarded', {
+      entity: 'Question', entityId: id, ip: request.ip, detail: { index, was: figure.type },
+    });
+
+    return {
+      ok: true,
+      question: updated,
+      imagePrompt: wanted,
+      message: 'The figure has been deleted. Edit the prompt if you want to, then generate the picture.',
+    };
   });
 
   /** Full edit of a draft question, including its diagram blocks. */

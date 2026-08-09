@@ -68,11 +68,24 @@ export interface ChartSpec {
   intervals?: Array<{ from: number; to: number; label?: string }>;
 }
 
+/**
+ * What a drawing was supposed to show, written by the model before it drew it.
+ *
+ * Stored so the figure can be checked against its own brief, shown to a
+ * reviewer beside the picture, and handed back when it has to be drawn again.
+ * Absent on questions generated before diagrams had to be planned.
+ */
+export interface DiagramSpec {
+  description: string;
+  labels: string[];
+  mustShow: string[];
+}
+
 export type Block =
   | { type: 'text'; value: string }
   | { type: 'math'; tex: string; display?: boolean }
-  | { type: 'svg'; svg: string; caption?: string }
-  | { type: 'mermaid'; code: string; caption?: string }
+  | { type: 'svg'; svg: string; caption?: string; spec?: DiagramSpec }
+  | { type: 'mermaid'; code: string; caption?: string; spec?: DiagramSpec }
   | { type: 'chart'; spec: ChartSpec; caption?: string }
   | { type: 'table'; headers: string[]; rows: string[][]; caption?: string }
   | { type: 'image'; assetId: string; alt?: string; caption?: string; width?: number; height?: number }

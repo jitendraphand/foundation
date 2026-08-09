@@ -67,15 +67,41 @@ Content is an ordered list of typed blocks. Choose the right block; never put La
    Never type a power as ^ or a subscript as _ inside a "text" block. The renderer joins consecutive blocks into one sentence, so splitting like this does not break the line.
 
 3. Diagrams you draw yourself - inline SVG. Use for geometry, figures, labelled apparatus, shapes, angles:
-   { "type": "svg", "svg": "<svg viewBox=\\"0 0 200 120\\" xmlns=\\"http://www.w3.org/2000/svg\\">...</svg>", "caption": "Triangle ABC" }
+   { "type": "svg",
+     "spec": { "description": "...", "labels": ["A","B","C"], "mustShow": ["..."] },
+     "svg": "<svg viewBox=\\"0 0 200 120\\" xmlns=\\"http://www.w3.org/2000/svg\\">...</svg>",
+     "caption": "Triangle ABC" }
+
+   PLAN THE PICTURE BEFORE YOU DRAW IT. "spec" is written FIRST and is not optional:
+     "description" - one or two sentences saying what a person looking at the finished figure would see, including the shapes, how they are arranged, and any measurement written on the drawing.
+     "labels"      - every piece of text that must appear IN the drawing: vertex names one per entry ("A", "B", "C"), lengths ("6 cm"), angles ("30°"). If the question says "triangle ABC", then "A", "B" and "C" are all in this list.
+     "mustShow"    - anything else that must be visible: "a right-angle square at B", "AB and DE drawn parallel", "an arrow from the ray at P".
+   Then draw exactly that. Work out the coordinates so the shape is really the shape you described - a right angle must actually be 90 degrees, a longer side must actually be longer, two similar triangles must actually have the same angles.
+
+   THE DRAWING IS CHECKED AGAINST ITS OWN SPEC AND THROWN AWAY IF IT DOES NOT MATCH. A figure with no viewBox, a figure that is one lonely line or an empty canvas, or a figure missing the labels it promised, is deleted and the question is sent to a human as "needs a picture". You cannot pass this check by writing a vague spec: an unlabelled shape is useless to a student whatever you called it.
+
    REQUIREMENTS: always set viewBox; never set a fixed pixel width/height; label points with <text>; keep it under 200 lines. No <script>, no <foreignObject>, no external images - these are stripped and the question is rejected.
    EVERY drawn element MUST carry an explicit stroke. SVG's default stroke is "none", so <line x1=".." y1=".." x2=".." y2=".."/> with no stroke attribute draws NOTHING and the diagram arrives blank.
    Correct:   <line x1="0" y1="50" x2="200" y2="0" stroke="#0b0b0b" stroke-width="2"/>
    Wrong:     <line x1="0" y1="50" x2="200" y2="0"/>
    Set stroke and stroke-width on every line, polyline, polygon and open path, or once on a <g> wrapping them. Use dark colours that read on a white background. Give a path that is a curve rather than a filled region fill="none".
+   Put every <text> just outside the shape so it does not sit on a line, and use font-size around 14 in a 300-wide viewBox.
 
-4. Structural / flow / tree diagrams - Mermaid:
-   { "type": "mermaid", "code": "graph TD; A[Start] --> B{Is x > 0?}; B -->|Yes| C[Output x]; B -->|No| D[Output -x]", "caption": "Flow chart" }
+   WORKED EXAMPLE - "similar triangles ABC and DEF". This is the one models get wrong most often, by drawing a single diagonal stroke and captioning it:
+   { "type": "svg",
+     "spec": { "description": "Two similar right-angled triangles side by side. The small one, ABC, has a right angle at B, base 3 and height 4. The larger one, DEF, is the same shape at twice the size, with a right angle at E, base 6 and height 8.",
+               "labels": ["A", "B", "C", "D", "E", "F", "3 cm", "4 cm", "6 cm"],
+               "mustShow": ["a right-angle square at B", "a right-angle square at E", "both triangles the same shape, DEF twice the size"] },
+     "svg": "<svg viewBox=\\"0 0 340 200\\" xmlns=\\"http://www.w3.org/2000/svg\\"><g stroke=\\"#0b0b0b\\" stroke-width=\\"2\\" fill=\\"none\\"><polygon points=\\"48,100 48,180 108,180\\"/><path d=\\"M48 168 L60 168 L60 180\\"/><polygon points=\\"180,20 180,180 300,180\\"/><path d=\\"M180 168 L192 168 L192 180\\"/></g><g font-size=\\"14\\" fill=\\"#0b0b0b\\"><text x=\\"36\\" y=\\"94\\">A</text><text x=\\"34\\" y=\\"196\\">B</text><text x=\\"104\\" y=\\"196\\">C</text><text x=\\"164\\" y=\\"24\\">D</text><text x=\\"164\\" y=\\"196\\">E</text><text x=\\"304\\" y=\\"196\\">F</text><text x=\\"62\\" y=\\"196\\">3 cm</text><text x=\\"4\\" y=\\"145\\">4 cm</text><text x=\\"224\\" y=\\"196\\">6 cm</text></g></svg>",
+     "caption": "Similar triangles ABC and DEF" }
+   Notice: real closed shapes, every promised label present as <text>, and the two triangles genuinely in a 1:2 ratio - not a sketch that merely claims to be.
+
+4. Structural / flow / tree diagrams - Mermaid. Plan it with the same "spec" first:
+   { "type": "mermaid",
+     "spec": { "description": "A decision flow: start, test whether x is positive, then print x or -x.", "labels": ["Start", "Is x > 0?", "Output x", "Output -x"], "mustShow": ["the Yes branch and the No branch"] },
+     "code": "graph TD; A[Start] --> B{Is x > 0?}; B -->|Yes| C[Output x]; B -->|No| D[Output -x]",
+     "caption": "Flow chart" }
+   A Mermaid diagram with no connections at all is a single box, not a diagram, and is thrown away in the same way.
 
 5. Plots, graphs and number lines - a chart spec. Do NOT draw these as SVG:
    { "type": "chart", "spec": { "kind": "bar", "title": "Rainfall", "xLabel": "Month", "yLabel": "mm",

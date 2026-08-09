@@ -3,7 +3,7 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api, ApiError } from '../../lib/api';
 import { Alert, Badge, Card, EmptyState, Field, Modal, PageLoader, Spinner, humanizeTag } from '../../components/ui';
 import { ContentRenderer, BlocksRenderer } from '../../renderers/BlockRenderer';
-import type { BankQuestion, Tag } from '../../lib/types';
+import type { BankQuestion, Block, ImagePrompt, Tag } from '../../lib/types';
 
 /**
  * The question bank and draft review screen.
@@ -447,6 +447,10 @@ function QuestionCard({
             <ImageNeededPanel question={question} onAttached={onChanged} />
           )}
 
+          {/* Offered only while the question can still change; on a live paper
+              the figure is as frozen as everything else. */}
+          {!frozen && <FigurePanel question={question} onChanged={onChanged} />}
+
           {showAnswer && question.explanation?.blocks?.length ? (
             <div className="mt-3 rounded-lg bg-surface-sunken border border-line p-3">
               <h4 className="text-xs font-medium text-ink-muted mb-1">Explanation</h4>
@@ -520,7 +524,9 @@ function QuestionCard({
  * clipboard, then accepts the finished picture.
  */
 function ImageNeededPanel({ question, onAttached }: { question: BankQuestion; onAttached: () => void }) {
-  const spec = question.imagePrompt;
+  const [saved, setSaved] = useState<ImagePrompt | null>(null);
+  const spec = saved ?? question.imagePrompt;
+  const [editing, setEditing] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [generating, setGenerating] = useState(false);
@@ -636,35 +642,53 @@ function ImageNeededPanel({ question, onAttached }: { question: BankQuestion; on
 
       {error && <Alert tone="error" onDismiss={() => setError(null)}>{error}</Alert>}
 
-      <div>
-        <div className="flex items-center justify-between gap-2 mb-1">
-          <span className="text-[11px] font-medium text-ink-muted">
-            Prompt — paste this into any image generator
-          </span>
-          <button type="button" className="btn-secondary btn-sm" onClick={() => copy(fullPrompt, 'prompt')}>
-            {copied === 'prompt' ? 'Copied' : 'Copy prompt'}
-          </button>
-        </div>
-        <p className="rounded-lg border border-line bg-white p-2 text-xs font-mono whitespace-pre-wrap break-words">
-          {fullPrompt}
-        </p>
-      </div>
+      {editing ? (
+        <ImagePromptEditor
+          questionId={question.id}
+          spec={spec}
+          onCancel={() => setEditing(false)}
+          onSaved={(next) => { setSaved(next); setEditing(false); }}
+        />
+      ) : (
+        <>
+          <div>
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <span className="text-[11px] font-medium text-ink-muted">
+                Prompt — paste this into any image generator
+              </span>
+              <div className="flex items-center gap-2">
+                <button type="button" className="btn-ghost btn-sm" onClick={() => setEditing(true)}>
+                  Edit prompt
+                </button>
+                <button type="button" className="btn-secondary btn-sm" onClick={() => copy(fullPrompt, 'prompt')}>
+                  {copied === 'prompt' ? 'Copied' : 'Copy prompt'}
+                </button>
+              </div>
+            </div>
+            <p className="rounded-lg border border-line bg-white p-2 text-xs font-mono whitespace-pre-wrap break-words">
+              {fullPrompt}
+            </p>
+          </div>
 
-      {spec.details.length > 0 && (
-        <div>
-          <span className="text-[11px] font-medium text-ink-muted">The picture must show</span>
-          <ul className="mt-1 list-disc pl-5 text-xs text-ink-muted space-y-0.5">
-            {spec.details.map((d, i) => <li key={i}>{d}</li>)}
-          </ul>
-        </div>
+          {spec.details.length > 0 && (
+            <div>
+              <span className="text-[11px] font-medium text-ink-muted">The picture must show</span>
+              <ul className="mt-1 list-disc pl-5 text-xs text-ink-muted space-y-0.5">
+                {spec.details.map((d: string, i: number) => <li key={i}>{d}</li>)}
+              </ul>
+            </div>
+          )}
+        </>
       )}
 
-      <dl className="flex flex-wrap gap-x-5 gap-y-1 text-[11px] text-ink-muted">
-        <div><dt className="inline font-medium">Size: </dt><dd className="inline tabular-nums">{spec.widthPx} × {spec.heightPx} px</dd></div>
-        {spec.aspectRatio && <div><dt className="inline font-medium">Ratio: </dt><dd className="inline">{spec.aspectRatio}</dd></div>}
-        {spec.style && <div><dt className="inline font-medium">Style: </dt><dd className="inline">{spec.style}</dd></div>}
-        {spec.altText && <div><dt className="inline font-medium">Alt text: </dt><dd className="inline">{spec.altText}</dd></div>}
-      </dl>
+      {!editing && (
+        <dl className="flex flex-wrap gap-x-5 gap-y-1 text-[11px] text-ink-muted">
+          <div><dt className="inline font-medium">Size: </dt><dd className="inline tabular-nums">{spec.widthPx} × {spec.heightPx} px</dd></div>
+          {spec.aspectRatio && <div><dt className="inline font-medium">Ratio: </dt><dd className="inline">{spec.aspectRatio}</dd></div>}
+          {spec.style && <div><dt className="inline font-medium">Style: </dt><dd className="inline">{spec.style}</dd></div>}
+          {spec.altText && <div><dt className="inline font-medium">Alt text: </dt><dd className="inline">{spec.altText}</dd></div>}
+        </dl>
+      )}
 
       {/* The generated image is shown before it is attached: a picture going
           onto a paper a child will sit is worth one look first. */}
@@ -689,7 +713,7 @@ function ImageNeededPanel({ question, onAttached }: { question: BankQuestion; on
         </div>
       )}
 
-      <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-warn/20">
+      <div className={`flex flex-wrap items-center gap-2 pt-1 border-t border-warn/20 ${editing ? 'hidden' : ''}`}>
         {imageProviderReady && !preview && (
           <button type="button" className="btn-primary btn-sm" onClick={() => void generate()} disabled={generating}>
             {generating ? <Spinner label="Drawing" /> : 'Generate the picture'}
@@ -718,6 +742,264 @@ function ImageNeededPanel({ question, onAttached }: { question: BankQuestion; on
           PNG, JPEG, WebP or GIF, up to 4 MB. It is placed above the {spec.placement === 'OPTION' ? 'option' : 'question'} text.
         </span>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Rewriting the picture request without leaving the question.
+ *
+ * The wording the model produced is a first draft, and the person looking at
+ * the question is the one who knows what the picture actually has to show -
+ * "the beaker must be half full", "no text in the image, the labels are in the
+ * question". Sending them to the full JSON editor to change a sentence meant
+ * nobody did it: they generated from wording they disagreed with, then threw
+ * the result away.
+ *
+ * Only the wording is editable. Where the picture goes is a fact about the
+ * question, not a matter of phrasing, so it is shown and not offered.
+ */
+function ImagePromptEditor({
+  questionId, spec, onCancel, onSaved,
+}: {
+  questionId: string;
+  spec: ImagePrompt;
+  onCancel: () => void;
+  onSaved: (next: ImagePrompt) => void;
+}) {
+  const [prompt, setPrompt] = useState(spec.prompt);
+  const [description, setDescription] = useState(spec.description);
+  const [details, setDetails] = useState(spec.details.join('\n'));
+  const [style, setStyle] = useState(spec.style ?? '');
+  const [altText, setAltText] = useState(spec.altText ?? '');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const save = async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await api.patch<{ imagePrompt: ImagePrompt }>(`/api/admin/questions/${questionId}/image-prompt`, {
+        prompt: prompt.trim(),
+        description: description.trim(),
+        details: details.split('\n').map((d: string) => d.trim()).filter(Boolean),
+        style: style.trim(),
+        altText: altText.trim(),
+      });
+      onSaved(res.imagePrompt);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not save that prompt.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const field = 'w-full rounded-lg border border-line bg-white p-2 text-xs';
+
+  return (
+    <div className="space-y-2">
+      {error && <Alert tone="error" onDismiss={() => setError(null)}>{error}</Alert>}
+
+      <label className="block">
+        <span className="text-[11px] font-medium text-ink-muted">Prompt for the image generator</span>
+        <textarea className={`${field} font-mono`} rows={4} value={prompt} onChange={(e) => setPrompt(e.target.value)} />
+      </label>
+
+      <label className="block">
+        <span className="text-[11px] font-medium text-ink-muted">
+          What the picture must show for the question to be answerable
+        </span>
+        <textarea className={field} rows={2} value={description} onChange={(e) => setDescription(e.target.value)} />
+      </label>
+
+      <label className="block">
+        <span className="text-[11px] font-medium text-ink-muted">Must be visible — one per line</span>
+        <textarea className={field} rows={3} value={details} onChange={(e) => setDetails(e.target.value)} />
+      </label>
+
+      <div className="grid gap-2 sm:grid-cols-2">
+        <label className="block">
+          <span className="text-[11px] font-medium text-ink-muted">Style</span>
+          <input className={field} value={style} onChange={(e) => setStyle(e.target.value)} />
+        </label>
+        <label className="block">
+          <span className="text-[11px] font-medium text-ink-muted">Alt text, for a screen reader</span>
+          <input className={field} value={altText} onChange={(e) => setAltText(e.target.value)} />
+        </label>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <button type="button" className="btn-primary btn-sm" onClick={() => void save()} disabled={saving}>
+          {saving ? <Spinner label="Saving" /> : 'Save prompt'}
+        </button>
+        <button type="button" className="btn-ghost btn-sm" onClick={onCancel} disabled={saving}>Cancel</button>
+        <span className="text-[11px] text-ink-faint">
+          The next Generate uses your wording. The picture goes{' '}
+          {spec.placement === 'OPTION' ? `above option ${String(spec.optionId ?? '').toUpperCase()}` : 'above the question'}.
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// --- A figure that is already there, and wrong -----------------------------
+
+/**
+ * Redrawing or replacing the picture on a question that has one.
+ *
+ * The generator's diagrams are the weakest thing it produces, and until now a
+ * reviewer who could see the figure was wrong had two options: hand-edit SVG in
+ * the JSON editor, or reject a question whose only fault was its picture.
+ *
+ * Two ways out, both from here:
+ *   Draw it again    the text model gets the figure's own brief and one more
+ *                    go, with the reviewer's note if they add one. Nothing is
+ *                    saved until they have looked at what came back.
+ *   Use a photo      the drawing is deleted outright, and the question becomes
+ *                    one needing a picture - which hands it to the panel that
+ *                    already generates, previews and attaches one.
+ */
+function FigurePanel({ question, onChanged }: { question: BankQuestion; onChanged: () => void }) {
+  const index = question.content.blocks.findIndex(
+    (b) => b.type === 'svg' || b.type === 'mermaid' || b.type === 'image',
+  );
+  const figure = index >= 0 ? question.content.blocks[index] : null;
+
+  const [open, setOpen] = useState(false);
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState<'redraw' | 'replace' | 'save' | null>(null);
+  const [candidate, setCandidate] = useState<{ block: Block; usedLabel: string; usedModel: string } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  if (!figure) return null;
+  const spec = figure.type === 'svg' || figure.type === 'mermaid' ? figure.spec : undefined;
+
+  const redraw = async () => {
+    setBusy('redraw');
+    setError(null);
+    try {
+      const res = await api.post<{ block: Block; usedLabel: string; usedModel: string }>(
+        `/api/admin/questions/${question.id}/figure/redraw`,
+        { index, instructions: note.trim() || undefined },
+      );
+      setCandidate({ block: res.block, usedLabel: res.usedLabel, usedModel: res.usedModel });
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not draw it again just now.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const keep = async () => {
+    if (!candidate) return;
+    setBusy('save');
+    setError(null);
+    try {
+      await api.put(`/api/admin/questions/${question.id}/figure`, { index, block: candidate.block });
+      setCandidate(null);
+      setOpen(false);
+      onChanged();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not save that drawing.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  // Destructive on purpose, and said plainly: the figure goes before anything
+  // replaces it, so there is never a moment where both exist.
+  const toPicture = async () => {
+    if (!window.confirm('Delete this figure and ask for a generated picture instead? The drawing is removed straight away.')) return;
+    setBusy('replace');
+    setError(null);
+    try {
+      await api.post(`/api/admin/questions/${question.id}/figure/to-picture`, { index });
+      setOpen(false);
+      onChanged();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not replace that figure.');
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  if (!open) {
+    return (
+      <button type="button" className="mt-2 btn-ghost btn-sm" onClick={() => setOpen(true)}>
+        Figure not right?
+      </button>
+    );
+  }
+
+  return (
+    <div className="mt-3 rounded-lg border border-line bg-surface-sunken p-3 space-y-3">
+      <div className="flex items-start justify-between gap-3">
+        <h4 className="text-xs font-semibold">The figure on this question</h4>
+        <button type="button" className="btn-ghost btn-sm" onClick={() => { setOpen(false); setCandidate(null); }}>
+          Close
+        </button>
+      </div>
+
+      {error && <Alert tone="error" onDismiss={() => setError(null)}>{error}</Alert>}
+
+      {/* The brief the drawing was made from, so it can be judged against what
+          it was meant to be rather than against a guess. */}
+      {spec ? (
+        <div className="text-xs text-ink-muted space-y-1">
+          <p><span className="font-medium text-ink">Meant to show: </span>{spec.description}</p>
+          {spec.labels.length > 0 && <p><span className="font-medium text-ink">Labelled: </span>{spec.labels.join(', ')}</p>}
+          {spec.mustShow.length > 0 && (
+            <ul className="list-disc pl-5 space-y-0.5">{spec.mustShow.map((m, i) => <li key={i}>{m}</li>)}</ul>
+          )}
+        </div>
+      ) : (
+        <p className="text-xs text-ink-faint">
+          This figure was made before diagrams carried a plan, so there is nothing to check it against. A redraw works
+          from the question's own wording.
+        </p>
+      )}
+
+      <label className="block">
+        <span className="text-[11px] font-medium text-ink-muted">What is wrong with it? (optional)</span>
+        <textarea
+          className="w-full rounded-lg border border-line bg-white p-2 text-xs"
+          rows={2}
+          placeholder="e.g. the two triangles must be the same shape, and DEF twice the size of ABC"
+          value={note}
+          onChange={(e) => setNote(e.target.value)}
+        />
+      </label>
+
+      {candidate && (
+        <div className="rounded-lg border border-line bg-white p-3">
+          <p className="text-[11px] text-ink-faint mb-2">
+            Drawn again by {candidate.usedLabel} ({candidate.usedModel}). Nothing is saved until you keep it.
+          </p>
+          <BlocksRenderer blocks={[candidate.block]} />
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <button type="button" className="btn-primary btn-sm" onClick={() => void keep()} disabled={busy !== null}>
+              {busy === 'save' ? <Spinner label="Saving" /> : 'Use this drawing'}
+            </button>
+            <button type="button" className="btn-secondary btn-sm" onClick={() => void redraw()} disabled={busy !== null}>
+              {busy === 'redraw' ? <Spinner label="Drawing" /> : 'Try again'}
+            </button>
+            <button type="button" className="btn-ghost btn-sm" onClick={() => setCandidate(null)} disabled={busy !== null}>
+              Keep the original
+            </button>
+          </div>
+        </div>
+      )}
+
+      {!candidate && (
+        <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-line">
+          <button type="button" className="btn-primary btn-sm" onClick={() => void redraw()} disabled={busy !== null}>
+            {busy === 'redraw' ? <Spinner label="Drawing" /> : 'Draw it again'}
+          </button>
+          <button type="button" className="btn-secondary btn-sm" onClick={() => void toPicture()} disabled={busy !== null}>
+            {busy === 'replace' ? <Spinner label="Removing" /> : 'Delete it and use a generated picture'}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

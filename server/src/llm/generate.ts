@@ -1,7 +1,9 @@
 import { z } from 'zod';
 import { prisma } from '../db.js';
 import { callParamsFor, type CallParams } from './credentials.js';
-import { normalizeContent, normalizeBlocks, CONTENT_VERSION } from '../lib/content.js';
+import { normalizeContent, normalizeBlocks, blocksToText, CONTENT_VERSION, type Block } from '../lib/content.js';
+import { checkDiagram, type DiagramProblem } from '../lib/diagram.js';
+import { pictureRequestFor } from './images.js';
 import { validateAnswerKey } from '../lib/grading.js';
 import { chatComplete, emitsReasoning, LlmError, PROVIDERS, type ChatMessage, type ChatRequest } from './providers.js';
 import { chatWithFallback, ProviderChainError } from './resilience.js';
@@ -202,7 +204,7 @@ async function repairRejected(args: {
   systemPrompt: string;
   questions: LlmQuestion[];
   rejected: Array<{ index: number; reason: string }>;
-  ctx: { runId: string; model: string; createdById: string; validTags: ValidTags; retagged: { count: number } };
+  ctx: Parameters<typeof toQuestionRow>[1];
   tokensPerQuestion: number;
 }): Promise<{
   rows: ReturnType<typeof toQuestionRow>[];
@@ -277,6 +279,37 @@ async function repairRejected(args: {
 }
 
 /**
+ * Throws away a drawing that is definitively not what the question describes,
+ * and asks for a real picture in its place.
+ *
+ * A weaker model returns syntactically perfect nonsense: one diagonal stroke
+ * captioned "Similar Triangles ABC and DEF", or a triangle with no vertex
+ * labelled in a question that names A, B and C. The markup is valid, so
+ * nothing rejected it, and it reached a child as a question that cannot be
+ * answered from the picture in front of them.
+ *
+ * The question itself is kept. Only the drawing is dropped, and the question
+ * is marked as needing a picture - which puts it in front of an administrator
+ * on the review screen with the brief already written, where they can edit the
+ * wording, generate a real image, or draw it again. Rejecting the whole
+ * question instead would throw away a good stem over a bad sketch.
+ */
+function vetDiagrams(blocks: Block[], stemText: string): { blocks: Block[]; problems: DiagramProblem[]; brief: Block | null } {
+  const problems: DiagramProblem[] = [];
+  let brief: Block | null = null;
+  const kept = blocks.filter((block) => {
+    const problem = checkDiagram(block, stemText);
+    if (!problem) return true;
+    problems.push(problem);
+    // The first casualty is the one whose brief becomes the picture request;
+    // a question with two broken figures is beyond automatic rescue anyway.
+    if (!brief) brief = block;
+    return false;
+  });
+  return { blocks: kept, problems, brief };
+}
+
+/**
  * Converts one validated LLM question into the row shape, re-validating the
  * answer key against the declared format and sanitising every SVG on the way
  * in. Throws with a human-readable reason, which is surfaced per-question to
@@ -284,7 +317,14 @@ async function repairRejected(args: {
  */
 function toQuestionRow(
   q: LlmQuestion,
-  ctx: { runId: string; model: string; createdById: string; validTags: ValidTags; retagged: { count: number } },
+  ctx: {
+    runId: string;
+    model: string;
+    createdById: string;
+    validTags: ValidTags;
+    retagged: { count: number };
+    badDiagrams?: { count: number };
+  },
 ) {
   // Tags must exist in the vocabulary, otherwise analytics silently splits into
   // buckets nobody ever looks at. Misfiled ones are moved to the axis they
@@ -292,7 +332,16 @@ function toQuestionRow(
   const { difficultyTag, cognitiveTag, skills, moved } = sortTagsIntoAxes(q, ctx.validTags);
   if (moved) ctx.retagged.count++;
 
-  const content = normalizeContent({ version: CONTENT_VERSION, blocks: q.content.blocks });
+  const normalized = normalizeContent({ version: CONTENT_VERSION, blocks: q.content.blocks });
+
+  // Drawings are vetted against the question's own words, so a figure that
+  // does not contain what the stem refers to never reaches a student.
+  const vetted = vetDiagrams(normalized.blocks, blocksToText(normalized.blocks));
+  if (vetted.problems.length > 0 && ctx.badDiagrams) ctx.badDiagrams.count++;
+  if (vetted.blocks.length === 0) {
+    throw new Error(`${vetted.problems[0].reason}, and the question is nothing but that drawing`);
+  }
+  const content = { version: CONTENT_VERSION, blocks: vetted.blocks };
 
   const options = q.options.map((o) => ({ id: o.id, blocks: normalizeBlocks(o.blocks) }));
 
@@ -323,6 +372,7 @@ function toQuestionRow(
 
   // A question flagged as needing a picture is useless without the prompt to
   // generate one, so reject it rather than let it into the review queue.
+  let imageRequired = q.imageRequired;
   let imagePrompt: object | null = null;
   if (q.imageRequired) {
     if (!q.imagePrompt) {
@@ -335,6 +385,14 @@ function toQuestionRow(
       }
     }
     imagePrompt = q.imagePrompt as object;
+  }
+
+  // The figure this question needed has just been thrown away. Turn its brief
+  // into a picture request so the gap is visible and fillable, rather than the
+  // question quietly arriving without the thing it refers to.
+  if (!imageRequired && vetted.brief) {
+    imagePrompt = pictureRequestFor(vetted.brief, blocksToText(vetted.blocks)) as object;
+    imageRequired = true;
   }
 
   const explanation = q.explanation?.blocks?.length
@@ -355,7 +413,7 @@ function toQuestionRow(
     topic: q.topic ?? null,
     subtopic: q.subtopic ?? null,
     estimatedSeconds: q.estimatedSeconds,
-    imageRequired: q.imageRequired,
+    imageRequired,
     imagePrompt,
     imageFulfilled: false,
     generationRunId: ctx.runId,
@@ -740,12 +798,13 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
 
     const validTags = await loadValidTags();
     const retagged = { count: 0 };
+    const badDiagrams = { count: 0 };
     const rejected: Array<{ index: number; reason: string }> = [];
     const rows: ReturnType<typeof toQuestionRow>[] = [];
 
     parsedResponse.questions.forEach((q, index) => {
       try {
-        rows.push(toQuestionRow(q, { runId: run.id, model: opts.model, createdById: opts.requestedById, validTags, retagged }));
+        rows.push(toQuestionRow(q, { runId: run.id, model: opts.model, createdById: opts.requestedById, validTags, retagged, badDiagrams }));
       } catch (err) {
         rejected.push({ index, reason: err instanceof Error ? err.message : String(err) });
       }
@@ -768,7 +827,7 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
         systemPrompt,
         questions: parsedResponse.questions,
         rejected,
-        ctx: { runId: run.id, model: opts.model, createdById: opts.requestedById, validTags, retagged },
+        ctx: { runId: run.id, model: opts.model, createdById: opts.requestedById, validTags, retagged, badDiagrams },
         tokensPerQuestion,
       });
       if (recovered.rows.length > 0) {
@@ -815,6 +874,14 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
       warnings.push(
         `Tags corrected on ${retagged.count} question${retagged.count === 1 ? '' : 's'}: the model put a skill on the ` +
           'cognitive axis, or the reverse. They were filed correctly rather than rejected.',
+      );
+    }
+
+    if (badDiagrams.count > 0) {
+      warnings.push(
+        `${badDiagrams.count} question${badDiagrams.count === 1 ? "'s drawing was" : "s' drawings were"} discarded - ` +
+          `${badDiagrams.count === 1 ? 'it did' : 'they did'} not show what the question describes. ` +
+          `Those questions are marked as needing a picture, with the brief already written.`,
       );
     }
 
@@ -900,12 +967,13 @@ export async function importQuestions(opts: {
 
   const validTags = await loadValidTags();
   const retagged = { count: 0 };
+  const badDiagrams = { count: 0 };
   const rejected: Array<{ index: number; reason: string }> = [];
   const rows: ReturnType<typeof toQuestionRow>[] = [];
 
   parsedResponse.questions.forEach((q, index) => {
     try {
-      rows.push(toQuestionRow(q, { runId: run.id, model: run.model, createdById: opts.requestedById, validTags, retagged }));
+      rows.push(toQuestionRow(q, { runId: run.id, model: run.model, createdById: opts.requestedById, validTags, retagged, badDiagrams }));
     } catch (err) {
       rejected.push({ index, reason: err instanceof Error ? err.message : String(err) });
     }
@@ -947,6 +1015,12 @@ export async function importQuestions(opts: {
         ? [
             `Tags corrected on ${retagged.count} question${retagged.count === 1 ? '' : 's'}: a skill was on the ` +
               'cognitive axis, or the reverse.',
+          ]
+        : []),
+      ...(badDiagrams.count > 0
+        ? [
+            `${badDiagrams.count} drawing${badDiagrams.count === 1 ? ' was' : 's were'} discarded for not showing ` +
+              'what the question describes; those questions are marked as needing a picture.',
           ]
         : []),
     ],

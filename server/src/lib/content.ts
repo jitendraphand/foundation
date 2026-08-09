@@ -105,10 +105,37 @@ const mathBlock = z.object({
   display: z.boolean().default(false), // true = own line, false = inline
 });
 
+/**
+ * What a drawing is supposed to show, written before it was drawn.
+ *
+ * A weaker model asked for SVG inside a large JSON reply produces syntactically
+ * perfect nonsense: one diagonal stroke captioned "Similar Triangles ABC and
+ * DEF". Nothing in the markup is wrong, so nothing catches it, and it reaches
+ * a child as a question that cannot be answered.
+ *
+ * Writing the plan first is a well-known way to raise the quality of the
+ * drawing itself, but the reason it is stored is different: it is the only
+ * thing that makes the drawing checkable. "labels" says which text must appear
+ * in the figure, and lib/diagram.ts refuses a drawing that does not contain it.
+ * It is also what a redraw is given, so a second attempt aims at the same
+ * picture rather than inventing a new one.
+ */
+export const diagramSpecSchema = z.object({
+  /// Plain words: what a reader should see. Shown to the administrator.
+  description: z.string().max(1000),
+  /// Text that must actually appear in the drawing - vertex names, values.
+  labels: z.array(z.string().max(40)).max(30).default([]),
+  /// Anything else that must be visible: a right-angle mark, an arrow.
+  mustShow: z.array(z.string().max(200)).max(20).default([]),
+});
+
+export type DiagramSpec = z.infer<typeof diagramSpecSchema>;
+
 const svgBlock = z.object({
   type: z.literal('svg'),
   svg: z.string().max(200_000),
   caption: z.string().max(500).optional(),
+  spec: diagramSpecSchema.optional(),
 });
 
 const mermaidBlock = z.object({
@@ -116,6 +143,7 @@ const mermaidBlock = z.object({
   /// Flowcharts, trees, sequence and state diagrams, mind maps.
   code: z.string().max(8000),
   caption: z.string().max(500).optional(),
+  spec: diagramSpecSchema.optional(),
 });
 
 const chartSpecSchema = z.object({

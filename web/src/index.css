@@ -129,7 +129,8 @@
  * currentColor rather than a fixed black so diagrams follow the surrounding
  * text colour.
  */
-.svg-host svg { stroke: currentColor; fill: none; }
+.svg-host svg { stroke: currentColor; }
+.svg-host svg:not([fill]) { fill: none; }
 
 /* Text is filled, never stroked - a stroke on glyphs smears them. */
 .svg-host svg :is(text, tspan, textPath) { fill: currentColor; stroke: none; }
@@ -138,6 +139,18 @@
  * bare <rect> or <circle> still reads as a filled shape rather than vanishing
  * under the fill:none above. */
 .svg-host svg :is(rect, circle, ellipse, polygon):not([fill]) { fill: currentColor; }
+
+/* Except where the author already said what to fill with, further up the tree.
+ *
+ * The rule above is a declaration on the shape itself, and a declaration beats
+ * an inherited presentation attribute however close the ancestor is - so
+ * `<g fill="none"><polygon points="..."/></g>` came out as a solid black
+ * triangle. That is precisely the markup the system prompt asks models to
+ * write, which made an outlined figure arrive as a filled silhouette with its
+ * own labels swallowed. Handing the shape back to inheritance restores what
+ * the diagram actually says. */
+.svg-host svg[fill] :is(rect, circle, ellipse, polygon):not([fill]),
+.svg-host svg [fill] :is(rect, circle, ellipse, polygon):not([fill]) { fill: inherit; }
 
 /* Markers (arrowheads) are filled by convention. */
 .svg-host svg marker :is(path, polygon, circle):not([fill]) { fill: currentColor; }

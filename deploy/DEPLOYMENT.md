@@ -838,6 +838,58 @@ stays a file name and a sentence with no symbols in it is never touched.
 Answer options are never rendered as centred display equations, whatever the
 model marks them as — an option is one short thing on a line beside its letter.
 
+### Diagrams: what the model draws, and what to do when it is wrong
+
+Figures are the weakest thing a text model produces. Left alone it will happily
+return one diagonal line captioned *"Similar Triangles ABC and DEF"* — valid
+markup, renders fine, and completely meaningless to a child.
+
+Three things now stand between that and a student.
+
+**The model plans the picture before it draws it.** Every SVG and Mermaid block
+carries a short brief: what a person looking at the figure would see, every
+label that must appear in it, and anything else that must be visible (a
+right-angle mark, two lines drawn parallel). Writing the plan first improves the
+drawing on its own — but the real reason it is kept is that it is the only thing
+that makes a drawing checkable afterwards.
+
+**A drawing that cannot be what it says it is never reaches the review queue.**
+On the way in, every figure is checked against its own brief: it must have a
+viewBox, it must contain at least one whole shape rather than a lone stroke, and
+it must actually contain the labels it promised. A figure that fails is deleted
+and the question is marked as *needing a picture*, with the brief already
+written into the prompt. The question itself is kept — a good stem is never
+thrown away over a bad sketch — and the generation run says how many were
+affected. Questions written before this existed are checked against their own
+wording instead: *"In triangle ABC…"* expects A, B and C to be in the figure.
+
+**A reviewer can redraw or replace any figure.** Under a question with a
+picture there is a **Figure not right?** link, which opens:
+
+- the brief the figure was drawn from, so it can be judged against what it was
+  meant to be rather than against a guess;
+- a box for what is wrong with it, in your own words;
+- **Draw it again** — the text model gets the brief, your note, and one more
+  attempt at the figure alone, not the whole question. What comes back is shown
+  to you and saved only if you press **Use this drawing**;
+- **Delete it and use a generated picture** — removes the drawing outright
+  (and, if it was a generated photograph, the file behind it) and leaves the
+  question asking for a picture, which hands it to the panel below.
+
+**The picture prompt is editable where it is shown.** On a question waiting for
+a picture, **Edit prompt** turns the wording into a form: the prompt itself,
+what the picture must show, the list of things that must be visible, the style
+and the alt text. Save it and the next **Generate the picture** uses your
+wording. Where the picture goes is not editable — that is a fact about the
+question, not a matter of phrasing.
+
+An install upgrading from an earlier version has the improved prompt applied
+automatically on the next start, but **only if nobody has edited it**. A prompt
+you have changed under *Settings → Prompts* is left exactly as you wrote it; the
+startup log says which templates were updated and which were left alone. If you
+want the new drawing rules on a prompt you have customised, copy them across by
+hand from a fresh template.
+
 ### Putting approved questions on a test
 
 Two ways, whichever suits the moment:

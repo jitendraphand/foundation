@@ -6,7 +6,9 @@ import { prisma } from '../db.js';
 import { callParamsFor } from './credentials.js';
 import { imageProblem } from './capabilities.js';
 import { LlmError } from './providers.js';
-import type { LlmImagePrompt } from './schema.js';
+import { imagePromptSchema, type LlmImagePrompt } from './schema.js';
+import { describeDiagram } from '../lib/diagram.js';
+import type { Block } from '../lib/content.js';
 
 /**
  * Making the picture a question asks for.
@@ -70,6 +72,45 @@ function nearestSize(widthPx: number, heightPx: number): '1024x1024' | '1536x102
   if (ratio < 0.8) return '1024x1536';
   return '1024x1024';
 }
+
+/**
+ * The picture request that replaces a discarded figure.
+ *
+ * Written from the figure's own brief, so the administrator opens the review
+ * screen with a usable prompt already in the box rather than a blank field and
+ * a question referring to something that is not there.
+ *
+ * A discarded *drawing* asks for line art, because that is what it was standing
+ * in for. A discarded *photograph* asks for a photograph: replacing a picture
+ * of laboratory apparatus with a black-and-white line diagram would answer a
+ * question nobody asked. Either way the wording is a starting point the
+ * reviewer can edit before generating.
+ */
+export function pictureRequestFor(block: Block, stemText: string) {
+  const { description, details } = describeDiagram(block, stemText);
+  const subject = description || 'the figure this question refers to';
+  const photo = block.type === 'image';
+
+  return imagePromptSchema.parse({
+    prompt: photo
+      ? `A clear, realistic photograph: ${subject}. Well lit, in focus, taken square on against a plain ` +
+        'uncluttered background, with the subject filling most of the frame.'
+      : `A clear, accurate educational diagram: ${subject}. ` +
+        'Clean black line art on a plain white background, every label written in legible upright type, ' +
+        'geometrically correct proportions, no shading, no decoration, no watermark.',
+    description: subject.length >= 10 ? subject : `A ${photo ? 'picture' : 'diagram'} showing ${subject}`,
+    details,
+    style: photo
+      ? 'realistic colour photograph, neutral uncluttered background'
+      : 'clean black-and-white line diagram, white background, labels in plain upright type',
+    widthPx: 800,
+    heightPx: 600,
+    altText: subject.slice(0, 300),
+    placement: 'STEM',
+    optionId: null,
+  });
+}
+
 
 /** Everything a picture generator needs, in one string. */
 export function flattenImagePrompt(spec: LlmImagePrompt): string {
