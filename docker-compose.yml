@@ -47,6 +47,13 @@ services:
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-foundation_123}
       SESSION_TTL_MINUTES: ${SESSION_TTL_MINUTES:-720}
+      # Both of these are offered in .env.example and read by the server, so
+      # they have to be handed to the container - without these two lines an
+      # operator who turned single-device login off, or lengthened the idle
+      # timeout, would see the setting quietly ignored. The defaults here match
+      # the server's own, so behaviour is unchanged when .env says nothing.
+      IDLE_TIMEOUT_MINUTES: ${IDLE_TIMEOUT_MINUTES:-30}
+      SINGLE_DEVICE_LOGIN: ${SINGLE_DEVICE_LOGIN:-true}
       BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
       LLM_TIMEOUT_MS: ${LLM_TIMEOUT_MS:-180000}
       PUBLIC_HOST: ${PUBLIC_HOST}

@@ -477,7 +477,9 @@ npm install
 npm run dev
 ```
 
-Sign in as `admin` / `foundation_123`.
+Sign in as `admin` with the `ADMIN_PASSWORD` from your `.env`. On a real
+server `deploy/bootstrap.sh` generates one for you and prints it; the example
+value `foundation_123` is for a laptop trial only.
 
 ---
 

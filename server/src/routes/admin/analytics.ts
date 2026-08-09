@@ -4,12 +4,7 @@ import { prisma } from '../../db.js';
 import { ALL_AXES, findWeakAreas, type Breakdown, type Cell, type WeakArea } from '../../lib/analytics.js';
 import { describeAudience, inAudience } from '../../lib/audience.js';
 import { testsVisibleTo } from './tests.js';
-
-/** One cell of a CSV, quoted only when it has to be. */
-function csvCell(v: unknown): string {
-  const s = v === null || v === undefined ? '' : String(v);
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-}
+import { csvCell } from '../../lib/csv.js';
 
 const today = () => new Date().toISOString().slice(0, 10);
 

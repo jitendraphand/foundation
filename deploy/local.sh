@@ -77,6 +77,19 @@ else
   info "ENCRYPTION_KEY already set, leaving it alone"
 fi
 
+# ADMIN_PASSWORD is the one a person types, so it is generated too when it is
+# still the example value. A laptop trial is usually on a school Wi-Fi with the
+# students on it, and "admin / foundation_123" is published in this repository -
+# a class finds that in an afternoon. Replacing it here only affects the
+# password the seed uses when it creates the administrator; an install that
+# already has one keeps whatever was set in the app.
+if [ "$(sed -n 's|^ADMIN_PASSWORD=||p' .env | head -1)" = "foundation_123" ]; then
+  set_value ADMIN_PASSWORD "$(openssl rand -base64 18 | tr -d '\n/+=' | head -c 16)"
+  info "Generated ADMIN_PASSWORD - it is printed at the end of this run"
+else
+  info "ADMIN_PASSWORD already set, leaving it alone"
+fi
+
 # POSTGRES_PASSWORD is different again, and the placeholder must NOT be
 # replaced. Postgres bakes the password into the data volume the first time it
 # starts; changing it here afterwards leaves the API unable to log in to its
@@ -125,7 +138,7 @@ ADMIN_PASS=$(sed -n 's|^ADMIN_PASSWORD=||p' .env | head -1)
 
 echo
 info "Foundation is running: http://localhost"
-info "Sign in as ${ADMIN_USER:-admin} / ${ADMIN_PASS:-foundation_123} and change that password."
+info "Sign in as ${ADMIN_USER:-admin} / ${ADMIN_PASS} - write it down, then change it in the app."
 echo
 echo "  Other devices on the same Wi-Fi can join at:"
 for ip in $(hostname -I 2>/dev/null); do echo "      http://$ip"; done

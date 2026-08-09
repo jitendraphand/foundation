@@ -84,7 +84,9 @@ sudo docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --bu
 </details>
 
 The first build takes a few minutes. Then open **http://localhost** and sign in
-as `admin` / `foundation_123`.
+as `admin` with the `ADMIN_PASSWORD` you put in `.env`. Left at the example
+value it is `foundation_123`, which is fine for a laptop trial and must never be
+what a server on the internet is running.
 
 To let other devices join the trial — a phone or a second laptop on the same
 Wi-Fi, which is the only way to really try the student side — find your address
@@ -211,8 +213,12 @@ The very first load takes about 15 seconds while Caddy obtains its certificate.
 If you get a browser warning, wait a minute and reload — the certificate is
 still being issued.
 
-Sign in with `admin` / `foundation_123`, then **change that password
-immediately** from the footer link.
+Sign in with the username and password `bootstrap.sh` printed at the end of its
+run — the password is generated per machine, not a default, so it is the one on
+your terminal and nowhere else. If you have lost it, it is also in `.env` on the
+server (`grep ADMIN_PASSWORD .env`).
+
+Then **change it** from the footer link to something you will remember.
 
 ---
 
@@ -1179,10 +1185,16 @@ shows 0 B, re-run `./deploy/bootstrap.sh`.
 - Login and signup are rate limited; eight failed logins locks an account for
   15 minutes.
 - Every administrative action is written to an audit log.
+- Exported spreadsheets are written so a spreadsheet cannot execute them. Names
+  are typed by children at signup, and a cell beginning `=`, `+`, `-` or `@` is
+  a formula to Excel however the CSV quotes it, so those cells are prefixed to
+  force them to text. Numbers, including negative marks, are left as numbers.
+- The administrator password is generated per machine by `bootstrap.sh` and
+  `local.sh`, not taken from the example file.
 
 **Do this after your first sign-in:**
 
-1. Change the admin password.
+1. Change the admin password to one you will remember.
 2. Consider restricting SSH to your own IP in the Oracle security list.
 3. Keep downloaded backup archives in a private folder — they are not encrypted
    and contain password hashes.

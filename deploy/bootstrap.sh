@@ -101,6 +101,15 @@ else
 
   DB_PASS="$(gen)"; JWT="$(gen)"; ENC="$(gen)"
 
+  # The administrator password is generated too, and for the same reason as the
+  # rest. Leaving .env.example's placeholder in place put a site on a public IP
+  # with a password published in this repository, and "change it after your
+  # first sign-in" is advice, not a control - the window between the site
+  # answering and somebody acting on step 3 is the whole exposure.
+  #
+  # Short enough to read off a terminal and type once, then changed in the app.
+  ADMIN_PASS="$(openssl rand -base64 18 | tr -d '\n/+=' | head -c 16)"
+
   # Detect the public IP so PUBLIC_HOST can be pre-filled with a working
   # sslip.io hostname. Oracle's metadata service is authoritative; ifconfig.me
   # is the fallback.
@@ -120,8 +129,9 @@ else
   sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=${DB_PASS}|" .env
   sed -i "s|^JWT_SECRET=.*|JWT_SECRET=${JWT}|" .env
   sed -i "s|^ENCRYPTION_KEY=.*|ENCRYPTION_KEY=${ENC}|" .env
+  sed -i "s|^ADMIN_PASSWORD=.*|ADMIN_PASSWORD=${ADMIN_PASS}|" .env
   chmod 600 .env
-  ok ".env created"
+  ok ".env created, with a generated administrator password"
 fi
 
 # --- 6. Build and start -----------------------------------------------------
@@ -152,13 +162,16 @@ echo "  URL:      https://${PUBLIC_HOST_VALUE}"
 echo "  Admin:    $(grep '^ADMIN_USERNAME=' .env | cut -d= -f2)"
 echo "  Password: $(grep '^ADMIN_PASSWORD=' .env | cut -d= -f2)"
 echo
+echo "  Write that password down now - it is shown here and nowhere else."
+echo "  It also sits in .env on this machine (chmod 600)."
+echo
 echo "Next steps:"
 echo "  1. Open Oracle Cloud console > Networking > VCN > Security List and"
 echo "     allow ingress TCP on ports 80 and 443 from 0.0.0.0/0."
 echo "     (See deploy/DEPLOYMENT.md, section 4, for the exact clicks.)"
 echo "  2. Visit the URL above. The first load takes ~15 seconds while Caddy"
 echo "     obtains its HTTPS certificate."
-echo "  3. Sign in and change the admin password immediately."
+echo "  3. Sign in and change the admin password to one you will remember."
 echo "  4. Add an LLM API key under Admin > Settings."
 echo "  5. Set docs/config.js SERVER_URL to https://${PUBLIC_HOST_VALUE}"
 echo "     and enable GitHub Pages so the Enter button works."
