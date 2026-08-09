@@ -60,7 +60,11 @@ export default function AdminTestBuilder() {
   if (error) return <Alert tone="error">{error}</Alert>;
   if (!test) return <PageLoader label="Loading test" />;
 
-  const locked = test._count.attempts > 0;
+  // Mirrors compositionLock on the server. Publishing freezes the paper too,
+  // not just sitting it: the test is out, and swapping a question underneath
+  // students who can already see it is how two of them sit different exams.
+  const sat = test._count.attempts > 0;
+  const locked = sat || test.status !== 'DRAFT';
   const isPractice = test.kind === 'PRACTICE';
 
   const setReleased = async (released: boolean) => {
@@ -130,8 +134,19 @@ export default function AdminTestBuilder() {
 
       {locked && (
         <Alert tone="info">
-          {test._count.attempts} student{test._count.attempts === 1 ? ' has' : 's have'} attempted this test, so its
-          questions and marking scheme are now locked. Create a new test to make changes.
+          {sat ? (
+            <>
+              {test._count.attempts} student{test._count.attempts === 1 ? ' has' : 's have'} attempted this test, so its
+              questions and marking scheme are now locked. Create a new test to make changes.
+            </>
+          ) : test.status === 'PUBLISHED' ? (
+            <>
+              This test is published, so its questions are locked — students can see the paper and may be part-way
+              through it. Move it back to draft to change anything, then publish it again.
+            </>
+          ) : (
+            <>This test is closed, so its questions are locked. Move it back to draft to reopen it for editing.</>
+          )}
         </Alert>
       )}
 

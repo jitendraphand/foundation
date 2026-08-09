@@ -203,6 +203,31 @@ underperforming in the areas listed below. Therefore:
 - Avoid questions needing a real photograph entirely - practice should be ready
   to attempt immediately, with no waiting for a picture to be attached.`;
 
+/**
+ * The user message the Step-up Test sends.
+ *
+ * Three placeholders, and each is machinery the admin should not have to
+ * retype:
+ *
+ *   {{modeInstructions}}  what "more like this" or "build up to it" means -
+ *                         the two variants live in llm/step-up.ts because the
+ *                         student picks between them at the moment they ask.
+ *   {{source}}            the original question, its options and its tags,
+ *                         rendered from the database row.
+ *   {{count}}             how many to write.
+ *
+ * Everything around them is ordinary prose and is meant to be edited. An admin
+ * who wants to replace the mode wording entirely can simply delete
+ * {{modeInstructions}} and write their own.
+ */
+export const DEFAULT_STEP_UP_TEMPLATE = `{{modeInstructions}}
+
+{{source}}
+
+Return {"questions": [...]} with exactly {{count}} questions in the schema above, in order.
+Every question must be multiple choice with exactly one correct answer, and must carry a worked explanation - the explanation is the point of the exercise, so make it teach rather than assert.
+Do NOT produce any question needing a photograph. Draw any visual as SVG, and set "imageRequired": false.`;
+
 /** Fills {{placeholders}}; unknown ones become an empty string. */
 export function renderTemplate(
   template: string,

@@ -88,8 +88,29 @@
   .table-base tbody tr:hover { @apply bg-surface-sunken/60; }
 }
 
+/* --- Figure sizing ---------------------------------------------------------
+ *
+ * A picture attached to a question is an illustration, not a poster. Left
+ * unbounded, an 1800px anatomy diagram fills the whole card and pushes the
+ * options, the tags and every other question off the screen - so reviewing a
+ * batch of twenty means scrolling past twenty full-page images.
+ *
+ * The cap is a height rather than a width, because width is already bounded by
+ * the column and it is the tall figures that do the damage. Both values are
+ * custom properties so that one class - .figure-open, toggled by clicking the
+ * figure - lifts the cap in place for the one figure being looked at. A length
+ * rather than `none` for the open state, so the calc() in SvgBlock stays valid.
+ */
+:root { --fig-max-h: 340px; --fig-max-w: 460px; }
+
+@media (max-width: 640px) {
+  :root { --fig-max-h: 240px; --fig-max-w: 100%; }
+}
+
+.figure-open { --fig-max-h: 3000px; --fig-max-w: 100%; }
+
 /* Mermaid renders into a div; keep it from overflowing its card. */
-.mermaid-host svg { max-width: 100%; height: auto; }
+.mermaid-host svg { max-width: 100%; height: auto; max-height: var(--fig-max-h); }
 
 /* --- Model-authored SVG ----------------------------------------------------
  *

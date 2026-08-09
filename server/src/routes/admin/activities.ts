@@ -286,7 +286,9 @@ export default async function adminActivityRoutes(app: FastifyInstance) {
           isActive: true,
           deletedAt: null,
           ...(activity.targetGrades.length ? { grade: { in: activity.targetGrades } } : {}),
-          ...(activity.targetDivisions.length ? { division: { in: activity.targetDivisions } } : {}),
+          // Membership, so a child in a second division is counted in that
+          // division's audience too.
+          ...(activity.targetDivisions.length ? { divisions: { hasSome: activity.targetDivisions } } : {}),
         };
 
     const [students, completions] = await Promise.all([

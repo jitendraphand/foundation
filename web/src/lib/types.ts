@@ -160,6 +160,15 @@ export interface BankQuestion extends Omit<PaperQuestion, 'marks'> {
   createdAt: string;
   /** Set when the question has been retired. Kept for papers already sat. */
   deletedAt?: string | null;
+  /**
+   * The papers this question is on. Present on the bank listing only, and the
+   * reason there is no longer an "on a test" tab: a question carries where it
+   * has been placed, so an admin can see it is spoken for without the list
+   * being split in two.
+   */
+  testQuestions?: Array<{
+    test: { id: string; title: string; status: TestStatus; _count: { attempts: number } };
+  }>;
 }
 
 // --- Analytics -------------------------------------------------------------

@@ -1,7 +1,12 @@
 import { prisma } from './db.js';
 import { env } from './env.js';
 import { hashPassword } from './lib/password.js';
-import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_TEMPLATE, PRACTICE_SYSTEM_SUFFIX } from './llm/prompts.js';
+import {
+  DEFAULT_SYSTEM_PROMPT,
+  DEFAULT_USER_TEMPLATE,
+  DEFAULT_STEP_UP_TEMPLATE,
+  PRACTICE_SYSTEM_SUFFIX,
+} from './llm/prompts.js';
 import { ALL_PERMISSIONS } from './lib/permissions.js';
 
 /**
@@ -81,36 +86,53 @@ async function seedClasses() {
   console.log(`[seed] classes: ${grades.length} grades, ${divisions.length} divisions`);
 }
 
+/**
+ * The starting prompt for each generator.
+ *
+ * Per kind, not "are there any templates at all". An upgrade that adds a new
+ * generator has to reach a database that already holds the other two, and the
+ * old all-or-nothing check meant the new one silently never appeared - the
+ * Prompts screen would simply be missing a card, with nothing to say why.
+ *
+ * A kind that already has a template is left completely alone, edits included.
+ */
 async function seedPrompts() {
-  const existing = await prisma.promptTemplate.count();
-  if (existing > 0) {
-    console.log('[seed] prompt templates already present, leaving them alone');
-    return;
-  }
-
-  await prisma.promptTemplate.create({
-    data: {
+  const wanted = [
+    {
+      kind: 'REGULAR',
       name: 'Standard question generator',
       description: 'Default strict-JSON generator for regular tests. Handles maths, SVG diagrams, Mermaid and chart specs.',
       systemPrompt: DEFAULT_SYSTEM_PROMPT,
       userTemplate: DEFAULT_USER_TEMPLATE,
-      kind: 'REGULAR',
-      isDefault: true,
     },
-  });
-
-  await prisma.promptTemplate.create({
-    data: {
+    {
+      kind: 'PRACTICE',
       name: 'Remedial practice generator',
-      description: 'Targets one student\'s weak areas; ramps difficulty and writes fuller explanations.',
+      description: "Targets one student's weak areas; ramps difficulty and writes fuller explanations.",
       systemPrompt: DEFAULT_SYSTEM_PROMPT + PRACTICE_SYSTEM_SUFFIX,
       userTemplate: DEFAULT_USER_TEMPLATE,
-      kind: 'PRACTICE',
-      isDefault: true,
     },
-  });
+    {
+      kind: 'STEP_UP',
+      name: 'Step-up Test generator',
+      description:
+        'Used when a student asks for five more questions on one they got wrong. {{modeInstructions}} becomes ' +
+        '"more like this" or "build up to it" depending on which the student chose; {{source}} is the original ' +
+        'question and its options.',
+      systemPrompt: DEFAULT_SYSTEM_PROMPT,
+      userTemplate: DEFAULT_STEP_UP_TEMPLATE,
+    },
+  ];
 
-  console.log('[seed] prompt templates: 2 created');
+  let created = 0;
+  for (const row of wanted) {
+    const existing = await prisma.promptTemplate.count({ where: { kind: row.kind } });
+    if (existing > 0) continue;
+    await prisma.promptTemplate.create({ data: { ...row, isDefault: true } });
+    created++;
+  }
+
+  console.log(created ? `[seed] prompt templates: ${created} created` : '[seed] prompt templates already present');
 }
 
 async function seedAdmin() {
@@ -144,6 +166,7 @@ async function seedAdmin() {
       lastName: 'Administrator',
       grade: 'STAFF',
       division: 'STAFF',
+      divisions: ['STAFF'],
       rollNo: 'ADMIN',
       dateOfBirth: new Date('2000-01-01'),
       passwordHash: await hashPassword(env.ADMIN_PASSWORD),

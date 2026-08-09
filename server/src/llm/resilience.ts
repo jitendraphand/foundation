@@ -72,6 +72,23 @@ export interface AttemptNote {
   attempt: number;
   waitedMs?: number;
   error: string;
+  /** The failure itself, so a caller can inspect its status and body. */
+  cause?: unknown;
+}
+
+/**
+ * Thrown when every candidate has failed.
+ *
+ * Carries the individual failures, not just the summary, because a caller may
+ * need to know which credential produced which error - learning an output-token
+ * ceiling from a fallback provider's refusal and storing it against the
+ * administrator's chosen credential would be worse than not learning it at all.
+ */
+export class ProviderChainError extends LlmError {
+  constructor(message: string, readonly notes: AttemptNote[], status?: number, body?: string) {
+    super(message, status, body);
+    this.name = 'ProviderChainError';
+  }
 }
 
 export interface ResilientOptions {
@@ -114,18 +131,18 @@ export async function chatWithFallback(
         // Configuration errors do not improve with patience: stop retrying
         // this credential and let the next one have a go.
         if (!isTransient(err)) {
-          notes.push({ credentialLabel: candidate.label, attempt, error: message });
+          notes.push({ credentialLabel: candidate.label, attempt, error: message, cause: err });
           break;
         }
 
         // Out of attempts on this credential.
         if (attempt === maxAttempts) {
-          notes.push({ credentialLabel: candidate.label, attempt, error: message });
+          notes.push({ credentialLabel: candidate.label, attempt, error: message, cause: err });
           break;
         }
 
         const waitedMs = backoffMs(attempt, retryAfterFrom(err));
-        notes.push({ credentialLabel: candidate.label, attempt, waitedMs, error: message });
+        notes.push({ credentialLabel: candidate.label, attempt, waitedMs, error: message, cause: err });
         options.onRetry?.(notes[notes.length - 1]);
         await sleep(waitedMs);
       }
@@ -138,8 +155,9 @@ export async function chatWithFallback(
     .map((n) => `  ${n.credentialLabel} attempt ${n.attempt}: ${n.error}`)
     .join('\n');
 
-  throw new LlmError(
+  throw new ProviderChainError(
     `Every provider failed.\n${trail}`,
+    notes,
     lastError instanceof LlmError ? lastError.status : undefined,
     lastError instanceof LlmError ? lastError.body : undefined,
   );

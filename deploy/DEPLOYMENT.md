@@ -414,11 +414,25 @@ whole file. The project is read out of the file, so you only choose a region.
 Vertex has no long-lived key — the file is exchanged for an hour-long token
 behind the scenes and re-used until it expires.
 
-**Oracle Cloud** caps a completion at 4096 tokens per model and rejects any
-request asking for more, rather than returning less. A run is therefore split
-into more, smaller calls there — two questions each, or one for a reasoning
-model — which is handled automatically and shows in the run's own notes. It is
-slower than the same run on Bedrock or OpenAI, not less reliable.
+**Reply limits.** Every provider caps how many tokens one reply may contain,
+the cap differs per model, and most of them reject the whole request rather
+than returning less — Oracle Cloud's is 4096, Claude 3.5 on Bedrock is 8192,
+Amazon Nova is 5120. Nothing needs configuring for this:
+
+- Where the limit is known in advance, questions are asked for in batches that
+  fit — two per call on Oracle, ten on OpenAI or OpenRouter.
+- Where it is not, the first request is refused, the refusal names the real
+  limit, and that number is used immediately to re-plan the rest of the run and
+  is remembered against that credential and model. The run's notes say so. Only
+  the first run on a new model ever pays for this, and it costs one call.
+- The **Reply limit** column in *Settings → LLM providers* shows the figure in
+  force, greyed out when it was learned rather than typed. Fill it in only for
+  an endpoint that refuses long replies *without saying so* — a self-hosted
+  model that truncates in silence, or provisioned throughput whose limit
+  differs from the published one. Blank means "work it out".
+
+A provider with a low limit is slower for the same run, because it takes more
+calls; it is not less reliable.
 
 **Oracle Cloud setup.** Four identifiers plus a private key, all from *Identity → My
 profile → API keys*: tenancy OCID, user OCID, the fingerprint shown beside the
@@ -526,6 +540,14 @@ Choose which provider answers those, separately from the one papers are set
 with — students trigger this themselves, several times a day across a class, so
 it usually wants pointing at something cheap even when papers use the best
 model available. Left as *Off*, the buttons do not appear at all.
+
+What it asks the model for is editable like any other generator, under **Admin
+→ Settings → Prompts → Step-up Test generator**. Its user template has three
+placeholders that are filled in per request: `{{modeInstructions}}` (whichever
+of "more like this" or "build up to it" the student chose), `{{source}}` (the
+original question with its options and tags) and `{{count}}`. Everything around
+them is ordinary prose — rewrite it freely, and delete a placeholder if you
+would rather write that part yourself.
 
 It is limited to six a student an hour, and a student can only build on a
 question from a paper they actually sat whose results have been released — both
@@ -638,6 +660,33 @@ they must change it at first sign-in.
 Grant **Manage administrators** sparingly — a holder can change anybody's
 privileges, including yours. The system will not let you remove the last one.
 
+### Grades and divisions
+
+**Admin → Settings → Grades & divisions.** Type a name and press **Add** — the
+stored code is derived from it and shown before you commit, because that code
+goes onto every student record and into every saved report and can never be
+renamed afterwards. Rename the *label* whenever you like; it is only what the
+dropdown shows.
+
+Two other controls per row:
+
+- **Offered at signup** decides whether students can pick it when creating their
+  own account. Clearing it changes nothing for anybody already in that class —
+  useful for a division you would rather assign yourself.
+- **Delete** removes it outright, and is refused while anybody is in it, naming
+  how many. Untick *Offered at signup* to retire a class instead; deleting one
+  in use would leave students filed under a code with no name.
+
+**A student can be in more than one division.** Under **Admin → Students →
+Edit**, *Division* is their home division — the one their roll number is unique
+within, and the one reports group by — and **Also in** ticks any others. A test
+or activity set for *any* of a student's divisions reaches them, so a child in
+both the Science Foundation and the Sports Foundation gets both papers. The
+student list shows the extras after the class, as `8-SCIENCE +SPORTS`.
+
+Students choosing their own division at signup still pick exactly one; a second
+is an administrator's decision.
+
 ### Pausing a test outside certain hours
 
 Set the school timezone once under **Admin → Settings → School** — every window
@@ -704,8 +753,32 @@ with a count, including *All subjects*. This matters because subjects are free
 text: a test called "Maths" and questions filed under "Mathematics" are two
 different subjects, and the picker will say so rather than appearing empty.
 
-Only approved questions can go on a paper, and a test students have already
-attempted is locked — make a new one instead.
+Only approved questions can go on a paper. The question bank has three lists —
+*Awaiting review*, *Approved* and *Rejected*; a question already placed on a
+paper stays under **Approved** and carries a badge naming that paper, so it can
+still be found where you went looking for it. What is actually on a given
+paper, in order and with its marks, is on that paper's own page.
+
+### What happens when a test goes live
+
+Publishing a test freezes it. From that moment, and for as long as it is
+published or has been attempted, nobody can:
+
+- add a question to it, or take one off,
+- edit any question that is on it — the wording, the options, the answer, the
+  tags, or an attached picture,
+- reject or delete any question that is on it.
+
+The **Edit** and **Reject** buttons in the question bank grey out with the
+reason, and the API refuses the same things for anyone going round the UI. This
+is not caution: students can see a published paper and may be part-way through
+it, so changing question four underneath them means two children sit different
+exams.
+
+To change something, move the test back to **draft**, make the change, and
+publish again. A test students have already *attempted* cannot be reopened at
+all — their marks were worked out from exactly those questions — so make a new
+one instead.
 
 ### Releasing results after a test
 

@@ -8,6 +8,42 @@ import { audit, requirePermission } from '../../middleware/auth.js';
 import { ALL_PERMISSIONS, PERMISSIONS, PRESETS, sanitizePermissions, type Permission } from '../../lib/permissions.js';
 import { revokeAllSessions } from '../../services/sessions.js';
 
+/**
+ * Turns whatever the admin sent into the pair of columns the database keeps.
+ *
+ * A student has a home division - the one their roll number is unique inside -
+ * and a list of every division they belong to. Those must never disagree, so
+ * there is exactly one function that decides both, and it is the only thing any
+ * write path calls.
+ *
+ * The home division wins its place at the front, whether it arrived on its own,
+ * inside the list, or both. Duplicates are dropped rather than rejected: an
+ * admin ticking "Science Foundation" on a child already filed under it has
+ * expressed no error worth a message.
+ */
+function setDivisions(home: string, extra?: string[]): { division: string; divisions: string[] } {
+  const all = [home, ...(extra ?? [])].map((d) => d.trim()).filter(Boolean);
+  return { division: home, divisions: [...new Set(all)] };
+}
+
+/** Every division code named in a create or edit, for one existence check. */
+function divisionCodes(home: string | undefined, extra: string[] | undefined): string[] {
+  return [...new Set([home, ...(extra ?? [])].filter((d): d is string => !!d && d.trim() !== ''))];
+}
+
+/**
+ * Which of these division codes are not real. Named so the message can list
+ * them, rather than saying "that division does not exist" about a set of four.
+ */
+async function unknownDivisions(codes: string[]): Promise<string[]> {
+  if (codes.length === 0) return [];
+  const found = await prisma.schoolClass.findMany({
+    where: { kind: 'DIVISION', code: { in: codes } },
+    select: { code: true },
+  });
+  return codes.filter((c) => !found.some((f) => f.code === c));
+}
+
 export default async function adminUserRoutes(app: FastifyInstance) {
   /** Paginated, searchable user list. */
   app.get('/api/admin/users', { preHandler: requirePermission('users.manage') }, async (request) => {
@@ -27,7 +63,10 @@ export default async function adminUserRoutes(app: FastifyInstance) {
       deletedAt: null,
       role: 'STUDENT',
       ...(q.grade ? { grade: q.grade } : {}),
-      ...(q.division ? { division: q.division } : {}),
+      // Membership, not the home division: filtering by Sports Foundation has
+      // to find the child whose home division is Science Foundation and who is
+      // in Sports Foundation as well.
+      ...(q.division ? { divisions: { has: q.division } } : {}),
       ...(q.status === 'active' ? { isActive: true } : q.status === 'inactive' ? { isActive: false } : {}),
       ...(q.search
         ? {
@@ -58,7 +97,7 @@ export default async function adminUserRoutes(app: FastifyInstance) {
         take: q.pageSize,
         select: {
           id: true, publicId: true, username: true, firstName: true, lastName: true, grade: true, division: true,
-          rollNo: true, dateOfBirth: true, isActive: true, lastLoginAt: true, createdAt: true,
+          divisions: true, rollNo: true, dateOfBirth: true, isActive: true, lastLoginAt: true, createdAt: true,
           _count: { select: { attempts: true } },
         },
       }),
@@ -75,7 +114,7 @@ export default async function adminUserRoutes(app: FastifyInstance) {
       where: { id, deletedAt: null },
       select: {
         id: true, publicId: true, username: true, firstName: true, lastName: true, grade: true, division: true,
-        rollNo: true, dateOfBirth: true, isActive: true, role: true, lastLoginAt: true,
+        divisions: true, rollNo: true, dateOfBirth: true, isActive: true, role: true, lastLoginAt: true,
         createdAt: true, mustChangePassword: true,
       },
     });
@@ -99,6 +138,12 @@ export default async function adminUserRoutes(app: FastifyInstance) {
     lastName: z.string().trim().min(1).max(60).optional(),
     grade: z.string().trim().min(1).max(20).optional(),
     division: z.string().trim().min(1).max(20).optional(),
+    /**
+     * Additional divisions beyond the home one. Sending this replaces the whole
+     * set, so the UI always posts the full list rather than a delta - a delta
+     * would need a removal verb and two tabs open would then fight.
+     */
+    divisions: z.array(z.string().trim().min(1).max(20)).max(20).optional(),
     rollNo: z.string().trim().min(1).max(20).optional(),
     dateOfBirth: z.string().optional(),
     isActive: z.boolean().optional(),
@@ -129,19 +174,27 @@ export default async function adminUserRoutes(app: FastifyInstance) {
       const g = await prisma.schoolClass.findUnique({ where: { kind_code: { kind: 'GRADE', code: body.grade } } });
       if (!g) return reply.code(400).send({ error: 'That grade does not exist.' });
     }
-    if (body.division) {
-      const d = await prisma.schoolClass.findUnique({ where: { kind_code: { kind: 'DIVISION', code: body.division } } });
-      if (!d) return reply.code(400).send({ error: 'That division does not exist.' });
+    const unknown = await unknownDivisions(divisionCodes(body.division, body.divisions));
+    if (unknown.length) {
+      return reply.code(400).send({
+        error: `${unknown.length === 1 ? 'This division does' : 'These divisions do'} not exist: ${unknown.join(', ')}.`,
+      });
     }
 
     const data: Prisma.UserUpdateInput = {
       ...(body.firstName !== undefined ? { firstName: body.firstName } : {}),
       ...(body.lastName !== undefined ? { lastName: body.lastName } : {}),
       ...(body.grade !== undefined ? { grade: body.grade } : {}),
-      ...(body.division !== undefined ? { division: body.division } : {}),
       ...(body.rollNo !== undefined ? { rollNo: body.rollNo } : {}),
       ...(body.isActive !== undefined ? { isActive: body.isActive } : {}),
     };
+
+    // Both columns move together or neither does; see setDivisions. The home
+    // division falls back to the stored one, so an edit that only adds a second
+    // division does not have to restate the first.
+    if (body.division !== undefined || body.divisions !== undefined) {
+      Object.assign(data, setDivisions(body.division ?? before.division, body.divisions));
+    }
 
     if (body.dateOfBirth) {
       const dob = new Date(body.dateOfBirth);
@@ -188,6 +241,7 @@ export default async function adminUserRoutes(app: FastifyInstance) {
             lastName: before.lastName,
             grade: before.grade,
             division: before.division,
+            divisions: before.divisions,
             rollNo: before.rollNo,
             isActive: before.isActive,
           },
@@ -396,6 +450,8 @@ export default async function adminUserRoutes(app: FastifyInstance) {
         lastName: z.string().trim().min(1).max(60),
         grade: z.string().trim().min(1).max(20).optional(),
         division: z.string().trim().min(1).max(20).optional(),
+        /** Any further divisions this student is also in; see setDivisions. */
+        divisions: z.array(z.string().trim().min(1).max(20)).max(20).optional(),
         rollNo: z.string().trim().min(1).max(20).optional(),
         dateOfBirth: z.string(),
         password: z.string().min(1).max(200),
@@ -450,12 +506,16 @@ export default async function adminUserRoutes(app: FastifyInstance) {
       if (!grade || !division || !rollNo) {
         return reply.code(400).send({ error: 'A student needs a grade, a division and a roll number.' });
       }
-      const [g, d] = await Promise.all([
+      const [g, unknown] = await Promise.all([
         prisma.schoolClass.findUnique({ where: { kind_code: { kind: 'GRADE', code: grade } } }),
-        prisma.schoolClass.findUnique({ where: { kind_code: { kind: 'DIVISION', code: division } } }),
+        unknownDivisions(divisionCodes(division, body.divisions)),
       ]);
       if (!g) return reply.code(400).send({ error: 'That grade does not exist.' });
-      if (!d) return reply.code(400).send({ error: 'That division does not exist.' });
+      if (unknown.length) {
+        return reply.code(400).send({
+          error: `${unknown.length === 1 ? 'This division does' : 'These divisions do'} not exist: ${unknown.join(', ')}.`,
+        });
+      }
     }
 
     const passwordHash = await hashPassword(body.password);
@@ -469,7 +529,10 @@ export default async function adminUserRoutes(app: FastifyInstance) {
             firstName: body.firstName,
             lastName: body.lastName,
             grade: grade!,
-            division: division!,
+            // An administrator gets the STAFF division and nothing else: they
+            // are not in a class, and a second one would put them in a class
+            // list. Only a student can carry extras.
+            ...setDivisions(division!, isAdmin ? [] : body.divisions),
             rollNo: rollNo!,
             dateOfBirth: dob,
             passwordHash,

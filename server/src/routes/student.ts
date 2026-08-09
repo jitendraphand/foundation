@@ -44,7 +44,10 @@ export default async function studentRoutes(app: FastifyInstance) {
 
     const me = await prisma.user.findUniqueOrThrow({
       where: { id: userId },
-      select: { id: true, publicId: true, firstName: true, lastName: true, username: true, grade: true, division: true, rollNo: true },
+      select: {
+        id: true, publicId: true, firstName: true, lastName: true, username: true,
+        grade: true, division: true, divisions: true, rollNo: true,
+      },
     });
 
     const now = new Date();
@@ -63,7 +66,9 @@ export default async function studentRoutes(app: FastifyInstance) {
                 kind: 'REGULAR',
                 AND: [
                   { OR: [{ targetGrades: { isEmpty: true } }, { targetGrades: { has: me.grade } }] },
-                  { OR: [{ targetDivisions: { isEmpty: true } }, { targetDivisions: { has: me.division } }] },
+                  // Any of the student's divisions, not just the home one: a
+                  // child in both foundations must see a paper set for either.
+                  { OR: [{ targetDivisions: { isEmpty: true } }, { targetDivisions: { hasSome: me.divisions } }] },
                 ],
               },
               // Practice tests assigned specifically to this student.
@@ -280,7 +285,7 @@ export default async function studentRoutes(app: FastifyInstance) {
 
     const me = await prisma.user.findUniqueOrThrow({
       where: { id: userId },
-      select: { grade: true, division: true },
+      select: { grade: true, divisions: true },
     });
 
     const test = await prisma.test.findFirst({
@@ -321,7 +326,8 @@ export default async function studentRoutes(app: FastifyInstance) {
       if (test.targetUserId !== userId) return reply.code(403).send({ error: 'That practice test is not assigned to you.' });
     } else {
       const gradeOk = test.targetGrades.length === 0 || test.targetGrades.includes(me.grade);
-      const divOk = test.targetDivisions.length === 0 || test.targetDivisions.includes(me.division);
+      const divOk =
+        test.targetDivisions.length === 0 || test.targetDivisions.some((d) => me.divisions.includes(d));
       if (!gradeOk || !divOk) return reply.code(403).send({ error: 'That test is not assigned to your class.' });
     }
 

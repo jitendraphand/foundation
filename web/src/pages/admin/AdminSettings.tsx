@@ -147,6 +147,10 @@ interface Credential {
     projectId?: string;
     apiVersion?: string;
     useAsFallback?: boolean;
+    /** An administrator's explicit ceiling on one reply's length. */
+    maxOutputTokens?: number;
+    /** What each model was observed to refuse above, learned from a refusal. */
+    tokenCeilings?: Record<string, number>;
   } | null;
 }
 
@@ -267,6 +271,31 @@ function Providers() {
     }
   };
 
+  /**
+   * The largest reply this endpoint will accept.
+   *
+   * Almost never needed: a provider that refuses an oversized request names its
+   * real limit, and that number is remembered automatically. This is for the
+   * cases where nobody is told - a self-hosted endpoint that truncates in
+   * silence, or provisioned throughput whose limit differs from the published
+   * one. Blank hands the decision back to what was learned.
+   */
+  const setMaxOutputTokens = async (credential: Credential, raw: string) => {
+    const trimmed = raw.trim();
+    const value = trimmed === '' ? null : Number(trimmed);
+    if (value !== null && (!Number.isFinite(value) || value < 256)) {
+      setError('A reply limit has to be at least 256 tokens. Leave it blank to remove the limit.');
+      return;
+    }
+    setError(null);
+    try {
+      await api.patch(`/api/admin/credentials/${credential.id}`, { maxOutputTokens: value });
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not save that limit.');
+    }
+  };
+
   const setFallback = async (credential: Credential, useAsFallback: boolean) => {
     try {
       await api.patch(`/api/admin/credentials/${credential.id}`, { useAsFallback });
@@ -313,6 +342,7 @@ function Providers() {
                   <th>Key</th>
                   <th>Default model</th>
                   <th className="text-center">Fallback</th>
+                  <th>Reply limit</th>
                   <th>Added</th>
                   <th />
                 </tr>
@@ -331,6 +361,31 @@ function Providers() {
                         checked={credential.meta?.useAsFallback === true}
                         onChange={(e) => void setFallback(credential, e.target.checked)}
                         aria-label={`Use ${credential.label} as a fallback`}
+                      />
+                    </td>
+                    <td>
+                      <input
+                        className="input w-24 text-xs tabular-nums"
+                        type="number"
+                        min={256}
+                        step={256}
+                        placeholder={
+                          // What was learned from a refusal, when anything has
+                          // been - shown as the placeholder so it reads as the
+                          // value in force rather than something typed in.
+                          Object.values(credential.meta?.tokenCeilings ?? {}).length
+                            ? String(Math.min(...Object.values(credential.meta!.tokenCeilings!)))
+                            : 'auto'
+                        }
+                        defaultValue={credential.meta?.maxOutputTokens ?? ''}
+                        onBlur={(e) => {
+                          const next = e.target.value.trim();
+                          const current = credential.meta?.maxOutputTokens;
+                          if (next === String(current ?? '')) return;
+                          void setMaxOutputTokens(credential, next);
+                        }}
+                        aria-label={`Largest reply ${credential.label} accepts, in tokens`}
+                        title="Tokens per reply. Leave blank unless this endpoint refuses long replies without saying so."
                       />
                     </td>
                     <td className="text-xs text-ink-muted whitespace-nowrap">{formatDate(credential.createdAt)}</td>
@@ -887,7 +942,8 @@ interface Template {
   description: string | null;
   systemPrompt: string;
   userTemplate: string;
-  kind: 'REGULAR' | 'PRACTICE';
+  /** Which generator uses it. STEP_UP papers are stored as practice tests. */
+  kind: 'REGULAR' | 'PRACTICE' | 'STEP_UP';
   isDefault: boolean;
   isActive: boolean;
   version: number;
@@ -933,7 +989,7 @@ function Prompts() {
                 <h3 className="text-sm font-medium">
                   {template.name}
                   {template.isDefault && <Badge tone="info">default</Badge>}
-                  <Badge>{template.kind.toLowerCase()}</Badge>
+                  <Badge>{template.kind.toLowerCase().replace('_', '-')}</Badge>
                   <span className="ml-2 text-[11px] text-ink-faint">v{template.version}</span>
                 </h3>
                 {template.description && <p className="text-xs text-ink-muted mt-1">{template.description}</p>}
@@ -989,7 +1045,18 @@ function EditPromptModal({ template, onClose, onSaved }: { template: Template; o
           <textarea className="input font-mono text-[11px]" rows={18} value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} spellCheck={false} />
         </Field>
 
-        <Field label="User message template" hint="Placeholders: {{count}} {{subject}} {{topic}} {{subtopic}} {{grade}} {{marksPerQuestion}} {{difficultyMix}} {{cognitiveMix}} {{formats}} {{skillFocus}} {{extraInstructions}}">
+        {/* The placeholders differ by generator: Step-up is handed one
+            existing question and the mode the student chose, not a spec. */}
+        <Field
+          label="User message template"
+          hint={
+            template.kind === 'STEP_UP'
+              ? 'Placeholders: {{modeInstructions}} — “more like this” or “build up to it”, whichever the student ' +
+                'chose; {{source}} — the original question with its options and tags; {{count}} — how many to write.'
+              : 'Placeholders: {{count}} {{subject}} {{topic}} {{subtopic}} {{grade}} {{marksPerQuestion}} ' +
+                '{{difficultyMix}} {{cognitiveMix}} {{formats}} {{skillFocus}} {{extraInstructions}}'
+          }
+        >
           <textarea className="input font-mono text-[11px]" rows={8} value={userTemplate} onChange={(e) => setUserTemplate(e.target.value)} spellCheck={false} />
         </Field>
 
@@ -1073,9 +1140,67 @@ interface SchoolClass {
   isActive: boolean;
 }
 
+/**
+ * Adds a grade or a division.
+ *
+ * The code is what gets written onto every student row and into every saved
+ * breakdown, so it is derived from the label rather than typed separately -
+ * two fields where one has to be machine-safe is a trap - and it can never be
+ * edited afterwards. It is shown while typing so nobody is surprised by what
+ * lands in their exports.
+ */
+function AddClass({ kind, onAdded }: { kind: 'GRADE' | 'DIVISION'; onAdded: (message: string) => void }) {
+  const [label, setLabel] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const code = label.trim().toUpperCase().replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 20);
+  const noun = kind === 'GRADE' ? 'grade' : 'division';
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!code) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await api.post('/api/admin/classes', { kind, code, label: label.trim(), sortOrder: 100 });
+      setLabel('');
+      onAdded(`${label.trim()} added.`);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : `Could not add that ${noun}.`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form onSubmit={submit} className="px-4 py-3 border-t border-line space-y-2">
+      {error && <Alert tone="error" onDismiss={() => setError(null)}>{error}</Alert>}
+      <div className="flex gap-2">
+        <input
+          className="input"
+          placeholder={kind === 'GRADE' ? 'e.g. Grade 11' : 'e.g. Music Foundation'}
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          maxLength={60}
+        />
+        <button type="submit" className="btn-secondary btn-sm shrink-0" disabled={busy || !code}>
+          {busy ? 'Adding…' : `Add ${noun}`}
+        </button>
+      </div>
+      {code && (
+        <p className="text-[11px] text-ink-faint">
+          Stored as <span className="font-mono text-ink-muted">{code}</span>, which cannot be changed later.
+        </p>
+      )}
+    </form>
+  );
+}
+
 function Classes() {
   const [data, setData] = useState<{ grades: SchoolClass[]; divisions: SchoolClass[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -1094,8 +1219,20 @@ function Classes() {
     await load();
   };
 
-  if (error) return <Alert tone="error">{error}</Alert>;
-  if (!data) return <PageLoader label="Loading" />;
+  const remove = async (row: SchoolClass) => {
+    setError(null);
+    try {
+      const res = await api.delete<{ message: string }>(`/api/admin/classes/${row.id}`);
+      setNotice(res.message);
+      await load();
+    } catch (err) {
+      // The refusal explains itself - who is still in it, and what to do
+      // instead - so it is shown as-is.
+      setError(err instanceof ApiError ? err.message : 'Could not delete that.');
+    }
+  };
+
+  if (!data) return error ? <Alert tone="error">{error}</Alert> : <PageLoader label="Loading" />;
 
   return (
     <div className="space-y-4">
@@ -1105,34 +1242,47 @@ function Classes() {
         in the dropdown when a student creates their own account. Existing
         students keep theirs, and an administrator can still assign it.
       */}
+      {error && <Alert tone="error" onDismiss={() => setError(null)}>{error}</Alert>}
+      {notice && <Alert tone="success" onDismiss={() => setNotice(null)}>{notice}</Alert>}
+
       <Alert tone="info">
         These are the grades and divisions a student can choose when they create their own account. Clearing the tick
         takes one off that form without affecting anybody already in it — useful for a class that has left, or one you
-        want to assign yourself rather than let students pick.
+        want to assign yourself rather than let students pick. A student can be in more than one division; set that
+        on the student under Students → Edit.
       </Alert>
 
       <div className="grid md:grid-cols-2 gap-4">
-      {([['Grades', data.grades], ['Divisions', data.divisions]] as const).map(([title, rows]) => (
+      {([['Grades', data.grades, 'GRADE'], ['Divisions', data.divisions, 'DIVISION']] as const).map(
+        ([title, rows, kind]) => (
         <Card key={title} title={title} padded={false}>
           <ul className="divide-y divide-line">
             {rows.map((row) => (
-              <li key={row.id} className="px-4 py-2 flex items-center justify-between gap-3">
+              <li key={row.id} className="px-4 py-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
                 <span className="text-sm">
                   {row.label}
                   <span className="ml-2 font-mono text-xs text-ink-faint">{row.code}</span>
                 </span>
-                <label className="flex items-center gap-2 text-xs text-ink-muted whitespace-nowrap cursor-pointer">
-                  <input
-                    type="checkbox"
-                    className="accent-series-1"
-                    checked={row.isActive}
-                    onChange={() => toggle(row)}
-                  />
-                  Offered at signup
-                </label>
+                <div className="flex items-center gap-3">
+                  <label className="flex items-center gap-2 text-xs text-ink-muted whitespace-nowrap cursor-pointer">
+                    <input
+                      type="checkbox"
+                      className="accent-series-1"
+                      checked={row.isActive}
+                      onChange={() => toggle(row)}
+                    />
+                    Offered at signup
+                  </label>
+                  {/* Refused server-side the moment anybody is in it, with a
+                      message naming how many - so no confirmation here. */}
+                  <button type="button" className="btn-ghost btn-sm text-bad" onClick={() => void remove(row)}>
+                    Delete
+                  </button>
+                </div>
               </li>
             ))}
           </ul>
+          <AddClass kind={kind} onAdded={async (message) => { setNotice(message); await load(); }} />
         </Card>
       ))}
       </div>

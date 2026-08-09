@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api, ApiError } from '../../lib/api';
 import { Alert, Badge, Card, EmptyState, Field, Modal, PageLoader, Spinner, humanizeTag } from '../../components/ui';
 import { ContentRenderer, BlocksRenderer } from '../../renderers/BlockRenderer';
@@ -13,14 +13,32 @@ import type { BankQuestion, Tag } from '../../lib/types';
  * wrong, then approves it.
  */
 
-type Bucket = 'DRAFT' | 'APPROVED' | 'ON_TEST' | 'REJECTED';
+type Bucket = 'DRAFT' | 'APPROVED' | 'REJECTED';
 
 const BUCKETS: Array<{ id: Bucket; label: string }> = [
   { id: 'DRAFT', label: 'Awaiting review' },
   { id: 'APPROVED', label: 'Approved' },
-  { id: 'ON_TEST', label: 'On a test' },
   { id: 'REJECTED', label: 'Rejected' },
 ];
+
+/**
+ * Whether this question may still be changed, and why not.
+ *
+ * The server decides this for real (see liveTestLocks in routes/admin/
+ * questions.ts); this is the same rule again so the button is disabled with a
+ * reason instead of being offered and then refused.
+ */
+function frozenBy(question: BankQuestion): string | null {
+  const sat = question.testQuestions?.find((tq) => tq.test._count.attempts > 0);
+  if (sat) {
+    return `It is on “${sat.test.title}”, which students have already sat. Their marks came from this exact question.`;
+  }
+  const live = question.testQuestions?.find((tq) => tq.test.status === 'PUBLISHED');
+  if (live) {
+    return `It is on “${live.test.title}”, which is live to students. Move that test back to draft to change it.`;
+  }
+  return null;
+}
 
 export default function AdminQuestions() {
   const [params, setParams] = useSearchParams();
@@ -232,7 +250,7 @@ export default function AdminQuestions() {
             )}
             {/* A question can be sent to any of the other places from wherever
                 it is now, so a mis-click is never a one-way door. */}
-            {bucket !== 'APPROVED' && bucket !== 'ON_TEST' && (
+            {bucket !== 'APPROVED' && (
               <button type="button" className="btn-primary btn-sm" onClick={() => setStatus([...selected], 'APPROVED')}>
                 Approve
               </button>
@@ -264,19 +282,9 @@ export default function AdminQuestions() {
       ) : questions.length === 0 ? (
         <Card>
           <EmptyState
-            title={
-              bucket === 'DRAFT'
-                ? 'No drafts awaiting review'
-                : bucket === 'ON_TEST'
-                  ? 'No questions are on a test yet'
-                  : `No ${bucket.toLowerCase()} questions`
-            }
+            title={bucket === 'DRAFT' ? 'No drafts awaiting review' : `No ${bucket.toLowerCase()} questions`}
             hint={
-              bucket === 'DRAFT'
-                ? 'Generate questions from the "Set test" screen to see them here.'
-                : bucket === 'ON_TEST'
-                  ? 'Approve questions, then use "Put on a test" to build a paper.'
-                  : undefined
+              bucket === 'DRAFT' ? 'Generate questions from the "Set test" screen to see them here.' : undefined
             }
           />
         </Card>
@@ -352,6 +360,8 @@ function QuestionCard({
 }) {
   const [showAnswer, setShowAnswer] = useState(false);
   const needsImage = question.imageRequired && !question.imageFulfilled;
+  const frozen = frozenBy(question);
+  const onPapers = question.testQuestions ?? [];
 
   return (
     <li className={`card p-4 ${selected ? 'ring-2 ring-series-1/40' : ''}`}>
@@ -371,6 +381,16 @@ function QuestionCard({
             {question.isAdminEdited && <Badge tone="info">edited</Badge>}
             {needsImage && <Badge tone="warn">image needed</Badge>}
             {question.imageRequired && question.imageFulfilled && <Badge tone="good">image attached</Badge>}
+            {/* Which papers this one is already spoken for by - what the "on a
+                test" tab used to say, without splitting the list in two. */}
+            {onPapers.map((tq) => (
+              <Link key={tq.test.id} to={`/admin/tests/${tq.test.id}`} className="no-underline">
+                <Badge tone={tq.test.status === 'PUBLISHED' ? 'good' : 'info'}>
+                  on {tq.test.title}
+                  {tq.test.status === 'PUBLISHED' ? ' · live' : ''}
+                </Badge>
+              </Link>
+            ))}
             {question.timesServed > 0 && (
               <span className="text-[11px] text-ink-faint">
                 {Math.round(question.observedP * 100)}% correct over {question.timesServed} attempts
@@ -416,11 +436,25 @@ function QuestionCard({
             </div>
           ) : null}
 
+          {/* Said once, plainly, rather than left for the admin to discover by
+              pressing a disabled button. */}
+          {frozen && (
+            <p className="mt-3 rounded-lg border border-line bg-surface-sunken px-3 py-2 text-xs text-ink-muted">
+              This question is locked. {frozen}
+            </p>
+          )}
+
           <div className="flex flex-wrap items-center gap-2 mt-3 pt-3 border-t border-line">
             <button type="button" className="btn-ghost btn-sm" onClick={() => setShowAnswer((v) => !v)}>
               {showAnswer ? 'Hide answer' : 'Show answer'}
             </button>
-            <button type="button" className="btn-secondary btn-sm" onClick={onEdit}>
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              onClick={onEdit}
+              disabled={!!frozen}
+              title={frozen ?? undefined}
+            >
               Edit
             </button>
             {question.status !== 'APPROVED' && (
@@ -428,14 +462,24 @@ function QuestionCard({
                 type="button"
                 className="btn-primary btn-sm"
                 onClick={() => onStatus('APPROVED')}
-                disabled={needsImage}
-                title={needsImage ? 'Attach the image first — a student cannot answer this without it.' : undefined}
+                disabled={needsImage || !!frozen}
+                title={
+                  needsImage
+                    ? 'Attach the image first — a student cannot answer this without it.'
+                    : frozen ?? undefined
+                }
               >
                 Approve
               </button>
             )}
             {question.status !== 'REJECTED' && (
-              <button type="button" className="btn-ghost btn-sm" onClick={() => onStatus('REJECTED')}>
+              <button
+                type="button"
+                className="btn-ghost btn-sm"
+                onClick={() => onStatus('REJECTED')}
+                disabled={!!frozen}
+                title={frozen ?? undefined}
+              >
                 Reject
               </button>
             )}
@@ -868,8 +912,11 @@ function AddToTestModal({
     api
       .get<{ tests: TestOption[] }>('/api/admin/tests?pageSize=100')
       .then((res) => {
-        // A paper students have already sat cannot take new questions.
-        const open = res.tests.filter((t) => t._count.attempts === 0);
+        // Only papers that can still change. A published one is live to
+        // students and a sat one has marks computed from exactly its current
+        // questions - the server refuses both (see compositionLock), so
+        // offering them here only produces an error after the click.
+        const open = res.tests.filter((t) => t._count.attempts === 0 && t.status === 'DRAFT');
         setTests(open);
         // Prefer one on the same subject; otherwise leave it to the admin.
         const match = open.find((t) => t.subject.toLowerCase() === defaultSubject.toLowerCase());
@@ -947,8 +994,8 @@ function AddToTestModal({
             {mode === 'existing' ? (
               tests.length === 0 ? (
                 <Alert tone="info">
-                  There is no test that can still take questions. Papers students have already attempted are locked, so
-                  make a new one.
+                  There is no test that can still take questions. A paper is locked once it is published or once
+                  anybody has attempted it, so either move one back to draft or make a new one.
                 </Alert>
               ) : (
                 <Field label="Test">
@@ -957,7 +1004,6 @@ function AddToTestModal({
                       <option key={t.id} value={t.id}>
                         {t.publicId} · {t.title} — {t.subject} · {t._count.questions} question
                         {t._count.questions === 1 ? '' : 's'}
-                        {t.status === 'PUBLISHED' ? ' · live' : ''}
                       </option>
                     ))}
                   </select>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import katex from 'katex';
 import type { Block, ChartSpec, Content } from '../lib/types';
 import { BarChart, LineChart, NumberLine, PieChart, ScatterChart, DataTable } from '../components/charts';
@@ -236,6 +236,54 @@ function MathBlock({ tex, display }: { tex: string; display?: boolean }) {
   );
 }
 
+// --- Figures ---------------------------------------------------------------
+
+/**
+ * A figure, capped in height, that opens to full size when clicked.
+ *
+ * Every diagram and picture is bounded by --fig-max-h (see index.css), because
+ * an unbounded 1800px illustration fills the card and pushes the options and
+ * every following question off the screen - reviewing twenty questions then
+ * means scrolling past twenty posters.
+ *
+ * Capping costs detail, though: the labels on an anatomy diagram stop being
+ * legible, and an admin reviewing that question needs to read them. So one
+ * click lifts the cap for that one figure and a second click puts it back.
+ *
+ * A div with role="button" rather than a real <button>, because a <figure>'s
+ * contents are flow content and nesting them inside a button is invalid markup
+ * that some assistive technology flattens to nothing.
+ */
+function ZoomFigure({
+  children, caption, label,
+}: { children: ReactNode; caption?: string; label: string }) {
+  const [open, setOpen] = useState(false);
+  const toggle = () => setOpen((o) => !o);
+
+  return (
+    <figure className={`my-3 ${open ? 'figure-open' : ''}`}>
+      <div
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        aria-label={`${open ? 'Shrink' : 'Enlarge'} this ${label}`}
+        title={open ? 'Click to shrink' : 'Click to enlarge'}
+        className={open ? 'cursor-zoom-out' : 'cursor-zoom-in'}
+        onClick={toggle}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            toggle();
+          }
+        }}
+      >
+        {children}
+      </div>
+      {caption && <figcaption className="mt-1 text-xs text-ink-faint">{caption}</figcaption>}
+    </figure>
+  );
+}
+
 // --- SVG -------------------------------------------------------------------
 
 /**
@@ -251,29 +299,52 @@ function clientSanitizeSvg(svg: string): string {
     .replace(/(href|xlink:href)\s*=\s*("\s*javascript:[^"]*"|'\s*javascript:[^']*')/gi, '');
 }
 
+/**
+ * The drawing's width:height ratio, read from its viewBox.
+ *
+ * A viewBox-only SVG has an intrinsic ratio but no intrinsic size, so the
+ * browser cannot cap its height for us: `max-height` on the element letterboxes
+ * the drawing inside a box that stays the full width. Sizing the container by
+ * the ratio instead bounds the height exactly, with no empty margins.
+ */
+function aspectFromViewBox(svg: string): number | null {
+  const m = /viewBox\s*=\s*["']\s*[-\d.eE]+[\s,]+[-\d.eE]+[\s,]+([\d.eE]+)[\s,]+([\d.eE]+)/.exec(svg);
+  if (!m) return null;
+  const width = Number(m[1]);
+  const height = Number(m[2]);
+  return width > 0 && height > 0 ? width / height : null;
+}
+
+/** The host's own padding and border, which the height cap must not eat into. */
+const SVG_HOST_CHROME_PX = 26;
+
 function SvgBlock({ svg, caption }: { svg: string; caption?: string }) {
   const safe = useMemo(() => clientSanitizeSvg(svg), [svg]);
+  const ratio = useMemo(() => aspectFromViewBox(svg), [svg]);
+
+  // The generator is told to emit a viewBox and no fixed width/height, so the
+  // SVG has no intrinsic size and must be given a display width here - without
+  // one, a viewBox-only figure collapses to a few pixels. The width is bounded
+  // three ways: by the column, by --fig-max-w, and by whatever width keeps the
+  // drawing inside --fig-max-h.
+  const chrome = `${SVG_HOST_CHROME_PX}px`;
+  const width = ratio
+    ? `min(100%, calc(var(--fig-max-w) + ${chrome}), calc(var(--fig-max-h) * ${ratio} + ${chrome}))`
+    : `min(100%, calc(var(--fig-max-w) + ${chrome}))`;
 
   return (
-    <figure className="my-3">
-      {/*
-        The generator is told to emit a viewBox and no fixed width/height, so
-        the SVG has no intrinsic size. Give it an explicit display width here,
-        capped so a diagram never dominates the page, and let the viewBox scale
-        it. Without this a viewBox-only figure collapses to a few pixels.
-      */}
+    <ZoomFigure caption={caption} label="diagram">
       {/*
         svg-host supplies the stroke/fill defaults a model-authored diagram
         usually forgets; see the note in index.css.
       */}
       <div
         className="svg-host inline-block max-w-full overflow-x-auto rounded-lg border border-line bg-white p-3
-                   text-ink [&>svg]:w-full [&>svg]:h-auto [&>svg]:max-w-[460px] [&>svg]:block"
-        style={{ width: 'min(100%, 486px)' }}
+                   text-ink [&>svg]:w-full [&>svg]:h-auto [&>svg]:block"
+        style={{ width }}
         dangerouslySetInnerHTML={{ __html: safe }}
       />
-      {caption && <figcaption className="mt-1 text-xs text-ink-faint">{caption}</figcaption>}
-    </figure>
+    </ZoomFigure>
   );
 }
 
@@ -344,13 +415,12 @@ function MermaidBlock({ code, caption }: { code: string; caption?: string }) {
   }
 
   return (
-    <figure className="my-3">
+    <ZoomFigure caption={caption} label="diagram">
       <div
         className="mermaid-host inline-block max-w-full overflow-x-auto rounded-lg border border-line bg-white p-3"
         dangerouslySetInnerHTML={{ __html: svg }}
       />
-      {caption && <figcaption className="mt-1 text-xs text-ink-faint">{caption}</figcaption>}
-    </figure>
+    </ZoomFigure>
   );
 }
 
@@ -502,7 +572,8 @@ function TableBlock({ headers, rows, caption }: { headers: string[]; rows: strin
  * pixels tall until it loads and then shoves the question text down - which,
  * mid-exam on a slow connection, means a student taps an option that has just
  * moved. aspect-ratio does the reserving; max-width keeps it inside the column
- * regardless of how large the original is.
+ * and max-height keeps a tall picture from filling the screen, both preserving
+ * the ratio because the other dimension is auto.
  */
 function ImageBlock({
   assetId, alt, caption, width, height,
@@ -518,18 +589,17 @@ function ImageBlock({
   }
 
   return (
-    <figure className="my-3">
+    <ZoomFigure caption={caption} label="picture">
       <img
         src={`/uploads/${assetId}`}
         alt={alt ?? ''}
         loading="lazy"
         {...(width && height ? { width, height } : {})}
         onError={() => setFailed(true)}
-        className="max-w-full h-auto rounded-lg border border-line bg-white"
+        className="w-auto h-auto max-w-full max-h-[var(--fig-max-h)] rounded-lg border border-line bg-white"
         style={width && height ? { aspectRatio: `${width} / ${height}` } : undefined}
       />
-      {caption && <figcaption className="mt-1 text-xs text-ink-faint">{caption}</figcaption>}
-    </figure>
+    </ZoomFigure>
   );
 }
 

@@ -26,7 +26,7 @@ export interface PendingActivity {
 export async function pendingActivitiesFor(userId: string): Promise<PendingActivity[]> {
   const me = await prisma.user.findUnique({
     where: { id: userId },
-    select: { grade: true, division: true, role: true },
+    select: { grade: true, divisions: true, role: true },
   });
 
   // Administrators are not held at the door by their own homework.
@@ -48,7 +48,8 @@ export async function pendingActivitiesFor(userId: string): Promise<PendingActiv
               targetUserId: null,
               AND: [
                 { OR: [{ targetGrades: { isEmpty: true } }, { targetGrades: { has: me.grade } }] },
-                { OR: [{ targetDivisions: { isEmpty: true } }, { targetDivisions: { has: me.division } }] },
+                // Any division the student is in, not just their home one.
+                { OR: [{ targetDivisions: { isEmpty: true } }, { targetDivisions: { hasSome: me.divisions } }] },
               ],
             },
             { targetUserId: userId },
@@ -80,7 +81,7 @@ export async function hasPendingActivity(userId: string): Promise<PendingActivit
  */
 export async function activityVisibleTo(activityId: string, userId: string): Promise<Activity | null> {
   const [me, activity] = await Promise.all([
-    prisma.user.findUnique({ where: { id: userId }, select: { grade: true, division: true } }),
+    prisma.user.findUnique({ where: { id: userId }, select: { grade: true, divisions: true } }),
     prisma.activity.findFirst({ where: { id: activityId, deletedAt: null, status: 'PUBLISHED' } }),
   ]);
 
@@ -95,7 +96,8 @@ export async function activityVisibleTo(activityId: string, userId: string): Pro
   }
 
   const gradeOk = activity.targetGrades.length === 0 || activity.targetGrades.includes(me.grade);
-  const divisionOk = activity.targetDivisions.length === 0 || activity.targetDivisions.includes(me.division);
+  const divisionOk =
+    activity.targetDivisions.length === 0 || activity.targetDivisions.some((d) => me.divisions.includes(d));
   return gradeOk && divisionOk ? activity : null;
 }
 

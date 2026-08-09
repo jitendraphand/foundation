@@ -129,9 +129,26 @@ model User {
 
   // Stored as codes referencing SchoolClass rows so analytics never has to
   // cope with "8th" / "VIII" / "8 th" being the same class.
-  grade    String
+  grade String
+
+  /// The home division: the one the roll number is unique inside, the one
+  /// reports group by, and always the first entry of `divisions`.
   division String
-  rollNo   String
+
+  /// Every division this student belongs to, home division first.
+  ///
+  /// The school runs a Science Foundation and a Sports Foundation and has
+  /// children in both, so a test set for either has to reach them. Kept
+  /// alongside `division` rather than replacing it because a roll number is
+  /// unique within one class - roll 12 of grade 8, division A - and a set
+  /// cannot carry that constraint.
+  ///
+  /// Eligibility reads this; `division` alone is never the right thing to test
+  /// membership against. Written only through setDivisions, which keeps the
+  /// two in step.
+  divisions String[] @default([])
+
+  rollNo String
 
   dateOfBirth DateTime @db.Date
 
@@ -180,6 +197,7 @@ model User {
   @@index([role, isActive])
   @@index([grade, division])
   @@index([deletedAt])
+  @@index([divisions], type: Gin)
 }
 
 /// Grades and divisions as data, so the admin can add "Grade 13" or
@@ -405,7 +423,13 @@ model PromptTemplate {
   description  String?
   systemPrompt String   @db.Text
   userTemplate String   @db.Text // supports {{subject}}, {{topic}}, {{count}} ...
-  kind         TestKind @default(REGULAR)
+  /// Which generator uses this template: "REGULAR", "PRACTICE" or "STEP_UP".
+  ///
+  /// Deliberately not the TestKind enum. A Step-up paper *is* a practice test -
+  /// that is how it inherits the exam runner, the grading and the release rules
+  /// - so STEP_UP must never appear on Test or GenerationRun. Prompt kinds grow
+  /// one generator at a time; test kinds are a closed set and stay an enum.
+  kind         String   @default("REGULAR")
   isDefault    Boolean  @default(false)
   isActive     Boolean  @default(true)
   version      Int      @default(1)

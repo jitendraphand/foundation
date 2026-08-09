@@ -2,8 +2,9 @@ import { prisma } from '../db.js';
 import { callParamsFor } from './credentials.js';
 import { LlmError, PROVIDERS } from './providers.js';
 import { chatWithFallback } from './resilience.js';
+import { ceilingFromError, rememberCeiling, resolveCeiling } from './limits.js';
 import { extractJson, llmResponseSchema } from './schema.js';
-import { DEFAULT_SYSTEM_PROMPT } from './prompts.js';
+import { DEFAULT_SYSTEM_PROMPT, DEFAULT_STEP_UP_TEMPLATE, renderTemplate } from './prompts.js';
 import { normalizeContent, normalizeBlocks, blocksToText, CONTENT_VERSION } from '../lib/content.js';
 import { validateAnswerKey } from '../lib/grading.js';
 import type { Question } from '@prisma/client';
@@ -76,17 +77,41 @@ function describeSource(question: Question): string {
     .join('\n');
 }
 
-export function buildStepUpPrompt(question: Question, mode: StepUpMode): string {
-  return [
-    MODE_INSTRUCTIONS[mode],
-    '',
-    describeSource(question),
-    '',
-    `Return {"questions": [...]} with exactly ${STEP_UP_COUNT} questions in the schema above, in order.`,
-    'Every question must be multiple choice with exactly one correct answer, and must carry a worked explanation - ' +
-      'the explanation is the point of the exercise, so make it teach rather than assert.',
-    'Do NOT produce any question needing a photograph. Draw any visual as SVG, and set "imageRequired": false.',
-  ].join('\n');
+export function buildStepUpPrompt(
+  question: Question,
+  mode: StepUpMode,
+  template = DEFAULT_STEP_UP_TEMPLATE,
+): string {
+  return renderTemplate(template, {
+    modeInstructions: MODE_INSTRUCTIONS[mode],
+    source: describeSource(question),
+    count: STEP_UP_COUNT,
+  });
+}
+
+/** The prompt kind the Step-up generator reads from Settings > Prompts. */
+export const STEP_UP_PROMPT_KIND = 'STEP_UP';
+
+/**
+ * The system prompt and user template Step-up should use.
+ *
+ * An administrator's edited template wins; the built-in defaults are the
+ * fallback, not the other way round. Falling back rather than failing matters
+ * here because a student presses this button themselves, mid-review, and
+ * "Step-up is not configured" would be a dead end they cannot act on.
+ */
+async function stepUpPrompts(): Promise<{ systemPrompt: string; userTemplate: string }> {
+  const template = await prisma.promptTemplate
+    .findFirst({
+      where: { kind: STEP_UP_PROMPT_KIND, isActive: true },
+      orderBy: [{ isDefault: 'desc' }, { updatedAt: 'desc' }],
+    })
+    .catch(() => null);
+
+  return {
+    systemPrompt: template?.systemPrompt?.trim() || DEFAULT_SYSTEM_PROMPT,
+    userTemplate: template?.userTemplate?.trim() || DEFAULT_STEP_UP_TEMPLATE,
+  };
 }
 
 /** Which provider Step-up uses, chosen by an administrator. */
@@ -152,31 +177,44 @@ export async function generateStepUp(args: {
 
   const providerDef = PROVIDERS[credential.provider] ?? PROVIDERS.custom;
   const call = await callParamsFor(credential);
+  const prompts = await stepUpPrompts();
 
-  const { response } = await chatWithFallback(
-    [
-      { role: 'system', content: DEFAULT_SYSTEM_PROMPT },
-      { role: 'user', content: buildStepUpPrompt(args.question, args.mode) },
-    ],
-    {
+  // Five questions with worked explanations, plus room for a reasoning model to
+  // think first - but never more than this provider and model will accept. See
+  // limits.ts: the ceiling may have been set by an admin, learned from an
+  // earlier refusal, or come from the provider's own default.
+  const ceiling = resolveCeiling(credential, model);
+  const maxTokens = Math.min(12_000, ceiling ?? 12_000);
+
+  const messages = [
+    { role: 'system' as const, content: prompts.systemPrompt },
+    { role: 'user' as const, content: buildStepUpPrompt(args.question, args.mode, prompts.userTemplate) },
+  ];
+
+  const ask = (budget: number) =>
+    chatWithFallback(messages, {
       candidates: [
         {
           label: credential.label,
           model,
-          call: {
-            ...call,
-            temperature: 0.5,
-            jsonMode: providerDef.supportsJsonMode,
-            // Five questions with worked explanations, plus room for a
-            // reasoning model to think first - but never more than the
-            // provider will accept. Oracle rejects the whole call above its
-            // ceiling rather than truncating.
-            maxTokens: Math.min(12_000, providerDef.maxOutputTokens ?? 12_000),
-          },
+          call: { ...call, temperature: 0.5, jsonMode: providerDef.supportsJsonMode, maxTokens: budget },
         },
       ],
-    },
-  );
+    });
+
+  let response;
+  try {
+    ({ response } = await ask(maxTokens));
+  } catch (err) {
+    // The provider refused the size of the reply and named what it does allow.
+    // Nobody is going to relay that to a fourteen-year-old, so take it, store
+    // it, and ask again inside the limit. One retry only: a second refusal is
+    // a real failure, not a number we can work around.
+    const learned = ceilingFromError(err, maxTokens);
+    if (!learned) throw err;
+    await rememberCeiling(config.credentialId, model, learned).catch(() => undefined);
+    ({ response } = await ask(learned));
+  }
 
   let parsed;
   try {

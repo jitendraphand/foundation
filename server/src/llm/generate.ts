@@ -4,7 +4,8 @@ import { callParamsFor, type CallParams } from './credentials.js';
 import { normalizeContent, normalizeBlocks, CONTENT_VERSION } from '../lib/content.js';
 import { validateAnswerKey } from '../lib/grading.js';
 import { chatComplete, emitsReasoning, LlmError, PROVIDERS, type ChatMessage, type ChatRequest } from './providers.js';
-import { chatWithFallback } from './resilience.js';
+import { chatWithFallback, ProviderChainError } from './resilience.js';
+import { ceilingFromError, rememberCeiling, resolveCeiling } from './limits.js';
 import { extractJson, llmResponseSchema, llmQuestionSchema, describeIssues, type LlmQuestion } from './schema.js';
 import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_TEMPLATE, PRACTICE_SYSTEM_SUFFIX, renderTemplate } from './prompts.js';
 import type { TestKind, QuestionStatus } from '@prisma/client';
@@ -438,6 +439,36 @@ export function planBatches(total: number, per = QUESTIONS_PER_CALL): number[] {
 }
 
 /**
+ * The ceiling a provider just told us about, if that is what went wrong.
+ *
+ * Only the administrator's own credential is read, never a fallback's: the
+ * number is stored against that credential and against that model, and a
+ * ceiling learned from whatever rescued the batch would be attached to the
+ * wrong provider entirely.
+ */
+function learnedCeilingFrom(err: unknown, ownLabel: string, asked: number): number | undefined {
+  if (err instanceof ProviderChainError) {
+    const own = err.notes.filter((n) => n.credentialLabel === ownLabel);
+    for (const note of own) {
+      const ceiling = ceilingFromError(note.cause, asked);
+      if (ceiling) return ceiling;
+    }
+    return undefined;
+  }
+  return ceilingFromError(err, asked);
+}
+
+/**
+ * How many times one run may shrink its batches before giving up.
+ *
+ * Three is generous: each shrink follows a refusal that named an exact number,
+ * so the first is nearly always the last. The bound exists so that a provider
+ * returning a nonsensical ceiling - or the same one repeatedly - ends as a
+ * clear failure rather than an endless loop of ever-smaller requests.
+ */
+const MAX_CEILING_SHRINKS = 3;
+
+/**
  * Runs one generation. Questions land as DRAFT; nothing reaches a student
  * until an admin approves it and places it on a test.
  *
@@ -468,8 +499,11 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
   const tokensPerQuestion = emitsReasoning(opts.model) ? 2600 : 1400;
 
   // What this provider will actually accept decides the batch size, not the
-  // other way round.
-  const perCall = questionsPerCall(tokensPerQuestion, providerDef.maxOutputTokens);
+  // other way round. Both can change mid-run: a refusal that names the real
+  // ceiling is believed immediately and the remaining batches are re-planned
+  // around it. See limits.ts.
+  let ceiling = resolveCeiling(credential, opts.model);
+  let perCall = questionsPerCall(tokensPerQuestion, ceiling);
   const batches = planBatches(opts.spec.count, perCall);
 
   const run = await prisma.generationRun.create({
@@ -505,13 +539,25 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
     let completionTokens = 0;
     let lastError = '';
 
-    for (const [batchIndex, batchCount] of batches.entries()) {
+    // A queue rather than a fixed list, because the batch size is not fixed:
+    // a provider that refuses the request and names its real ceiling causes
+    // everything still to be written to be re-planned around that number. See
+    // MAX_CEILING_SHRINKS.
+    let remaining = opts.spec.count;
+    let batchIndex = 0;
+    let shrinks = 0;
+
+    while (remaining > 0) {
+      const batchCount = Math.min(perCall, remaining);
+      const isLastBatch = remaining - batchCount === 0;
+      const totalBatches = batchIndex + Math.ceil(remaining / perCall);
+
       // Each call asks only for its own share, and is told what has already
       // been written so the batches do not repeat each other.
       const batchPrompt =
         (opts.userPrompt?.trim() || buildUserPrompt({ ...opts.spec, count: batchCount })) +
         (batchIndex > 0
-          ? `\n\nThis is part ${batchIndex + 1} of ${batches.length} for the same paper. ` +
+          ? `\n\nThis is part ${batchIndex + 1} of ${totalBatches} for the same paper. ` +
             `Write ${batchCount} FURTHER questions. Do not repeat any of these, which are already written:\n` +
             collected.map((q, i) => `${i + 1}. ${firstLineOf(q)}`).join('\n')
           : '');
@@ -521,20 +567,47 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
         { role: 'user', content: batchPrompt },
       ];
 
+      const asked = tokenBudget(tokensPerQuestion, batchCount, ceiling);
       const shared = {
         temperature: opts.temperature ?? 0.4,
         jsonMode: providerDef.supportsJsonMode,
-        maxTokens: tokenBudget(tokensPerQuestion, batchCount, providerDef.maxOutputTokens),
+        maxTokens: asked,
       };
 
-      const first = await chatWithFallback(messages, {
-        candidates: candidates.map((c) => ({ ...c, call: { ...c.call, ...shared } })),
-        onRetry: (note) =>
+      let first;
+      try {
+        first = await chatWithFallback(messages, {
+          candidates: candidates.map((c) => ({ ...c, call: { ...c.call, ...shared } })),
+          onRetry: (note) =>
+            warnings.push(
+              `${note.credentialLabel} was busy on batch ${batchIndex + 1} (${note.error.slice(0, 90)}). ` +
+                `Waiting ${Math.round((note.waitedMs ?? 0) / 1000)}s and trying again.`,
+            ),
+        });
+      } catch (err) {
+        // "That completion is bigger than I allow" is the one failure worth
+        // acting on rather than reporting: the provider has just told us the
+        // number it does allow, so believe it, remember it and try the same
+        // batch again in pieces that fit.
+        const learned = learnedCeilingFrom(err, credential.label, asked);
+        if (learned && shrinks < MAX_CEILING_SHRINKS && (ceiling === undefined || learned < ceiling)) {
+          shrinks++;
+          ceiling = learned;
+          perCall = questionsPerCall(tokensPerQuestion, ceiling);
+          // Stored so the next run starts correct instead of paying for this
+          // discovery again. Never allowed to fail the run it was meant to
+          // rescue.
+          await rememberCeiling(credential.id, opts.model, learned).catch(() => undefined);
           warnings.push(
-            `${note.credentialLabel} was busy on batch ${batchIndex + 1} (${note.error.slice(0, 90)}). ` +
-              `Waiting ${Math.round((note.waitedMs ?? 0) / 1000)}s and trying again.`,
-          ),
-      });
+            `${credential.label} accepts at most ${learned} tokens in one reply, which is fewer than this batch ` +
+              `needed. Continuing in calls of ${perCall} question${perCall === 1 ? '' : 's'}, and remembering the ` +
+              'limit so the next run starts this way.',
+          );
+          continue;
+        }
+        throw err;
+      }
+
       let response = first.response;
       if (first.usedLabel !== credential.label) {
         warnings.push(`Batch ${batchIndex + 1} fell back to ${first.usedLabel} (${first.usedModel}).`);
@@ -580,7 +653,7 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
                   ...c.call,
                   temperature: 0.1,
                   jsonMode: providerDef.supportsJsonMode,
-                  maxTokens: tokenBudget(tokensPerQuestion, batchCount, providerDef.maxOutputTokens),
+                  maxTokens: tokenBudget(tokensPerQuestion, batchCount, ceiling),
                 },
               })),
             })
@@ -593,7 +666,7 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
 
       if (parsedBatch) {
         collected.push(...parsedBatch.questions);
-      } else if (collected.length === 0 && batchIndex === batches.length - 1) {
+      } else if (collected.length === 0 && isLastBatch) {
         // Nothing usable from any batch: fail, with the model's own reply kept
         // for diagnosis.
         await prisma.generationRun.update({
@@ -616,6 +689,9 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
         // so, rather than throwing away good questions.
         warnings.push(`Batch ${batchIndex + 1} produced nothing usable: ${lastError}`);
       }
+
+      batchIndex++;
+      remaining -= batchCount;
     }
 
     const parsedResponse = { questions: collected };
@@ -644,7 +720,9 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
       const recovered = await repairRejected({
         call,
         opts,
-        providerDef,
+        // Whatever the run finished on, which may be lower than where it
+        // started if a provider refused a batch along the way.
+        providerDef: { supportsJsonMode: providerDef.supportsJsonMode, maxOutputTokens: ceiling },
         systemPrompt,
         questions: parsedResponse.questions,
         rejected,

@@ -169,7 +169,8 @@ export default async function adminAnalyticsRoutes(app: FastifyInstance) {
         role: 'STUDENT',
         deletedAt: null,
         ...(q.grade ? { grade: q.grade } : {}),
-        ...(q.division ? { division: q.division } : {}),
+        // Membership rather than the home division; see the User model.
+        ...(q.division ? { divisions: { has: q.division } } : {}),
       },
       select: {
         id: true, publicId: true, username: true, firstName: true, lastName: true, grade: true, division: true,

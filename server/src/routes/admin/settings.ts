@@ -323,6 +323,12 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
         isActive: z.boolean().optional(),
         /** Offer this credential when the chosen one will not answer. */
         useAsFallback: z.boolean().optional(),
+        /**
+         * The largest completion this endpoint accepts, when the administrator
+         * knows it. Null clears the override and hands the decision back to
+         * whatever the provider refused last (see llm/limits.ts).
+         */
+        maxOutputTokens: z.number().int().min(256).max(200_000).nullable().optional(),
 
         region: z.string().trim().max(40).optional(),
         awsAuthMode: z.enum(['apiKey', 'sigv4']).optional(),
@@ -353,6 +359,33 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
       bedrock = built;
     }
 
+    // Merged rather than replaced: meta also carries the region, the project,
+    // the auth mode and any output-token ceilings learned from this provider
+    // refusing a request, and overwriting it would break the credential.
+    const meta: Record<string, unknown> = { ...((existing.meta ?? {}) as object) };
+    let metaChanged = false;
+
+    if (body.useAsFallback !== undefined) {
+      meta.useAsFallback = body.useAsFallback;
+      metaChanged = true;
+    }
+    if (body.maxOutputTokens !== undefined) {
+      // Null means "stop overriding", which has to remove the key rather than
+      // store a null - resolveCeiling reads the key's presence.
+      if (body.maxOutputTokens === null) delete meta.maxOutputTokens;
+      else meta.maxOutputTokens = body.maxOutputTokens;
+      metaChanged = true;
+    }
+
+    // Rotating a Bedrock key rebuilds its region and auth mode, which are also
+    // in meta - so they are merged in here rather than assigned as a whole new
+    // meta object. Assigning would silently drop the fallback flag and every
+    // learned ceiling every time somebody pasted a new key.
+    if (bedrock) {
+      Object.assign(meta, bedrock.meta);
+      metaChanged = true;
+    }
+
     const credential = await prisma.apiCredential.update({
       where: { id },
       data: {
@@ -360,16 +393,12 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
         ...(body.baseUrl !== undefined ? { baseUrl: body.baseUrl } : {}),
         ...(body.defaultModel !== undefined ? { defaultModel: body.defaultModel } : {}),
         ...(body.isActive !== undefined ? { isActive: body.isActive } : {}),
-        // Merged rather than replaced: meta also carries the region, project
-        // and auth mode, and overwriting it would break the credential.
-        ...(body.useAsFallback !== undefined
-          ? { meta: { ...((existing.meta ?? {}) as object), useAsFallback: body.useAsFallback } }
-          : {}),
+        ...(metaChanged ? { meta: meta as never } : {}),
         ...(body.apiKey
           ? {
               encryptedKey: encryptSecret(bedrock?.secret ?? body.apiKey),
               keyHint: keyHint(body.apiKey),
-              ...(bedrock ? { baseUrl: body.baseUrl ?? bedrock.baseUrl, meta: bedrock.meta } : {}),
+              ...(bedrock ? { baseUrl: body.baseUrl ?? bedrock.baseUrl } : {}),
             }
           : {}),
       },
@@ -580,7 +609,9 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
     description: z.string().max(1000).optional().nullable(),
     systemPrompt: z.string().min(20).max(40_000),
     userTemplate: z.string().min(5).max(40_000),
-    kind: z.enum(['REGULAR', 'PRACTICE']).default('REGULAR'),
+    // Which generator uses it. STEP_UP is a prompt kind only - a Step-up paper
+    // is stored as a PRACTICE test; see the note on PromptTemplate.kind.
+    kind: z.enum(['REGULAR', 'PRACTICE', 'STEP_UP']).default('REGULAR'),
     isDefault: z.boolean().default(false),
     isActive: z.boolean().default(true),
   });
@@ -688,13 +719,36 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
     const body = z
       .object({
         kind: z.enum(['GRADE', 'DIVISION']),
-        code: z.string().trim().min(1).max(20),
+        /**
+         * The stored value, written onto every student row and into every
+         * historical breakdown - so it is constrained to something that cannot
+         * arrive with a stray space or a smart quote, and can never be edited
+         * afterwards. The label carries the human wording and is free to change.
+         */
+        code: z
+          .string().trim().toUpperCase().min(1).max(20)
+          .regex(/^[A-Z0-9][A-Z0-9_-]*$/, 'Use letters, digits, hyphens and underscores, starting with a letter or digit.'),
         label: z.string().trim().min(1).max(60),
         sortOrder: z.number().int().default(0),
       })
       .parse(request.body);
 
+    const existing = await prisma.schoolClass.findUnique({
+      where: { kind_code: { kind: body.kind, code: body.code } },
+    });
+    if (existing) {
+      return reply.code(409).send({
+        error: existing.isActive
+          ? `A ${body.kind.toLowerCase()} with the code ${body.code} already exists: “${existing.label}”.`
+          : `${body.kind === 'GRADE' ? 'A grade' : 'A division'} with the code ${body.code} already exists but is ` +
+            `hidden from signup: “${existing.label}”. Tick it to offer it again rather than adding a second one.`,
+      });
+    }
+
     const row = await prisma.schoolClass.create({ data: body });
+    await audit(request.user!.sub, 'class.create', {
+      entity: 'SchoolClass', entityId: row.id, ip: request.ip, detail: { kind: body.kind, code: body.code },
+    });
     return reply.code(201).send({ ok: true, class: row });
   });
 
@@ -708,8 +762,48 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
       })
       .parse(request.body);
 
+    // `code` is deliberately absent: it is written onto student rows and into
+    // saved analytics, and renaming it there would silently orphan them.
     const row = await prisma.schoolClass.update({ where: { id }, data: body });
     return { ok: true, class: row };
+  });
+
+  /**
+   * Removes a grade or division that turned out to be a mistake.
+   *
+   * Refused the moment anybody is in it. Deleting the row would leave students
+   * filed under a code with no name, tests targeting an audience that cannot
+   * be resolved, and past results grouped by a class that no longer exists -
+   * so a class in use is hidden from signup instead, which is what the tick
+   * box already does.
+   */
+  app.delete('/api/admin/classes/:id', async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+
+    const row = await prisma.schoolClass.findUnique({ where: { id } });
+    if (!row) return reply.code(404).send({ error: 'That grade or division does not exist.' });
+
+    const inUse = await prisma.user.count({
+      where: {
+        deletedAt: null,
+        ...(row.kind === 'GRADE' ? { grade: row.code } : { divisions: { has: row.code } }),
+      },
+    });
+
+    if (inUse > 0) {
+      return reply.code(409).send({
+        error:
+          `${inUse} student${inUse === 1 ? ' is' : 's are'} in ${row.label}, so it cannot be deleted — their records ` +
+          'would point at a class that no longer exists. Untick "Offered at signup" to retire it instead, or move ' +
+          'those students first.',
+      });
+    }
+
+    await prisma.schoolClass.delete({ where: { id } });
+    await audit(request.user!.sub, 'class.delete', {
+      entity: 'SchoolClass', entityId: id, ip: request.ip, detail: { kind: row.kind, code: row.code },
+    });
+    return { ok: true, message: `${row.label} deleted.` };
   });
 
   // --- Curriculum tree -----------------------------------------------------

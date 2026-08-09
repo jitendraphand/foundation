@@ -31,13 +31,64 @@ interface UserRow {
   firstName: string;
   lastName: string;
   grade: string;
+  /** The home division: the one the roll number is unique inside. */
   division: string;
+  /** Every division the student is in, home division first. */
+  divisions: string[];
   rollNo: string;
   dateOfBirth: string;
   isActive: boolean;
   lastLoginAt: string | null;
   createdAt: string;
   _count: { attempts: number };
+}
+
+interface ClassLists {
+  grades: { code: string; label: string }[];
+  divisions: { code: string; label: string }[];
+}
+
+/**
+ * The divisions a student is in beyond their home one.
+ *
+ * A child can be in the Science Foundation and the Sports Foundation at once,
+ * and a paper set for either has to reach them. The home division stays a
+ * single choice because the roll number is unique within it; everything else is
+ * a membership, so it is a list of ticks rather than a second dropdown.
+ */
+function ExtraDivisions({
+  home, value, options, onChange,
+}: {
+  home: string;
+  value: string[];
+  options: { code: string; label: string }[];
+  onChange: (next: string[]) => void;
+}) {
+  const others = options.filter((d) => d.code !== home);
+  if (others.length === 0) return null;
+
+  return (
+    <Field label="Also in">
+      <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+        {others.map((d) => (
+          <label key={d.code} className="flex items-center gap-2 text-sm cursor-pointer">
+            <input
+              type="checkbox"
+              className="accent-series-1"
+              checked={value.includes(d.code)}
+              onChange={(e) =>
+                onChange(e.target.checked ? [...value, d.code] : value.filter((c) => c !== d.code))
+              }
+            />
+            <span className="text-ink-muted">{d.label}</span>
+          </label>
+        ))}
+      </div>
+      <p className="mt-1 text-[11px] text-ink-faint">
+        Optional. A test or activity set for any of these divisions will reach this student as well.
+      </p>
+    </Field>
+  );
 }
 
 export default function AdminStudents() {
@@ -167,7 +218,14 @@ function ManageStudents() {
                       </Link>
                     </td>
                     <td className="font-mono text-xs text-ink-muted">{user.username}</td>
-                    <td className="text-ink-muted">{user.grade}-{user.division}</td>
+                    <td className="text-ink-muted whitespace-nowrap">
+                      {user.grade}-{user.division}
+                      {/* The home division is in the class code above; only the
+                          extra memberships need saying. */}
+                      {(user.divisions ?? [])
+                        .filter((d) => d !== user.division)
+                        .map((d) => <span key={d} className="ml-1 text-xs text-ink-faint">+{d}</span>)}
+                    </td>
                     <td className="tabular-nums">{user.rollNo}</td>
                     <td className="text-xs text-ink-muted whitespace-nowrap">{formatDate(user.dateOfBirth)}</td>
                     <td className="text-center tabular-nums">{user._count.attempts}</td>
@@ -211,7 +269,8 @@ function ManageStudents() {
 /** Enrols a student by hand, for anyone who cannot sign themselves up. */
 function CreateStudentModal({ onClose, onCreated }: { onClose: () => void; onCreated: (message: string) => void }) {
   const [form, setForm] = useState({ firstName: '', lastName: '', grade: '', division: '', rollNo: '', dateOfBirth: '', password: '' });
-  const [classes, setClasses] = useState<{ grades: { code: string; label: string }[]; divisions: { code: string; label: string }[] }>({ grades: [], divisions: [] });
+  const [extraDivisions, setExtraDivisions] = useState<string[]>([]);
+  const [classes, setClasses] = useState<ClassLists>({ grades: [], divisions: [] });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -234,6 +293,9 @@ function CreateStudentModal({ onClose, onCreated }: { onClose: () => void; onCre
         ...form,
         firstName: form.firstName.trim(),
         lastName: form.lastName.trim(),
+        // The home division is sent on its own as well; the server puts it at
+        // the front of the list, so order here does not matter.
+        divisions: extraDivisions,
         role: 'STUDENT',
         permissions: [],
         mustChangePassword: true,
@@ -275,6 +337,13 @@ function CreateStudentModal({ onClose, onCreated }: { onClose: () => void; onCre
           <Field label="Roll no." required><input className="input" value={form.rollNo} onChange={set('rollNo')} required /></Field>
         </div>
 
+        <ExtraDivisions
+          home={form.division}
+          value={extraDivisions.filter((d) => d !== form.division)}
+          options={classes.divisions}
+          onChange={setExtraDivisions}
+        />
+
         <Field label="Date of birth" required>
           <input type="date" className="input" value={form.dateOfBirth} onChange={set('dateOfBirth')} required max={new Date().toISOString().slice(0, 10)} />
         </Field>
@@ -304,15 +373,18 @@ function EditUserModal({ user, onClose, onSaved }: { user: UserRow; onClose: () 
     rollNo: user.rollNo,
     dateOfBirth: user.dateOfBirth.slice(0, 10),
   });
+  const [extraDivisions, setExtraDivisions] = useState<string[]>(
+    () => (user.divisions ?? []).filter((d) => d !== user.division),
+  );
   const [usernameMode, setUsernameMode] = useState<'keep' | 'set' | 'regenerate'>('keep');
   const [username, setUsername] = useState(user.username);
   const [availability, setAvailability] = useState<{ available: boolean; reason?: string } | null>(null);
-  const [classes, setClasses] = useState<{ grades: { code: string; label: string }[]; divisions: { code: string; label: string }[] }>({ grades: [], divisions: [] });
+  const [classes, setClasses] = useState<ClassLists>({ grades: [], divisions: [] });
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    api.get<typeof classes>('/api/auth/classes').then(setClasses).catch(() => undefined);
+    api.get<ClassLists>('/api/auth/classes').then(setClasses).catch(() => undefined);
   }, []);
 
   // Check the new username as it is typed, so the admin is never surprised by
@@ -339,6 +411,9 @@ function EditUserModal({ user, onClose, onSaved }: { user: UserRow; onClose: () 
     try {
       const res = await api.patch<{ message?: string }>(`/api/admin/users/${user.id}`, {
         ...form,
+        // Always the whole set, never a delta - see the note on the edit
+        // schema for why.
+        divisions: extraDivisions.filter((d) => d !== form.division),
         ...(usernameMode === 'set' && username !== user.username ? { username } : {}),
         ...(usernameMode === 'regenerate' ? { regenerateUsername: true } : {}),
       });
@@ -373,6 +448,13 @@ function EditUserModal({ user, onClose, onSaved }: { user: UserRow; onClose: () 
           </Field>
           <Field label="Roll no."><input className="input" value={form.rollNo} onChange={(e) => setForm((f) => ({ ...f, rollNo: e.target.value }))} /></Field>
         </div>
+
+        <ExtraDivisions
+          home={form.division}
+          value={extraDivisions.filter((d) => d !== form.division)}
+          options={classes.divisions}
+          onChange={setExtraDivisions}
+        />
 
         <Field label="Date of birth">
           <input type="date" className="input" value={form.dateOfBirth} onChange={(e) => setForm((f) => ({ ...f, dateOfBirth: e.target.value }))} />

@@ -80,6 +80,9 @@ export default async function authRoutes(app: FastifyInstance) {
               lastName: body.lastName,
               grade: body.grade,
               division: body.division,
+              // A child signing up puts themselves in one division; a second
+              // is an administrator's decision, not theirs.
+              divisions: [body.division],
               rollNo: body.rollNo,
               dateOfBirth: dob,
               passwordHash,

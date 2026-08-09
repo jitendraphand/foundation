@@ -42,38 +42,85 @@ const generateSchema = z.object({
 });
 
 /**
- * The four places a question can be, as one exclusive set.
+ * The three places a question can be.
  *
- * "Approved" and "on a test" were the same status, so an approved question
- * that had been placed on a paper still sat in the approved list, and an
- * admin building a second paper could not tell what was already spoken for.
- *
- * Rather than store a fourth status - which would then have to be kept in step
- * with every add, remove, and test deletion, and would be wrong the moment it
- * was not - "on a test" is derived from the links themselves. A question is on
- * a test if some live test still references it; remove it from that test and
- * it returns to the approved list by itself, with nothing to reconcile.
- *
- * Links to deleted tests do not count: the paper is gone, the question is free.
+ * There was a fourth, "on a test", which held every approved question already
+ * placed on a paper. It has gone: a paper's contents belong on that paper's own
+ * page, which shows them in order with their marks, and duplicating the list in
+ * the bank meant an approved question could not be found where an admin went
+ * looking for it. Each question instead carries the papers it is on, so
+ * "already spoken for" is visible without a tab of its own.
  */
-type QuestionBucket = 'DRAFT' | 'APPROVED' | 'ON_TEST' | 'REJECTED';
-
-const ON_A_LIVE_TEST = { some: { test: { deletedAt: null } } };
-const ON_NO_LIVE_TEST = { none: { test: { deletedAt: null } } };
+type QuestionBucket = 'DRAFT' | 'APPROVED' | 'REJECTED';
 
 function bucketWhere(bucket?: QuestionBucket) {
   switch (bucket) {
     case 'DRAFT':
       return { status: 'DRAFT' as const };
     case 'APPROVED':
-      return { status: 'APPROVED' as const, testQuestions: ON_NO_LIVE_TEST };
-    case 'ON_TEST':
-      return { status: 'APPROVED' as const, testQuestions: ON_A_LIVE_TEST };
+      return { status: 'APPROVED' as const };
     case 'REJECTED':
       return { status: 'REJECTED' as const };
     default:
       return {};
   }
+}
+
+/**
+ * Which of these questions sit on a paper that may no longer change, and why.
+ *
+ * A published test is out: students can see it and may be part-way through it.
+ * A test with attempts has been sat, and its marks were computed from exactly
+ * these questions. Editing, deleting or retiring a question underneath either
+ * one silently changes an exam while it is happening, or rewrites the paper a
+ * released result refers to.
+ *
+ * The same rule as compositionLock in routes/admin/tests.ts, approached from
+ * the other side: that one stops a paper's list of questions changing, this one
+ * stops the questions themselves changing. Both are needed - otherwise the
+ * paper keeps its ten questions and question four quietly becomes a different
+ * question.
+ *
+ * Returns a map from question id to a sentence naming the paper, so the refusal
+ * can say which test is in the way rather than leaving the admin to find it.
+ */
+async function liveTestLocks(ids: string[]): Promise<Map<string, string>> {
+  const locks = new Map<string, string>();
+  if (ids.length === 0) return locks;
+
+  const links = await prisma.testQuestion.findMany({
+    where: { questionId: { in: ids }, test: { deletedAt: null } },
+    select: {
+      questionId: true,
+      test: { select: { title: true, status: true, _count: { select: { attempts: true } } } },
+    },
+  });
+
+  for (const link of links) {
+    if (locks.has(link.questionId)) continue;
+    const { title, status, _count } = link.test;
+
+    if (_count.attempts > 0) {
+      locks.set(
+        link.questionId,
+        `it is on “${title}”, which students have already sat. Their marks were worked out from this exact ` +
+          'question, so it can no longer be changed.',
+      );
+    } else if (status === 'PUBLISHED') {
+      locks.set(
+        link.questionId,
+        `it is on “${title}”, which is live to students right now. Move that test back to draft first, ` +
+          'change the question, then publish it again.',
+      );
+    }
+  }
+
+  return locks;
+}
+
+/** The lock on one question, or null when it is free to change. */
+async function liveTestLock(id: string): Promise<string | null> {
+  return (await liveTestLocks([id])).get(id) ?? null;
 }
 
 /**
@@ -121,7 +168,10 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
         select: { id: true, provider: true, label: true, baseUrl: true, keyHint: true, defaultModel: true },
       }),
       prisma.promptTemplate.findMany({
-        where: { isActive: true },
+        // The Step-up template is excluded: it renders placeholders that only
+        // exist when a student asks about one specific question, so choosing it
+        // on the Set-test screen would send the model an empty brief.
+        where: { isActive: true, kind: { in: ['REGULAR', 'PRACTICE'] } },
         orderBy: [{ isDefault: 'desc' }, { name: 'asc' }],
         select: { id: true, name: true, description: true, kind: true, isDefault: true, systemPrompt: true, userTemplate: true },
       }),
@@ -332,12 +382,8 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
     const q = z
       .object({
         status: z.enum(['DRAFT', 'APPROVED', 'REJECTED']).optional(),
-        /**
-         * Where the question sits, as one of four mutually exclusive places.
-         * Preferred over `status`, which cannot express "approved but already
-         * on a paper" - see bucketWhere.
-         */
-        bucket: z.enum(['DRAFT', 'APPROVED', 'ON_TEST', 'REJECTED']).optional(),
+        /** Which list the admin is looking at; see bucketWhere. */
+        bucket: z.enum(['DRAFT', 'APPROVED', 'REJECTED']).optional(),
         subject: z.string().optional(),
         topic: z.string().optional(),
         difficultyTag: z.string().optional(),
@@ -378,13 +424,17 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
         orderBy: { createdAt: 'desc' },
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
-        // Which papers it is on, so the bank can say "on Maths Unit 1" rather
-        // than leaving an approved question mysteriously absent from the
-        // approved list.
+        // Which papers it is on. The attempt count comes with it so the UI can
+        // apply exactly the rule liveTestLocks applies, and disable the edit
+        // button with a reason rather than offering it and being refused.
         include: {
           testQuestions: {
             where: { test: { deletedAt: null } },
-            select: { test: { select: { id: true, title: true, status: true } } },
+            select: {
+              test: {
+                select: { id: true, title: true, status: true, _count: { select: { attempts: true } } },
+              },
+            },
           },
         },
       }),
@@ -412,12 +462,11 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
       orderBy: { subject: 'asc' },
     });
 
-    // Counts for the four tabs, so each one can show how much is waiting
-    // without the UI fetching four pages to find out.
-    const [draft, approved, onTest, rejected] = await Promise.all([
+    // Counts for the tabs, so each one can show how much is waiting without
+    // the UI fetching three pages to find out.
+    const [draft, approved, rejected] = await Promise.all([
       prisma.question.count({ where: { ...mine, deletedAt: null, ...bucketWhere('DRAFT') } }),
       prisma.question.count({ where: { ...mine, deletedAt: null, ...bucketWhere('APPROVED') } }),
-      prisma.question.count({ where: { ...mine, deletedAt: null, ...bucketWhere('ON_TEST') } }),
       prisma.question.count({ where: { ...mine, ...bucketWhere('REJECTED') } }),
     ]);
 
@@ -427,7 +476,7 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
       pageSize: q.pageSize,
       questions: filtered,
       subjects: subjectRows.map((r) => ({ subject: r.subject, count: r._count._all })),
-      counts: { DRAFT: draft, APPROVED: approved, ON_TEST: onTest, REJECTED: rejected },
+      counts: { DRAFT: draft, APPROVED: approved, REJECTED: rejected },
     };
   });
 
@@ -460,6 +509,15 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
     // attached, otherwise a student would sit a question they cannot answer.
     let blocked: string[] = [];
     let ids = body.ids.filter((id) => ownedIds.has(id));
+
+    // A question on a live or sat paper is frozen. Rejecting one would retire
+    // it mid-exam; sending it back to draft would take an approved question
+    // off a paper students can see. Both are refused, and the rest of the
+    // selection still goes through - a bulk action should not fail entirely
+    // because one of thirty is spoken for.
+    const locks = await liveTestLocks(ids);
+    const lockedIds = ids.filter((id) => locks.has(id));
+    ids = ids.filter((id) => !locks.has(id));
 
     if (body.status === 'APPROVED') {
       const unfulfilled = await prisma.question.findMany({
@@ -515,10 +573,21 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
 
     await audit(request.user!.sub, 'question.bulk_status', {
       entity: 'Question', ip: request.ip,
-      detail: { count: result.count, status: body.status, blocked: blocked.length, unlinkedFrom, keptOnSatTests },
+      detail: {
+        count: result.count, status: body.status, blocked: blocked.length,
+        onLiveTest: lockedIds.length, unlinkedFrom, keptOnSatTests,
+      },
     });
 
     const notes = [
+      // The lock is named first: it is the one an admin will otherwise stare
+      // at the screen about, since nothing appears to have happened.
+      lockedIds.length === 1
+        ? `1 question was left alone because ${locks.get(lockedIds[0])}`
+        : lockedIds.length > 1
+          ? `${lockedIds.length} questions were left alone because they are on a paper that is live or has been sat. ` +
+            'Move that test back to draft first.'
+          : null,
       unlinkedFrom > 0 ? `Removed from ${unlinkedFrom} test${unlinkedFrom === 1 ? '' : 's'}.` : null,
       keptOnSatTests > 0
         ? `Left on ${keptOnSatTests} test${keptOnSatTests === 1 ? '' : 's'} that students have already sat, so their results are unaffected — no new attempt will include it.`
@@ -530,14 +599,17 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
       updated: result.count,
       blocked: blocked.length,
       blockedIds: blocked,
+      onLiveTest: lockedIds.length,
+      onLiveTestIds: lockedIds,
       unlinkedFrom,
       keptOnSatTests,
       ...(blocked.length
         ? {
             message:
-              blocked.length === 1
+              (blocked.length === 1
                 ? '1 question still needs an image before it can be approved. Attach the image first.'
-                : `${blocked.length} questions still need an image before they can be approved. Attach the images first.`,
+                : `${blocked.length} questions still need an image before they can be approved. Attach the images first.`) +
+              (notes.length ? ` ${notes.join(' ')}` : ''),
           }
         : notes.length
           ? { message: notes.join(' ') }
@@ -562,6 +634,11 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
 
     const question = await prisma.question.findFirst({ where: { id, deletedAt: null } });
     if (!question) return reply.code(404).send({ error: 'Question not found.' });
+
+    // Attaching a picture rewrites the question's content, so the same freeze
+    // applies as to any other edit.
+    const lock = await liveTestLock(id);
+    if (lock) return reply.code(409).send({ error: `No picture can be attached because ${lock}` });
 
     const asset = await prisma.asset.findUnique({ where: { id: body.assetId } });
     if (!asset) return reply.code(400).send({ error: 'That image has not been uploaded yet.' });
@@ -694,6 +771,10 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
     const existing = await prisma.question.findFirst({ where: { id, deletedAt: null } });
     if (!existing) return reply.code(404).send({ error: 'Question not found.' });
 
+    // A question on a live or already-sat paper is frozen; see liveTestLocks.
+    const lock = await liveTestLock(id);
+    if (lock) return reply.code(409).send({ error: `This question cannot be edited because ${lock}` });
+
     const format = body.format ?? existing.format;
     const data: Record<string, unknown> = { isAdminEdited: true };
 
@@ -766,6 +847,11 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
     });
     if (!question) return reply.code(404).send({ error: 'Question not found.' });
 
+    // Refused outright while the paper it is on is live: unlinking it would
+    // shorten an exam that students can see, mid-sitting.
+    const lock = await liveTestLock(id);
+    if (lock) return reply.code(409).send({ error: `This question cannot be deleted because ${lock}` });
+
     if (question._count.answers > 0) {
       await prisma.question.update({ where: { id }, data: { deletedAt: new Date(), status: 'REJECTED' } });
       await audit(request.user!.sub, 'question.retire', { entity: 'Question', entityId: id, ip: request.ip });
@@ -805,7 +891,12 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
       select: { id: true, _count: { select: { answers: true } } },
     });
 
-    const deletable = rejected.filter((q) => q._count.answers === 0).map((q) => q.id);
+    // Answered questions stay, so released marks remain explainable. So do any
+    // still sitting on a live paper - possible only for a question rejected
+    // before that freeze existed, but emptying the bin must not be the one way
+    // round it.
+    const locks = await liveTestLocks(rejected.map((q) => q.id));
+    const deletable = rejected.filter((q) => q._count.answers === 0 && !locks.has(q.id)).map((q) => q.id);
     const kept = rejected.length - deletable.length;
 
     if (deletable.length) {
