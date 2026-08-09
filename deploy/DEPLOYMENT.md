@@ -54,20 +54,34 @@ sudo apt update && sudo apt install -y docker.io docker-compose-v2 git
 git clone https://github.com/jitendraphand/foundation.git
 cd foundation
 
-cp .env.example .env
-nano .env          # see below - three lines to change
+./deploy/local.sh
+```
 
+That is the whole thing. `local.sh` creates `.env` if it is missing, generates
+the two secrets, points the hostname at localhost, builds, starts, and waits
+until the API answers before telling you it is ready.
+
+**Do not paste secrets by hand for a trial.** `JWT_SECRET` and
+`ENCRYPTION_KEY` must each be at least 16 characters; anything shorter fails
+validation, which kills the API container on startup, and the only symptom is
+`Request failed (502)` on a sign-in page that otherwise looks perfectly
+healthy. `local.sh` exists so that cannot happen.
+
+It is safe to re-run, and it will not overwrite anything that already works —
+in particular it leaves an existing `ENCRYPTION_KEY` alone (replacing it makes
+saved LLM API keys unreadable) and never rotates `POSTGRES_PASSWORD`, which
+Postgres bakes into the data volume the first time it starts.
+
+<details>
+<summary>Doing it by hand instead</summary>
+
+```bash
+cp .env.example .env
+nano .env     # PUBLIC_HOST=localhost, and a real value for each secret:
+              #   openssl rand -base64 48
 sudo docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
 ```
-
-In `.env`, set:
-
-```
-PUBLIC_HOST=localhost
-POSTGRES_PASSWORD=<anything, it is only reachable inside docker>
-JWT_SECRET=<paste: openssl rand -base64 48>
-ENCRYPTION_KEY=<paste: openssl rand -base64 48>
-```
+</details>
 
 The first build takes a few minutes. Then open **http://localhost** and sign in
 as `admin` / `foundation_123`.
