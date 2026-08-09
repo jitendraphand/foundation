@@ -382,6 +382,7 @@ function Providers() {
       </Card>
 
       <StepUpSettings credentials={credentials} />
+      <ImageSettings />
 
       <Alert tone="info">
         A provider ticked as <strong>fallback</strong> is used when the one you chose keeps refusing — rate limited,
@@ -783,6 +784,97 @@ function StepUpSettings({ credentials }: { credentials: Credential[] }) {
           {busy ? <Spinner label="Saving" /> : 'Save'}
         </button>
       </div>
+    </Card>
+  );
+}
+
+/**
+ * Which provider draws the pictures a question asks for.
+ *
+ * Only OpenAI and Azure are offered, because they are the two that share the
+ * /images/generations shape. Bedrock, Vertex and Oracle each have their own
+ * image API; listing them here and failing at the point of use would be worse
+ * than not listing them.
+ */
+function ImageSettings() {
+  const [credentials, setCredentials] = useState<Array<{ id: string; label: string; provider: string }>>([]);
+  const [credentialId, setCredentialId] = useState('');
+  const [model, setModel] = useState('gpt-image-1');
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api
+      .get<{ config: { credentialId: string; model?: string } | null; credentials: Array<{ id: string; label: string; provider: string }> }>(
+        '/api/admin/image-provider',
+      )
+      .then((res) => {
+        setCredentials(res.credentials);
+        setCredentialId(res.config?.credentialId ?? '');
+        setModel(res.config?.model ?? 'gpt-image-1');
+      })
+      .catch(() => undefined);
+  }, []);
+
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api.put<{ message: string }>('/api/admin/image-provider', {
+        credentialId: credentialId || null,
+        model: model.trim() || undefined,
+      });
+      setNotice(res.message);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not save that.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card title="Image generation">
+      {error && <Alert tone="error" onDismiss={() => setError(null)}>{error}</Alert>}
+      {notice && <Alert tone="success" onDismiss={() => setNotice(null)}>{notice}</Alert>}
+
+      <p className="text-xs text-ink-muted mb-3">
+        None of the question models can draw, so a question needing a photograph carries a written prompt instead.
+        Set a provider here and that prompt turns into a &ldquo;Generate the picture&rdquo; button in the review
+        screen. Leave it off and pictures are made elsewhere and uploaded, exactly as before.
+      </p>
+
+      {credentials.length === 0 ? (
+        <Alert tone="info">
+          No credential here can generate images. Add an OpenAI or Azure OpenAI credential above, and it will appear
+          in this list.
+        </Alert>
+      ) : (
+        <>
+          <div className="grid sm:grid-cols-2 gap-4">
+            <Field label="Provider">
+              <select className="input" value={credentialId} onChange={(e) => setCredentialId(e.target.value)}>
+                <option value="">Off — upload pictures by hand</option>
+                {credentials.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+              </select>
+            </Field>
+            <Field label="Image model" hint="gpt-image-1 on OpenAI; on Azure this is the deployment name.">
+              <input
+                className="input font-mono text-xs"
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                placeholder="gpt-image-1"
+                disabled={!credentialId}
+              />
+            </Field>
+          </div>
+          <div className="flex justify-end mt-3">
+            <button type="button" className="btn-primary btn-sm" onClick={() => void save()} disabled={busy}>
+              {busy ? <Spinner label="Saving" /> : 'Save'}
+            </button>
+          </div>
+        </>
+      )}
     </Card>
   );
 }

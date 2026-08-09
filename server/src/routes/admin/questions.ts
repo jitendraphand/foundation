@@ -7,6 +7,8 @@ import { validateAnswerKey } from '../../lib/grading.js';
 import { importQuestions, runGeneration, buildUserPrompt } from '../../llm/generate.js';
 import { IMPORT_TEMPLATE } from '../../llm/import-template.js';
 import { LlmError, PROVIDERS } from '../../llm/providers.js';
+import { generateImage } from '../../llm/images.js';
+import { imagePromptSchema } from '../../llm/schema.js';
 import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_TEMPLATE } from '../../llm/prompts.js';
 import { findWeakAreas, weakAreasToPromptHint, type Breakdown } from '../../lib/analytics.js';
 
@@ -566,7 +568,15 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
 
     const spec = (question.imagePrompt ?? {}) as { placement?: string; optionId?: string; altText?: string };
     const alt = body.altText ?? spec.altText ?? '';
-    const imageBlock = { type: 'image' as const, assetId: body.assetId, alt, ...(body.caption ? { caption: body.caption } : {}) };
+    const imageBlock = {
+      type: 'image' as const,
+      assetId: body.assetId,
+      alt,
+      ...(body.caption ? { caption: body.caption } : {}),
+      // Recorded now so the renderer never has to guess; see the image block
+      // schema for why the space must be reserved before the file arrives.
+      ...(asset.width && asset.height ? { width: asset.width, height: asset.height } : {}),
+    };
 
     let content = question.content as { version: number; blocks: unknown[] };
     let options = question.options as Array<{ id: string; blocks: unknown[] }>;
@@ -601,6 +611,41 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
   });
 
   /** The queue of questions still waiting for a picture. */
+  /**
+   * Draws the picture this question asks for, and hands back the asset ready
+   * to attach. Deliberately does not attach it: the administrator should look
+   * at what came back before it goes on a paper a child will sit.
+   */
+  app.post('/api/admin/questions/:id/generate-image', {
+    preHandler: requirePermission('questions.review'),
+    // Image calls are the most expensive thing here per request.
+    config: { rateLimit: { max: 40, timeWindow: '10 minutes' } },
+  }, async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    if (!(await mayTouch(request, id))) return reply.code(404).send({ error: 'Question not found.' });
+
+    const question = await prisma.question.findFirst({ where: { id, deletedAt: null } });
+    if (!question) return reply.code(404).send({ error: 'Question not found.' });
+
+    const parsed = imagePromptSchema.safeParse(question.imagePrompt);
+    if (!parsed.success) {
+      return reply.code(400).send({
+        error: 'This question has no usable image prompt. Edit it to add one, or clear the image-required flag.',
+      });
+    }
+
+    try {
+      const image = await generateImage(parsed.data);
+      await audit(request.user!.sub, 'question.image_generated', {
+        entity: 'Question', entityId: id, ip: request.ip, detail: { assetId: image.assetId },
+      });
+      return { ok: true, ...image };
+    } catch (err) {
+      if (err instanceof LlmError) return reply.code(502).send({ error: err.message });
+      throw err;
+    }
+  });
+
   app.get('/api/admin/questions/awaiting-images', async (request) => {
     const q = z.object({ generationRunId: z.string().uuid().optional() }).parse(request.query);
 

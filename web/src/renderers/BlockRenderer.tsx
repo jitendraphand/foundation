@@ -129,7 +129,15 @@ export function BlockRenderer({ block }: { block: Block }) {
     case 'table':
       return <TableBlock headers={block.headers} rows={block.rows} caption={block.caption} />;
     case 'image':
-      return <ImageBlock assetId={block.assetId} alt={block.alt} caption={block.caption} />;
+      return (
+        <ImageBlock
+          assetId={block.assetId}
+          alt={block.alt}
+          caption={block.caption}
+          width={block.width}
+          height={block.height}
+        />
+      );
     case 'code':
       return <CodeBlock language={block.language} value={block.value} caption={block.caption} />;
     default:
@@ -486,7 +494,19 @@ function TableBlock({ headers, rows, caption }: { headers: string[]; rows: strin
 
 // --- Image -----------------------------------------------------------------
 
-function ImageBlock({ assetId, alt, caption }: { assetId: string; alt?: string; caption?: string }) {
+/**
+ * A picture attached to a question.
+ *
+ * width and height are given whenever they are known, so the browser reserves
+ * the right space before the file arrives. Without them the figure is zero
+ * pixels tall until it loads and then shoves the question text down - which,
+ * mid-exam on a slow connection, means a student taps an option that has just
+ * moved. aspect-ratio does the reserving; max-width keeps it inside the column
+ * regardless of how large the original is.
+ */
+function ImageBlock({
+  assetId, alt, caption, width, height,
+}: { assetId: string; alt?: string; caption?: string; width?: number; height?: number }) {
   const [failed, setFailed] = useState(false);
 
   if (failed) {
@@ -503,8 +523,10 @@ function ImageBlock({ assetId, alt, caption }: { assetId: string; alt?: string; 
         src={`/uploads/${assetId}`}
         alt={alt ?? ''}
         loading="lazy"
+        {...(width && height ? { width, height } : {})}
         onError={() => setFailed(true)}
         className="max-w-full h-auto rounded-lg border border-line bg-white"
+        style={width && height ? { aspectRatio: `${width} / ${height}` } : undefined}
       />
       {caption && <figcaption className="mt-1 text-xs text-ink-faint">{caption}</figcaption>}
     </figure>

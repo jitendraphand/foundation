@@ -75,7 +75,7 @@ export type Block =
   | { type: 'mermaid'; code: string; caption?: string }
   | { type: 'chart'; spec: ChartSpec; caption?: string }
   | { type: 'table'; headers: string[]; rows: string[][]; caption?: string }
-  | { type: 'image'; assetId: string; alt?: string; caption?: string }
+  | { type: 'image'; assetId: string; alt?: string; caption?: string; width?: number; height?: number }
   | { type: 'code'; language?: string; value: string; caption?: string };
 
 export interface Content {

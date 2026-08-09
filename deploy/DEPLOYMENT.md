@@ -531,10 +531,19 @@ doubles as something to hand to an assistant with "give me twenty more like
 this". Tags must use the codes from **Settings → Tags**; a question with an
 unrecognised tag is skipped with a reason and the rest still load.
 
-**None of these generate images.** When a question needs a real photograph, the
-model flags it and writes an image-generation prompt instead. You copy that
-prompt into any image tool and upload the result from the review screen. See
-[Images](../README.md#images) in the README.
+**None of the question models generate images.** When a question needs a real
+photograph, the model flags it and writes an image-generation prompt instead.
+
+Set an image provider under **Settings → LLM providers → Image generation** and
+that prompt becomes a *Generate the picture* button in the review screen: one
+click draws it, shows it to you, and attaches it only once you say so. Only
+OpenAI and Azure OpenAI can do this — they share the same `/images/generations`
+shape. Bedrock, Vertex and Oracle each have their own image API and are not
+offered rather than being offered and failing.
+
+Leave it off and the old route still works: copy the prompt into any image
+tool and upload the result. Either way a flagged question cannot be approved
+until a picture is attached. See [Images](../README.md#images) in the README.
 
 **Copy the key when you create it.** Every provider shows a new key in full
 exactly once, and from then on displays a shortened version — `sk-or-v1-…`.

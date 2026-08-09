@@ -461,8 +461,20 @@ function ImageNeededPanel({ question, onAttached }: { question: BankQuestion; on
   const spec = question.imagePrompt;
   const [copied, setCopied] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [generating, setGenerating] = useState(false);
+  const [preview, setPreview] = useState<{ assetId: string; width: number; height: number } | null>(null);
+  const [imageProviderReady, setImageProviderReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  // Only offer the button when a provider is actually configured; otherwise it
+  // is a button whose only outcome is an error message.
+  useEffect(() => {
+    api
+      .get<{ config: { credentialId: string } | null }>('/api/admin/image-provider')
+      .then((res) => setImageProviderReady(!!res.config))
+      .catch(() => setImageProviderReady(false));
+  }, []);
 
   if (!spec) {
     return (
@@ -492,6 +504,39 @@ function ImageNeededPanel({ question, onAttached }: { question: BankQuestion; on
   ]
     .filter(Boolean)
     .join(' ');
+
+  /** Draws the picture, but does not attach it - that is a separate decision. */
+  const generate = async () => {
+    setGenerating(true);
+    setError(null);
+    try {
+      const res = await api.post<{ assetId: string; width: number; height: number }>(
+        `/api/admin/questions/${question.id}/generate-image`,
+        {},
+      );
+      setPreview({ assetId: res.assetId, width: res.width, height: res.height });
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not generate a picture just now.');
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const attach = async (assetId: string) => {
+    setUploading(true);
+    setError(null);
+    try {
+      await api.post(`/api/admin/questions/${question.id}/image`, {
+        assetId,
+        altText: spec.altText || undefined,
+      });
+      onAttached();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not attach that image.');
+    } finally {
+      setUploading(false);
+    }
+  };
 
   const upload = async (file: File) => {
     setUploading(true);
@@ -559,7 +604,35 @@ function ImageNeededPanel({ question, onAttached }: { question: BankQuestion; on
         {spec.altText && <div><dt className="inline font-medium">Alt text: </dt><dd className="inline">{spec.altText}</dd></div>}
       </dl>
 
+      {/* The generated image is shown before it is attached: a picture going
+          onto a paper a child will sit is worth one look first. */}
+      {preview && (
+        <div className="rounded-lg border border-line bg-white p-2">
+          <img
+            src={`/uploads/${preview.assetId}`}
+            alt={spec.altText || 'Generated figure'}
+            width={preview.width}
+            height={preview.height}
+            className="mx-auto max-h-64 w-auto rounded"
+          />
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <button type="button" className="btn-primary btn-sm" onClick={() => void attach(preview.assetId)} disabled={uploading}>
+              {uploading ? <Spinner label="Attaching" /> : 'Use this picture'}
+            </button>
+            <button type="button" className="btn-secondary btn-sm" onClick={() => void generate()} disabled={generating}>
+              {generating ? <Spinner label="Drawing" /> : 'Try again'}
+            </button>
+            <span className="text-[11px] text-ink-faint tabular-nums">{preview.width} × {preview.height} px</span>
+          </div>
+        </div>
+      )}
+
       <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-warn/20">
+        {imageProviderReady && !preview && (
+          <button type="button" className="btn-primary btn-sm" onClick={() => void generate()} disabled={generating}>
+            {generating ? <Spinner label="Drawing" /> : 'Generate the picture'}
+          </button>
+        )}
         <input
           ref={fileRef}
           type="file"
@@ -571,8 +644,13 @@ function ImageNeededPanel({ question, onAttached }: { question: BankQuestion; on
             e.target.value = '';
           }}
         />
-        <button type="button" className="btn-primary btn-sm" onClick={() => fileRef.current?.click()} disabled={uploading}>
-          {uploading ? <Spinner label="Uploading" /> : 'Upload the finished image'}
+        <button
+          type="button"
+          className={imageProviderReady ? 'btn-secondary btn-sm' : 'btn-primary btn-sm'}
+          onClick={() => fileRef.current?.click()}
+          disabled={uploading}
+        >
+          {uploading ? <Spinner label="Uploading" /> : 'Upload one instead'}
         </button>
         <span className="text-[11px] text-ink-faint">
           PNG, JPEG, WebP or GIF, up to 4 MB. It is placed above the {spec.placement === 'OPTION' ? 'option' : 'question'} text.

@@ -8,6 +8,7 @@ import { PROVIDERS, describeKeyProblem, pingProvider, DEFAULT_AZURE_API_VERSION 
 import { parseServiceAccount, vertexBaseUrl } from '../../llm/google-auth.js';
 import { looksLikeOcid } from '../../llm/oci-signer.js';
 import { getStepUpConfig, setStepUpConfig } from '../../llm/step-up.js';
+import { getImageConfig, setImageConfig, canGenerateImages } from '../../llm/images.js';
 import { callParamsFor, packIamSecret } from '../../llm/credentials.js';
 import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_TEMPLATE } from '../../llm/prompts.js';
 import { COMMON_TIMEZONES, WINDOW_PRESETS, isValidTimezone, zonedNow, formatMinute } from '../../lib/availability.js';
@@ -522,6 +523,49 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
       config: { credentialId: credential.id, model },
       message: `Step-up tests will use ${credential.label} (${model}).`,
     };
+  });
+
+  /**
+   * Which provider draws the pictures a question asks for. Only the
+   * credentials that can actually do it are offered.
+   */
+  app.get('/api/admin/image-provider', async () => {
+    const config = await getImageConfig();
+    const all = await prisma.apiCredential.findMany({
+      where: { isActive: true },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true, label: true, provider: true },
+    });
+    return { config, credentials: all.filter((c) => canGenerateImages(c.provider)) };
+  });
+
+  app.put('/api/admin/image-provider', async (request, reply) => {
+    const body = z
+      .object({ credentialId: z.string().uuid().nullable(), model: z.string().max(200).optional() })
+      .parse(request.body);
+
+    if (body.credentialId === null) {
+      await setImageConfig(null);
+      await audit(request.user!.sub, 'settings.image_provider', { ip: request.ip, detail: { enabled: false } });
+      return { ok: true, config: null, message: 'Image generation is off. Pictures must be uploaded by hand.' };
+    }
+
+    const credential = await prisma.apiCredential.findUnique({ where: { id: body.credentialId } });
+    if (!credential || !credential.isActive) {
+      return reply.code(400).send({ error: 'That credential does not exist or is disabled.' });
+    }
+    if (!canGenerateImages(credential.provider)) {
+      return reply.code(400).send({
+        error: `${credential.label} is a ${credential.provider} credential, which cannot generate images here. Use OpenAI or Azure OpenAI.`,
+      });
+    }
+
+    const model = body.model?.trim() || 'gpt-image-1';
+    await setImageConfig({ credentialId: credential.id, model });
+    await audit(request.user!.sub, 'settings.image_provider', {
+      ip: request.ip, detail: { credentialId: credential.id, model },
+    });
+    return { ok: true, config: { credentialId: credential.id, model }, message: `Pictures will be drawn by ${credential.label} (${model}).` };
   });
 
   // --- Prompt templates ----------------------------------------------------

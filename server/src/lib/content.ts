@@ -164,6 +164,14 @@ const imageBlock = z.object({
   assetId: z.string().uuid(),
   alt: z.string().max(500).default(''),
   caption: z.string().max(500).optional(),
+  /**
+   * The real pixel size, copied from the asset when the picture is attached.
+   * Carried on the block so the renderer can reserve the space before the file
+   * loads - otherwise the figure is zero pixels tall and then shoves the
+   * question down, which mid-exam moves an option under a student's thumb.
+   */
+  width: z.number().int().positive().max(10000).optional(),
+  height: z.number().int().positive().max(10000).optional(),
 });
 
 const codeBlock = z.object({

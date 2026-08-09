@@ -302,8 +302,15 @@ by a small hand-written expression parser (`web/src/lib/expr.ts`) — never
 
 ### Images
 
-None of the supported providers generate pictures, so the system does not
-pretend otherwise. Every question is tagged **image required: yes or no**.
+None of the *question* models generate pictures, so the system does not pretend
+otherwise. Every question is tagged **image required: yes or no**.
+
+An image provider can be set separately (OpenAI or Azure OpenAI), which turns
+the written prompt into a one-click *Generate the picture* button in the review
+screen. The result is shown before it is attached — a picture going onto a
+paper a child will sit is worth one look first — and can be redrawn or replaced
+with an upload. Without a provider configured, the copy-prompt-and-upload route
+works exactly as before.
 
 When a question genuinely needs a photograph or realistic illustration that line
 art cannot convey, the model must set `imageRequired: true` and supply a
