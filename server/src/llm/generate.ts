@@ -6,6 +6,7 @@ import { validateAnswerKey } from '../lib/grading.js';
 import { chatComplete, emitsReasoning, LlmError, PROVIDERS, type ChatMessage, type ChatRequest } from './providers.js';
 import { chatWithFallback, ProviderChainError } from './resilience.js';
 import { ceilingFromError, rememberCeiling, resolveCeiling } from './limits.js';
+import { capabilitiesOf } from './capabilities.js';
 import { extractJson, llmResponseSchema, llmQuestionSchema, describeIssues, type LlmQuestion } from './schema.js';
 import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_TEMPLATE, PRACTICE_SYSTEM_SUFFIX, renderTemplate } from './prompts.js';
 import type { TestKind, QuestionStatus } from '@prisma/client';
@@ -112,8 +113,10 @@ async function buildCandidates(
   });
 
   for (const credential of fallbacks) {
-    // A fallback with no default model has nothing usable to call.
+    // A fallback with no default model has nothing usable to call, and one kept
+    // only for drawing pictures cannot write a question.
     if (!credential.defaultModel) continue;
+    if (!capabilitiesOf(credential).text) continue;
     try {
       candidates.push({
         label: credential.label,
@@ -469,8 +472,47 @@ function learnedCeilingFrom(err: unknown, ownLabel: string, asked: number): numb
 const MAX_CEILING_SHRINKS = 3;
 
 /**
+ * How long a run may sit as RUNNING before it is assumed dead.
+ *
+ * A run is many sequential calls and a large one legitimately takes a while, so
+ * this is generous. What it catches is the run whose process is gone: the API
+ * container restarted mid-generation - a deploy, a crash, an out-of-memory -
+ * and nothing is left to write the final status. Those otherwise show as
+ * "running" for ever, and an admin waiting for one has no way to tell.
+ */
+const RUN_ASSUMED_DEAD_MS = 2 * 60 * 60 * 1000;
+
+/**
+ * Closes off runs that can no longer finish.
+ *
+ * Safe to call at any time, including while a slow run is genuinely still
+ * going: that run writes its own status when it completes, and overwrites this.
+ * Cheap enough to do on every history fetch, which is what makes it
+ * self-healing rather than another thing to remember.
+ */
+export async function sweepAbandonedRuns(): Promise<number> {
+  const result = await prisma.generationRun.updateMany({
+    where: { status: 'RUNNING', createdAt: { lt: new Date(Date.now() - RUN_ASSUMED_DEAD_MS) } },
+    data: {
+      status: 'FAILED',
+      completedAt: new Date(),
+      errorMessage:
+        'The server restarted while this run was in progress, so it could not be finished. Any questions it had ' +
+        'already produced are in the question bank; run it again for the rest.',
+    },
+  });
+  return result.count;
+}
+
+/**
  * Runs one generation. Questions land as DRAFT; nothing reaches a student
  * until an admin approves it and places it on a test.
+ *
+ * Deliberately not tied to the HTTP request that started it. Closing the tab,
+ * navigating away or signing out does not cancel anything: the run continues,
+ * the questions land in the bank, and the outcome is on the run itself. Losing
+ * a batch because somebody switched tabs to check a timetable would be a
+ * miserable way to waste a paid API call.
  *
  * A request for more questions than fit in one reply is split into several
  * calls behind a single run, so the admin asks for fifty and gets fifty

@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { api, ApiError } from '../../lib/api';
 import { Alert, Badge, Card, EmptyState, Field, Modal, PageLoader, formatDate } from '../../components/ui';
 import { WindowEditor, describeWindowValue, type WindowPreset, type WindowValue } from '../../components/WindowEditor';
+import { DEFAULT_EXAM_RULES, ExamRulesEditor, rulesToBody, type ExamRules } from '../../components/ExamRules';
 
 interface TestRow {
   id: string;
@@ -221,15 +222,12 @@ function CreateTestModal({ onClose, onCreated }: { onClose: () => void; onCreate
     negativeMarks: 0,
     passPercentage: 35,
     maxAttempts: 1,
-    shuffleQuestions: true,
-    shuffleOptions: true,
-    proctored: false,
-    proctorAllowance: 3,
-    proctorFullscreen: true,
-    showAnswersAfter: true,
     targetGrades: '',
     targetDivisions: '',
   });
+  // Shuffling, answers and proctoring, shared with the test builder so the two
+  // screens cannot offer different options; see components/ExamRules.
+  const [rules, setRules] = useState<ExamRules>(DEFAULT_EXAM_RULES);
   const [availability, setAvailability] = useState<WindowValue>({
     availabilityMode: 'ALWAYS',
     windowStartMinute: null,
@@ -264,14 +262,7 @@ function CreateTestModal({ onClose, onCreated }: { onClose: () => void; onCreate
         negativeMarks: form.negativeMarks,
         passPercentage: form.passPercentage,
         maxAttempts: form.maxAttempts,
-        shuffleQuestions: form.shuffleQuestions,
-        shuffleOptions: form.shuffleOptions,
-        proctoring: {
-          enabled: form.proctored,
-          allowance: form.proctorAllowance,
-          requireFullscreen: form.proctorFullscreen,
-        },
-        showAnswersAfter: form.showAnswersAfter,
+        ...rulesToBody(rules),
         targetGrades: form.targetGrades.split(',').map((s) => s.trim()).filter(Boolean),
         targetDivisions: form.targetDivisions.split(',').map((s) => s.trim()).filter(Boolean),
         ...availability,
@@ -336,66 +327,8 @@ function CreateTestModal({ onClose, onCreated }: { onClose: () => void; onCreate
           />
         </div>
 
-        <div className="grid grid-cols-2 gap-2 text-sm pt-3 border-t border-line">
-          {([
-            ['shuffleQuestions', 'Shuffle question order'],
-            ['shuffleOptions', 'Shuffle option order'],
-            ['showAnswersAfter', 'Show correct answers once released'],
-          ] as const).map(([key, label]) => (
-            <label key={key} className="flex items-center gap-2">
-              <input
-                type="checkbox"
-                className="accent-series-1"
-                checked={form[key]}
-                onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.checked }))}
-              />
-              <span className="text-ink-muted">{label}</span>
-            </label>
-          ))}
-        </div>
-
-        <div className="pt-3 border-t border-line space-y-2">
-          <label className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              className="accent-series-1"
-              checked={form.proctored}
-              onChange={(e) => setForm((f) => ({ ...f, proctored: e.target.checked }))}
-            />
-            <span>Proctored exam</span>
-          </label>
-
-          {form.proctored && (
-            <div className="pl-6 space-y-2">
-              <p className="text-xs text-ink-muted">
-                Records when a student leaves the paper — another tab, another app, or leaving fullscreen — and
-                submits automatically once the allowance is used up. It cannot see a second device, a phone, or
-                notes on the desk, so it is a deterrent and a record, not a substitute for invigilation.
-              </p>
-              <div className="flex flex-wrap items-center gap-4">
-                <label className="flex items-center gap-2 text-sm">
-                  <span className="text-ink-muted">Allowed departures</span>
-                  <input
-                    type="number"
-                    min={1}
-                    max={20}
-                    className="input w-20"
-                    value={form.proctorAllowance}
-                    onChange={(e) => setForm((f) => ({ ...f, proctorAllowance: Number(e.target.value) || 1 }))}
-                  />
-                </label>
-                <label className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    className="accent-series-1"
-                    checked={form.proctorFullscreen}
-                    onChange={(e) => setForm((f) => ({ ...f, proctorFullscreen: e.target.checked }))}
-                  />
-                  <span className="text-ink-muted">Leaving fullscreen counts too</span>
-                </label>
-              </div>
-            </div>
-          )}
+        <div className="pt-3 border-t border-line">
+          <ExamRulesEditor value={rules} onChange={setRules} />
         </div>
 
         <div className="flex justify-end gap-2">

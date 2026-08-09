@@ -228,6 +228,14 @@ export default function AdminQuestions() {
       {error && <Alert tone="error" onDismiss={() => setError(null)}>{error}</Alert>}
       {notice && <Alert tone="success" onDismiss={() => setNotice(null)}>{notice}</Alert>}
 
+      {bucket === 'APPROVED' && (
+        <Alert tone="info">
+          Approved and not yet used. A question leaves this list the moment it goes on a paper, so what is here is
+          what is free for the next one — open the test under <strong>Tests</strong> to see what is on it. Taking a
+          question off a paper, or deleting the paper, brings it back here.
+        </Alert>
+      )}
+
       {bucket === 'REJECTED' && (
         <Alert tone="info">
           Rejected questions are out of use: taken off every test that has not been sat yet, and never given to a
@@ -282,9 +290,19 @@ export default function AdminQuestions() {
       ) : questions.length === 0 ? (
         <Card>
           <EmptyState
-            title={bucket === 'DRAFT' ? 'No drafts awaiting review' : `No ${bucket.toLowerCase()} questions`}
+            title={
+              bucket === 'DRAFT' ? 'No drafts awaiting review'
+              : bucket === 'APPROVED' ? 'No approved questions waiting to be used'
+              : 'No rejected questions'
+            }
             hint={
-              bucket === 'DRAFT' ? 'Generate questions from the "Set test" screen to see them here.' : undefined
+              bucket === 'DRAFT'
+                ? 'Generate questions from the "Set test" screen to see them here.'
+                : bucket === 'APPROVED'
+                  // Says where they went, because "approved" dropping to zero
+                  // after building a paper looks like they were lost.
+                  ? 'Approved questions leave this list once they are on a paper. Open the test under Tests to see what is on it.'
+                  : undefined
             }
           />
         </Card>

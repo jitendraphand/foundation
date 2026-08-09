@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { api, ApiError } from '../../lib/api';
-import { Alert, Card, Field, Modal, PageLoader, Spinner, humanizeTag } from '../../components/ui';
+import { Alert, Badge, Card, Field, Modal, PageLoader, Spinner, formatDate, humanizeTag } from '../../components/ui';
 import type { Tag } from '../../lib/types';
 
 /**
@@ -145,6 +145,16 @@ export default function AdminGenerate() {
       setError(err instanceof ApiError ? err.message : 'Could not build the prompt preview.');
     }
   };
+
+  // A run is not tied to this page. Closing the tab or signing out does not
+  // stop it - the questions still land in the bank - but the summary is only
+  // shown to whoever is still watching, so say so before it is lost.
+  useEffect(() => {
+    if (!busy) return;
+    const warn = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [busy]);
 
   const generate = async () => {
     setBusy(true);
@@ -507,6 +517,15 @@ export default function AdminGenerate() {
         </button>
       </div>
 
+      {busy && (
+        <Alert tone="info">
+          This keeps going on the server even if you close the tab or sign out — the questions still arrive in the
+          question bank. What you would lose is this summary, and <strong>Recent runs</strong> below has it.
+        </Alert>
+      )}
+
+      <RecentRuns refreshKey={outcome?.runId ?? (busy ? 'running' : '')} />
+
       <Modal open={editingPrompt} onClose={() => setEditingPrompt(false)} title="Edit the system prompt" wide>
         <textarea
           className="input font-mono text-xs"
@@ -541,6 +560,106 @@ export default function AdminGenerate() {
         </div>
       </Modal>
     </div>
+  );
+}
+
+// --- What happened to the last few runs ------------------------------------
+
+interface RunRow {
+  id: string;
+  status: 'PENDING' | 'RUNNING' | 'SUCCEEDED' | 'FAILED';
+  provider: string;
+  model: string;
+  createdAt: string;
+  completedAt: string | null;
+  questionsRequested: number;
+  questionsAccepted: number | null;
+  errorMessage: string | null;
+  requestedBy: { username: string } | null;
+  requestSpec: { subject?: string } | null;
+}
+
+/**
+ * The last few generation runs and how they ended.
+ *
+ * A run is not tied to the page that started it: it lives on the server and
+ * finishes whether or not anybody is watching. Without this, switching tabs
+ * during a long batch meant the outcome was simply gone - the questions were in
+ * the bank, but how many were rejected and why was not recoverable, and the
+ * deployment notes pointed at a "generation history" screen that did not exist.
+ *
+ * A run still in progress is polled, so leaving this page open and coming back
+ * shows the result rather than a stale spinner.
+ */
+function RecentRuns({ refreshKey }: { refreshKey: string }) {
+  const [runs, setRuns] = useState<RunRow[] | null>(null);
+  const navigate = useNavigate();
+
+  const load = useCallback(async () => {
+    try {
+      const res = await api.get<{ runs: RunRow[] }>('/api/admin/generation/runs?pageSize=5');
+      setRuns(res.runs);
+      return res.runs;
+    } catch {
+      setRuns([]);
+      return [];
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load, refreshKey]);
+
+  // Only while something is actually in flight; a finished list polls nothing.
+  useEffect(() => {
+    if (!runs?.some((r) => r.status === 'RUNNING' || r.status === 'PENDING')) return;
+    const timer = setInterval(() => void load(), 5000);
+    return () => clearInterval(timer);
+  }, [runs, load]);
+
+  if (!runs || runs.length === 0) return null;
+
+  return (
+    <Card title="Recent runs" padded={false}>
+      <ul className="divide-y divide-line">
+        {runs.map((run) => {
+          const spec = run.requestSpec ?? {};
+          const running = run.status === 'RUNNING' || run.status === 'PENDING';
+          return (
+            <li key={run.id} className="px-4 py-2.5 flex flex-wrap items-center gap-x-3 gap-y-1">
+              <Badge tone={running ? 'warn' : run.status === 'SUCCEEDED' ? 'good' : 'bad'}>
+                {running ? 'running' : run.status.toLowerCase()}
+              </Badge>
+              <span className="text-sm">
+                {spec.subject ?? 'questions'}
+                <span className="text-ink-muted">
+                  {' '}
+                  — {run.questionsAccepted ?? 0} of {run.questionsRequested} accepted
+                </span>
+              </span>
+              <span className="text-[11px] text-ink-faint font-mono truncate">{run.model}</span>
+              <span className="text-[11px] text-ink-faint ml-auto whitespace-nowrap">
+                {formatDate(run.createdAt, true)}
+              </span>
+              {(run.questionsAccepted ?? 0) > 0 && (
+                <button
+                  type="button"
+                  className="btn-ghost btn-sm"
+                  onClick={() => navigate(`/admin/questions?bucket=DRAFT&generationRunId=${run.id}`)}
+                >
+                  See them
+                </button>
+              )}
+              {run.errorMessage && !running && (
+                <p className="w-full text-[11px] text-bad whitespace-pre-wrap">
+                  {run.errorMessage.slice(0, 400)}
+                </p>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+    </Card>
   );
 }
 

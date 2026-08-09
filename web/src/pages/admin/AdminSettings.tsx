@@ -152,6 +152,13 @@ interface Credential {
     /** What each model was observed to refuse above, learned from a refusal. */
     tokenCeilings?: Record<string, number>;
   } | null;
+  /** Resolved server-side from the ticks and what the provider can do. */
+  capabilities: { text: boolean; images: boolean };
+  /**
+   * Whether the Images tick can be offered at all: "no" means the provider
+   * draws through an API this system does not speak, so ticking it is refused.
+   */
+  imageSupport: 'yes' | 'maybe' | 'no';
 }
 
 /**
@@ -296,6 +303,25 @@ function Providers() {
     }
   };
 
+  /**
+   * What a credential is used for. Text, images, or both.
+   *
+   * Not derivable from the provider: the same key can do both, and a school may
+   * hold a second key it wants used only for pictures so that spend is separate
+   * on the bill.
+   */
+  const setCapability = async (credential: Credential, key: 'text' | 'images', on: boolean) => {
+    setError(null);
+    try {
+      await api.patch(`/api/admin/credentials/${credential.id}`, {
+        capabilities: { ...credential.capabilities, [key]: on },
+      });
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not change what that credential is used for.');
+    }
+  };
+
   const setFallback = async (credential: Credential, useAsFallback: boolean) => {
     try {
       await api.patch(`/api/admin/credentials/${credential.id}`, { useAsFallback });
@@ -341,6 +367,7 @@ function Providers() {
                   <th>Provider</th>
                   <th>Key</th>
                   <th>Default model</th>
+                  <th className="text-center">Used for</th>
                   <th className="text-center">Fallback</th>
                   <th>Reply limit</th>
                   <th>Added</th>
@@ -354,6 +381,38 @@ function Providers() {
                     <td className="text-ink-muted">{describeProvider(credential, providers)}</td>
                     <td className="font-mono text-xs text-ink-faint">{credential.keyHint}</td>
                     <td className="font-mono text-xs text-ink-muted">{credential.defaultModel ?? '—'}</td>
+                    <td>
+                      <div className="flex items-center justify-center gap-3">
+                        <label className="flex items-center gap-1.5 text-xs cursor-pointer">
+                          <input
+                            type="checkbox"
+                            className="accent-series-1"
+                            checked={credential.capabilities.text}
+                            onChange={(e) => void setCapability(credential, 'text', e.target.checked)}
+                          />
+                          <span className="text-ink-muted">Text</span>
+                        </label>
+                        <label
+                          className={`flex items-center gap-1.5 text-xs ${
+                            credential.imageSupport === 'no' ? 'opacity-40' : 'cursor-pointer'
+                          }`}
+                          title={
+                            credential.imageSupport === 'no'
+                              ? 'This provider draws through its own API, not the OpenAI one, so it cannot be used for pictures here.'
+                              : 'Offer this credential for drawing the pictures questions ask for.'
+                          }
+                        >
+                          <input
+                            type="checkbox"
+                            className="accent-series-1"
+                            checked={credential.capabilities.images}
+                            disabled={credential.imageSupport === 'no'}
+                            onChange={(e) => void setCapability(credential, 'images', e.target.checked)}
+                          />
+                          <span className="text-ink-muted">Images</span>
+                        </label>
+                      </div>
+                    </td>
                     <td className="text-center">
                       <input
                         type="checkbox"
@@ -901,8 +960,10 @@ function ImageSettings() {
 
       {credentials.length === 0 ? (
         <Alert tone="info">
-          No credential here can generate images. Add an OpenAI or Azure OpenAI credential above, and it will appear
-          in this list.
+          No credential is ticked for <strong>Images</strong> yet. Tick it beside a credential in the table above and
+          it will appear here. OpenAI and Azure OpenAI are ticked from the start; the OpenAI-compatible routers can
+          be ticked and will work if your account and model offer an image endpoint. Amazon Bedrock, Vertex AI and
+          Oracle Cloud draw through their own APIs, which this system does not speak, so their tick is greyed out.
         </Alert>
       ) : (
         <>

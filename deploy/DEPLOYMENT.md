@@ -500,11 +500,24 @@ in particular serves 403 to anything that is not a browser and gates embedding
 behind its own flow, so it is materially more work than adding a URL pattern
 and has not been attempted.
 
-### Proctoring
+### Shuffling, answers and proctoring
 
-Tick **Proctored exam** when creating or editing a test. Set how many
-departures are allowed (three by default) and whether leaving fullscreen counts
-alongside hiding the page.
+All three live together under **Exam rules**, in two places that offer exactly
+the same choices: the *New test* form, and the test's own page — open the test
+under **Tests** and press **Change** beside *Exam rules*.
+
+- **Shuffle question order** and **Shuffle option order**, both on by default.
+  Turn them off for a paper whose questions build on each other, or one every
+  student should sit in the same order.
+- **Show correct answers once released.**
+- **Proctored exam**, with how many departures are allowed (three by default)
+  and whether leaving fullscreen counts alongside hiding the page.
+
+Unlike the question list, these stay editable after a test is published or even
+sat. The order a student sees is worked out once, when their attempt starts, and
+stored on that attempt — so changing shuffling now affects whoever starts next
+and can never renumber a paper underneath somebody mid-exam, nor alter a mark
+already given.
 
 **What it sees:** the tab losing focus, the page being hidden behind another
 window, the app being switched away from on a phone, and fullscreen being left.
@@ -558,6 +571,27 @@ The generated questions belong to the student, so they never appear in anyone's
 review queue, and the papers are practice tests: segregated from class results
 everywhere, and marked without waiting for a release.
 
+### If you close the tab while questions are being generated
+
+Nothing is lost. A run is not tied to the page that started it: it happens on
+the server, and switching tabs, closing the browser, losing the connection or
+signing out does not stop it. The questions still arrive under **Question bank →
+Awaiting review**, and the run's outcome is on the run itself.
+
+**Recent runs**, at the bottom of the *Set test* screen, is where to find it —
+each run with how many of the questions asked for were accepted, any error, and
+a *See them* button that filters the bank down to exactly that batch. A run
+still in progress shows there too and updates itself, so opening the screen
+again is enough to check on a long batch.
+
+The one thing you lose by walking away is the detailed rejection list for that
+run, which is only shown to whoever is still watching. Leaving the tab open
+warns you before it navigates away, for that reason.
+
+If the API container restarts mid-generation — a deploy, or a crash — the run
+cannot finish and is marked failed the next time the history is opened, saying
+so plainly. Whatever it had already produced is in the bank; run the rest again.
+
 ### When the provider is unavailable
 
 **Admin → Set test → Import from a file instead.**
@@ -578,10 +612,25 @@ photograph, the model flags it and writes an image-generation prompt instead.
 
 Set an image provider under **Settings → LLM providers → Image generation** and
 that prompt becomes a *Generate the picture* button in the review screen: one
-click draws it, shows it to you, and attaches it only once you say so. Only
-OpenAI and Azure OpenAI can do this — they share the same `/images/generations`
-shape. Bedrock, Vertex and Oracle each have their own image API and are not
-offered rather than being offered and failing.
+click draws it, shows it to you, and attaches it only once you say so.
+
+**Which credentials can draw is your choice, per credential.** Every row in the
+credentials table has a **Used for** column with two ticks, *Text* and *Images*:
+
+- OpenAI and Azure OpenAI are ticked for both from the start.
+- OpenRouter, NVIDIA, Hugging Face, Gemini and a custom endpoint can be ticked
+  for images and will work if that account and model expose an
+  `/images/generations` endpoint. Whether they do is not something this system
+  can know from the outside, so it is offered rather than assumed.
+- Amazon Bedrock, Vertex AI and Oracle Cloud have their tick greyed out. They
+  all generate images, through three APIs that share nothing with the OpenAI
+  one — that is a different protocol, not a different URL, so ticking a box
+  could not make it work.
+
+Untick *Text* to keep a credential for pictures only: it then disappears from
+the "which model writes the questions" dropdown and is never used as a fallback,
+which is how to keep image spend on a separate key and separate bill. A
+credential has to be ticked for something; unticking both is refused.
 
 Leave it off and the old route still works: copy the prompt into any image
 tool and upload the result. Either way a flagged question cannot be approved
@@ -754,10 +803,15 @@ text: a test called "Maths" and questions filed under "Mathematics" are two
 different subjects, and the picker will say so rather than appearing empty.
 
 Only approved questions can go on a paper. The question bank has three lists —
-*Awaiting review*, *Approved* and *Rejected*; a question already placed on a
-paper stays under **Approved** and carries a badge naming that paper, so it can
-still be found where you went looking for it. What is actually on a given
-paper, in order and with its marks, is on that paper's own page.
+*Awaiting review*, *Approved* and *Rejected* — and **Approved means approved and
+still free**: a question leaves that list the moment it goes on a paper, and is
+seen from then on under that test. This is deliberate. The Approved list is what
+you build the next paper from, so fifty approved questions of which forty are
+already spoken for is a list nobody can use.
+
+Taking a question off a paper, or deleting the paper, returns it to Approved by
+itself. Nothing is stored to say "on a test" — it is worked out from the links,
+so there is nothing to get out of step.
 
 ### What happens when a test goes live
 

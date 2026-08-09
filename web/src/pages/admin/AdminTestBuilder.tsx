@@ -4,6 +4,9 @@ import { api, ApiError } from '../../lib/api';
 import { Alert, Badge, Card, EmptyState, PageLoader, Tabs, formatDate, humanizeTag } from '../../components/ui';
 import { BarChart, DataTable, StatTile } from '../../components/charts';
 import { WindowEditor, describeWindowValue, type WindowPreset, type WindowValue } from '../../components/WindowEditor';
+import {
+  ExamRulesEditor, describeExamRules, rulesFromTest, rulesToBody, type ExamRules,
+} from '../../components/ExamRules';
 import { ContentRenderer } from '../../renderers/BlockRenderer';
 import type { BankQuestion } from '../../lib/types';
 
@@ -24,6 +27,10 @@ interface TestDetail {
   negativeMarks: number;
   passPercentage: number;
   showAnswersAfter: boolean;
+  shuffleQuestions: boolean;
+  shuffleOptions: boolean;
+  /** Proctoring lives here rather than in columns; see routes/admin/tests.ts. */
+  meta?: { proctoring?: { enabled?: boolean; allowance?: number; requireFullscreen?: boolean } } | null;
   availabilityMode: 'ALWAYS' | 'ALLOW_WINDOW' | 'BLOCK_WINDOW';
   windowStartMinute: number | null;
   windowEndMinute: number | null;
@@ -107,6 +114,13 @@ export default function AdminTestBuilder() {
 
       <AvailabilityCard test={test} onSaved={async (msg) => { setNotice(msg); await load(); }} onError={setError} />
 
+      <ExamRulesCard
+        test={test}
+        locked={locked}
+        onSaved={async (msg) => { setNotice(msg); await load(); }}
+        onError={setError}
+      />
+
       {/* Releasing is the action that lets students see their score at all. */}
       {!isPractice && test._count.attempts > 0 && (
         <Card>
@@ -183,7 +197,11 @@ function QuestionPicker({ test, locked, onChanged }: { test: TestDetail; locked:
 
   useEffect(() => {
     setLoading(true);
-    const query = new URLSearchParams({ status: 'APPROVED', pageSize: '100' });
+    // bucket rather than status: a question already on another paper is not
+    // available to add to this one, and listing it only invites the admin to
+    // pick something that is spoken for. This paper's own questions come from
+    // test.questions and are merged in below.
+    const query = new URLSearchParams({ bucket: 'APPROVED', pageSize: '100' });
     if (subjectFilter) query.set('subject', subjectFilter);
     api
       .get<{ questions: BankQuestion[]; subjects: Array<{ subject: string; count: number }> }>(
@@ -235,7 +253,12 @@ function QuestionPicker({ test, locked, onChanged }: { test: TestDetail; locked:
     JSON.stringify(q.content).toLowerCase().includes(search.trim().toLowerCase()) ||
     (q.topic ?? '').toLowerCase().includes(search.trim().toLowerCase());
 
-  const available = pool.filter((q) => !chosen.includes(q.id)).filter(matchesSearch);
+  // The pool holds only unplaced questions, so this paper's own are added back
+  // in - otherwise taking one off the paper would make it vanish until the page
+  // was reloaded, and the admin could not undo a mis-click.
+  const own = test.questions.map((tq) => tq.question);
+  const selectable = [...pool, ...own.filter((q) => !pool.some((p) => p.id === q.id))];
+  const available = selectable.filter((q) => !chosen.includes(q.id)).filter(matchesSearch);
 
   return (
     <div className="space-y-4">
@@ -525,6 +548,88 @@ function TestResults({ testId }: { testId: string }) {
  * stays editable after students have started, unlike the marking scheme:
  * changing the hours does not invalidate anybody's score.
  */
+/**
+ * Shuffling, proctoring and what a student sees afterwards.
+ *
+ * These could only ever be chosen on the "New test" form, so a paper created
+ * from the question bank - where the dialog says the builder covers everything
+ * else - could never be proctored at all, and shuffling could never be turned
+ * off for a paper whose questions build on each other.
+ *
+ * Editable while students are still writing, unlike the question list.
+ * Shuffling is decided when an attempt starts, so changing it now affects who
+ * starts next and cannot renumber a paper underneath somebody; proctoring is
+ * read the same way. Neither changes anybody's marks.
+ */
+function ExamRulesCard({
+  test, locked, onSaved, onError,
+}: {
+  test: TestDetail;
+  locked: boolean;
+  onSaved: (message: string) => Promise<void>;
+  onError: (message: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [rules, setRules] = useState<ExamRules>(() => rulesFromTest(test));
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      await api.patch(`/api/admin/tests/${test.id}`, rulesToBody(rules));
+      setEditing(false);
+      await onSaved('Exam rules updated.');
+    } catch (err) {
+      onError(err instanceof ApiError ? err.message : 'Could not save the exam rules.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="text-sm font-semibold">Exam rules</h2>
+          <p className="text-xs text-ink-muted mt-1">{describeExamRules(rules)}</p>
+        </div>
+        {!editing && (
+          <button type="button" className="btn-secondary btn-sm shrink-0" onClick={() => setEditing(true)}>
+            Change
+          </button>
+        )}
+      </div>
+
+      {editing && (
+        <div className="mt-4 pt-4 border-t border-line space-y-3">
+          <ExamRulesEditor value={rules} onChange={setRules} />
+          {locked && (
+            <p className="text-[11px] text-ink-faint">
+              This paper's questions are locked, but these are not: shuffling and proctoring are read when a student
+              starts, so changing them affects who starts next and never alters a mark already given.
+            </p>
+          )}
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              className="btn-secondary btn-sm"
+              onClick={() => {
+                setRules(rulesFromTest(test));
+                setEditing(false);
+              }}
+            >
+              Cancel
+            </button>
+            <button type="button" className="btn-primary btn-sm" onClick={save} disabled={busy}>
+              {busy ? 'Saving…' : 'Save rules'}
+            </button>
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 function AvailabilityCard({
   test, onSaved, onError,
 }: {

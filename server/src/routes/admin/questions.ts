@@ -4,9 +4,10 @@ import { prisma } from '../../db.js';
 import { audit, requirePermission } from '../../middleware/auth.js';
 import { normalizeContent, normalizeBlocks, blocksToText } from '../../lib/content.js';
 import { validateAnswerKey } from '../../lib/grading.js';
-import { importQuestions, runGeneration, buildUserPrompt } from '../../llm/generate.js';
+import { importQuestions, runGeneration, buildUserPrompt, sweepAbandonedRuns } from '../../llm/generate.js';
 import { IMPORT_TEMPLATE } from '../../llm/import-template.js';
 import { LlmError, PROVIDERS } from '../../llm/providers.js';
+import { capabilitiesOf } from '../../llm/capabilities.js';
 import { generateImage } from '../../llm/images.js';
 import { imagePromptSchema } from '../../llm/schema.js';
 import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_TEMPLATE } from '../../llm/prompts.js';
@@ -42,23 +43,33 @@ const generateSchema = z.object({
 });
 
 /**
- * The three places a question can be.
+ * The three lists in the question bank.
  *
- * There was a fourth, "on a test", which held every approved question already
- * placed on a paper. It has gone: a paper's contents belong on that paper's own
- * page, which shows them in order with their marks, and duplicating the list in
- * the bank meant an approved question could not be found where an admin went
- * looking for it. Each question instead carries the papers it is on, so
- * "already spoken for" is visible without a tab of its own.
+ * "Approved" means approved AND still free. A question placed on a paper leaves
+ * the list, because the list is what an admin builds the next paper from and
+ * anything already spoken for is noise there - fifty approved questions of
+ * which forty are on papers is a list nobody can use.
+ *
+ * Where it goes instead is the paper's own page, which shows the questions in
+ * order with their marks. There was briefly a fourth "On a test" tab holding
+ * them all together, which was the wrong shape: a paper's contents belong to
+ * that paper, not to a pile spanning every paper in the school.
+ *
+ * Being on a paper is derived from the links rather than stored as a fourth
+ * status, so it needs nothing kept in step: take a question off a test, or
+ * delete the test, and it returns to Approved by itself. Links to deleted tests
+ * do not count - the paper is gone, the question is free.
  */
 type QuestionBucket = 'DRAFT' | 'APPROVED' | 'REJECTED';
+
+const ON_NO_LIVE_TEST = { none: { test: { deletedAt: null } } };
 
 function bucketWhere(bucket?: QuestionBucket) {
   switch (bucket) {
     case 'DRAFT':
       return { status: 'DRAFT' as const };
     case 'APPROVED':
-      return { status: 'APPROVED' as const };
+      return { status: 'APPROVED' as const, testQuestions: ON_NO_LIVE_TEST };
     case 'REJECTED':
       return { status: 'REJECTED' as const };
     default:
@@ -160,12 +171,12 @@ async function mayTouch(
 export default async function adminQuestionRoutes(app: FastifyInstance) {
   /** Everything the "Set test" screen needs to render its form. */
   app.get('/api/admin/generation/context', async () => {
-    const [tags, credentials, templates, curriculum] = await Promise.all([
+    const [tags, allCredentials, templates, curriculum] = await Promise.all([
       prisma.tag.findMany({ where: { isActive: true }, orderBy: [{ axis: 'asc' }, { sortOrder: 'asc' }] }),
       prisma.apiCredential.findMany({
         where: { isActive: true },
         orderBy: { createdAt: 'asc' },
-        select: { id: true, provider: true, label: true, baseUrl: true, keyHint: true, defaultModel: true },
+        select: { id: true, provider: true, label: true, baseUrl: true, keyHint: true, defaultModel: true, meta: true },
       }),
       prisma.promptTemplate.findMany({
         // The Step-up template is excluded: it renders placeholders that only
@@ -181,6 +192,12 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
         select: { id: true, parentId: true, level: true, code: true, label: true, path: true, grade: true },
       }),
     ]);
+
+    // A credential kept only for drawing pictures has no business in the
+    // "which model writes the questions" dropdown; see llm/capabilities.ts.
+    const credentials = allCredentials
+      .filter((c) => capabilitiesOf(c).text)
+      .map(({ meta, ...rest }) => { void meta; return rest; });
 
     return {
       tags: {
@@ -343,9 +360,16 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
     };
   });
 
-  /** Generation history, so a bad batch can be diagnosed after the fact. */
+  /**
+   * Generation history, so a bad batch can be diagnosed after the fact - and so
+   * an admin who closed the tab mid-run can find out what happened.
+   */
   app.get('/api/admin/generation/runs', async (request) => {
     const q = z.object({ page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(1).max(100).default(20) }).parse(request.query);
+
+    // Anything left "running" by a restart is closed off first, so the list
+    // never shows a spinner that will never stop.
+    await sweepAbandonedRuns().catch(() => undefined);
 
     const [total, runs] = await Promise.all([
       prisma.generationRun.count(),

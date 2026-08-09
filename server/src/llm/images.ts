@@ -4,6 +4,7 @@ import path from 'node:path';
 import { env } from '../env.js';
 import { prisma } from '../db.js';
 import { callParamsFor } from './credentials.js';
+import { imageProblem } from './capabilities.js';
 import { LlmError } from './providers.js';
 import type { LlmImagePrompt } from './schema.js';
 
@@ -19,11 +20,14 @@ import type { LlmImagePrompt } from './schema.js';
  * This closes the loop. One button, same screen.
  *
  * Only the OpenAI images shape is spoken, because it is the one several
- * services agree on - OpenAI itself and Azure OpenAI both expose
- * /images/generations with the same body. Bedrock, Vertex and OCI each have
- * their own image API and their own request shape; they are not supported
- * here rather than half-supported, and the admin UI only offers credentials
- * that can actually do this.
+ * services agree on: OpenAI, Azure OpenAI and a number of the OpenAI-compatible
+ * routers all expose /images/generations with the same body. Which credentials
+ * are actually used for it is an administrator's choice per credential - see
+ * llm/capabilities.ts - rather than a fixed list of provider names, because
+ * whether a given account and model can draw is not visible from the provider.
+ *
+ * Bedrock, Vertex and OCI each have their own image API and their own request
+ * shape; they are refused with the reason rather than half-supported.
  */
 
 /** Which credential and model draw pictures. Chosen by an administrator. */
@@ -32,13 +36,6 @@ export const IMAGE_SETTING = 'images.provider';
 export interface ImageConfig {
   credentialId: string;
   model?: string;
-}
-
-/** The providers whose image endpoint we speak. */
-export const IMAGE_CAPABLE_PROVIDERS = ['openai', 'azure'] as const;
-
-export function canGenerateImages(provider: string): boolean {
-  return (IMAGE_CAPABLE_PROVIDERS as readonly string[]).includes(provider);
 }
 
 export async function getImageConfig(): Promise<ImageConfig | null> {
@@ -115,11 +112,8 @@ export async function generateImage(spec: LlmImagePrompt): Promise<GeneratedImag
   if (!credential || !credential.isActive) {
     throw new LlmError('The image provider is unavailable. Check it under Settings > LLM providers.');
   }
-  if (!canGenerateImages(credential.provider)) {
-    throw new LlmError(
-      `${credential.provider} cannot generate images through this system. Choose an OpenAI or Azure OpenAI credential instead.`,
-    );
-  }
+  const problem = imageProblem(credential);
+  if (problem) throw new LlmError(problem);
 
   const call = await callParamsFor(credential);
   const model = config.model || 'gpt-image-1';

@@ -8,7 +8,8 @@ import { PROVIDERS, describeKeyProblem, pingProvider, DEFAULT_AZURE_API_VERSION 
 import { parseServiceAccount, vertexBaseUrl } from '../../llm/google-auth.js';
 import { looksLikeOcid } from '../../llm/oci-signer.js';
 import { getStepUpConfig, setStepUpConfig } from '../../llm/step-up.js';
-import { getImageConfig, setImageConfig, canGenerateImages } from '../../llm/images.js';
+import { getImageConfig, setImageConfig } from '../../llm/images.js';
+import { capabilitiesOf, imageProblem, imageSupportOf } from '../../llm/capabilities.js';
 import { callParamsFor, packIamSecret } from '../../llm/credentials.js';
 import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_TEMPLATE } from '../../llm/prompts.js';
 import { COMMON_TIMEZONES, WINDOW_PRESETS, isValidTimezone, zonedNow, formatMinute } from '../../lib/availability.js';
@@ -212,7 +213,18 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
         defaultModel: true, isActive: true, createdAt: true, updatedAt: true, meta: true,
       },
     });
-    return { credentials, providers: Object.values(PROVIDERS) };
+    return {
+      // Capabilities are derived, not stored twice: the row carries whatever an
+      // administrator ticked, and this resolves it against what the provider
+      // can actually be asked to do. imageSupport tells the UI whether the
+      // Images tick can be offered at all.
+      credentials: credentials.map((c) => ({
+        ...c,
+        capabilities: capabilitiesOf(c),
+        imageSupport: imageSupportOf(c.provider),
+      })),
+      providers: Object.values(PROVIDERS),
+    };
   });
 
   app.post('/api/admin/credentials', async (request, reply) => {
@@ -329,6 +341,12 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
          * whatever the provider refused last (see llm/limits.ts).
          */
         maxOutputTokens: z.number().int().min(256).max(200_000).nullable().optional(),
+        /**
+         * What this credential may be used for. Sent whole, because "text off,
+         * images on" is a meaningful state and a partial update could not
+         * express turning the last one off. See llm/capabilities.ts.
+         */
+        capabilities: z.object({ text: z.boolean(), images: z.boolean() }).optional(),
 
         region: z.string().trim().max(40).optional(),
         awsAuthMode: z.enum(['apiKey', 'sigv4']).optional(),
@@ -374,6 +392,21 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
       // store a null - resolveCeiling reads the key's presence.
       if (body.maxOutputTokens === null) delete meta.maxOutputTokens;
       else meta.maxOutputTokens = body.maxOutputTokens;
+      metaChanged = true;
+    }
+
+    if (body.capabilities) {
+      if (!body.capabilities.text && !body.capabilities.images) {
+        return reply.code(400).send({
+          error: 'A credential has to be used for something. Tick text, images, or both — or delete it.',
+        });
+      }
+      // Refused rather than stored and ignored: the tick would sit there
+      // looking enabled while the button it controls kept failing.
+      if (body.capabilities.images && imageSupportOf(existing.provider) === 'no') {
+        return reply.code(400).send({ error: imageProblem(existing)! });
+      }
+      meta.capabilities = body.capabilities;
       metaChanged = true;
     }
 
@@ -563,9 +596,10 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
     const all = await prisma.apiCredential.findMany({
       where: { isActive: true },
       orderBy: { createdAt: 'asc' },
-      select: { id: true, label: true, provider: true },
+      // meta is needed to read the capability ticks, and holds nothing secret.
+      select: { id: true, label: true, provider: true, meta: true },
     });
-    return { config, credentials: all.filter((c) => canGenerateImages(c.provider)) };
+    return { config, credentials: all.filter((c) => capabilitiesOf(c).images) };
   });
 
   app.put('/api/admin/image-provider', async (request, reply) => {
@@ -583,11 +617,8 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
     if (!credential || !credential.isActive) {
       return reply.code(400).send({ error: 'That credential does not exist or is disabled.' });
     }
-    if (!canGenerateImages(credential.provider)) {
-      return reply.code(400).send({
-        error: `${credential.label} is a ${credential.provider} credential, which cannot generate images here. Use OpenAI or Azure OpenAI.`,
-      });
-    }
+    const problem = imageProblem(credential);
+    if (problem) return reply.code(400).send({ error: problem });
 
     const model = body.model?.trim() || 'gpt-image-1';
     await setImageConfig({ credentialId: credential.id, model });

@@ -157,9 +157,16 @@ export default async function adminTestRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: 'A practice test must be assigned to one student.' });
     }
 
+    // proctoring is three settings inside meta, not a column, so it has to come
+    // out of the spread. Left in, Prisma rejects the whole create with "Unknown
+    // argument `proctoring`" - which meant a test could never be created as
+    // proctored at all, only created and then patched.
+    const { proctoring, ...fields } = body;
+
     const test = await prisma.test.create({
       data: {
-        ...body,
+        ...fields,
+        ...(proctoring ? { meta: { proctoring } as unknown as Prisma.InputJsonValue } : {}),
         description: body.description ?? null,
         grade: body.grade ?? null,
         targetUserId: body.targetUserId ?? null,
