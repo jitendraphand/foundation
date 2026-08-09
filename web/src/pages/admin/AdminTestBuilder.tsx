@@ -447,9 +447,12 @@ function TestResults({ testId }: { testId: string }) {
 
   if (data.attempts.length === 0) {
     return (
-      <Card>
-        <EmptyState title="No attempts yet" hint="Results will appear here as students submit." />
-      </Card>
+      <div className="space-y-4">
+        <Card>
+          <EmptyState title="No attempts yet" hint="Results will appear here as students submit." />
+        </Card>
+        <StillToSit testId={testId} />
+      </div>
     );
   }
 
@@ -537,8 +540,111 @@ function TestResults({ testId }: { testId: string }) {
           </table>
         </div>
       </Card>
+
+      <StillToSit testId={testId} />
     </div>
   );
+}
+
+/**
+ * Who has not sat this paper.
+ *
+ * The table above is built from attempts, so it can only ever list the children
+ * who turned up - and "who is missing" is the question a teacher has the
+ * morning after, not "who came". Same data as Reports, scoped to this one
+ * paper, put where somebody looking at the paper will find it.
+ */
+function StillToSit({ testId }: { testId: string }) {
+  const [rows, setRows] = useState<MissingRow[] | null>(null);
+  const [totals, setTotals] = useState<{ audience: number; missing: number } | null>(null);
+
+  useEffect(() => {
+    api
+      .get<{ students: MissingRow[]; totals: { audience: number; missing: number; partial: number; complete: number } }>(
+        `/api/admin/analytics/participation?testIds=${testId}&missingOnly=true`,
+      )
+      .then((res) => {
+        setRows(res.students);
+        setTotals({ audience: res.totals.audience, missing: res.totals.missing + res.totals.partial });
+      })
+      // A roster that cannot be built is not worth an error banner over the
+      // results a teacher came here for.
+      .catch(() => setRows([]));
+  }, [testId]);
+
+  if (!rows) return null;
+
+  if (rows.length === 0) {
+    return (
+      <Card title="Still to sit it">
+        <p className="text-sm text-ink-muted">
+          Everybody this paper was set for has sat it{totals ? ` — all ${totals.audience}` : ''}.
+        </p>
+      </Card>
+    );
+  }
+
+  return (
+    <Card
+      title={
+        <div>
+          <h2 className="text-sm font-semibold">Still to sit it</h2>
+          <p className="text-[11px] text-ink-faint">
+            {rows.length} of {totals?.audience ?? rows.length} students this paper was set for
+          </p>
+        </div>
+      }
+      action={
+        <a className="btn-secondary btn-sm" href={`/api/admin/analytics/participation.csv?testIds=${testId}`}>
+          Download
+        </a>
+      }
+      padded={false}
+    >
+      <div className="scroll-x">
+        <table className="table-base">
+          <thead>
+            <tr>
+              <th>Student</th>
+              <th>Class</th>
+              <th>Where they got to</th>
+              <th>Last sign-in</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row) => (
+              <tr key={row.student.id}>
+                <td>
+                  <Link to={`/admin/students/${row.student.id}`} className="font-medium hover:text-series-1">
+                    {row.student.name}
+                  </Link>
+                  <span className="ml-1 text-[11px] text-ink-faint">#{row.student.rollNo}</span>
+                </td>
+                <td className="text-ink-muted whitespace-nowrap">{row.student.grade}-{row.student.division}</td>
+                <td>
+                  {row.cells[0]?.state === 'in_progress'
+                    ? <Badge tone="warn">writing it now</Badge>
+                    : row.cells[0]?.state === 'abandoned'
+                      ? <Badge tone="warn">started, then left it</Badge>
+                      : <Badge tone="bad">not started</Badge>}
+                </td>
+                <td className="text-xs text-ink-muted whitespace-nowrap">{formatDate(row.student.lastLoginAt, true)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
+interface MissingRow {
+  student: {
+    id: string; publicId: string; username: string; name: string;
+    grade: string; division: string; rollNo: string; lastLoginAt: string | null;
+  };
+  missing: number;
+  cells: Array<{ testId: string; state: string }>;
 }
 
 // --- Daily availability ----------------------------------------------------

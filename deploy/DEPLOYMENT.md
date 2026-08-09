@@ -966,6 +966,61 @@ Their teacher keeps every axis — under **Students → Performance** and on eac
 student's own page — because a teacher has the whole cohort behind each row and
 can see how many questions it rests on.
 
+### Reports: who is missing, and who is weak at what
+
+Every other screen here is built from attempts, so every other screen can only
+describe the children who turned up and answered. **Reports** holds the two
+questions that needs turning inside out.
+
+**Who has not sat a test.** Pick a window (last week, month, term, year), narrow
+by grade, division or part of a paper's title, then tick the papers you mean.
+You get a grid: one row per student, one column per paper, and the mark where
+they sat it.
+
+- The audience comes from the paper's own **targetGrades** and
+  **targetDivisions**, so nobody is chased for a paper that was never set for
+  them — a dash means "not theirs", which is a different thing from *not sat*.
+  A child in a second division as a membership is included in that division's
+  audience.
+- Deactivated accounts are left out. A child who has left has not missed
+  Friday's test.
+- *Writing it now* and *started, then left it* are shown as themselves rather
+  than lumped in with *not sat*, because they need different conversations.
+- A resit that was submitted beats an abandoned first go, so nobody appears as
+  missing a paper they actually sat.
+- Draft papers never appear: a paper no student could open is not one anybody
+  missed.
+- **Download the list** gives you the CSV of exactly what is on screen,
+  including the *only those still owing work* tick, with the papers named rather
+  than their ids.
+
+Only the newest dozen papers fit in a readable grid, so **Paper title contains**
+is how you reach one particular older paper rather than the most recent few.
+
+The same list, for one paper, is at the bottom of that paper's **Results** tab —
+which is where you will actually be looking the morning after.
+
+**Who is weak at one thing.** The student table shows each child's own worst
+areas, which answers *how is this child doing*. This answers the other one:
+*who in this class needs another lesson on fractions*.
+
+Choose an axis — skill, what the question made them do, difficulty, topic or
+subtopic — and the whole-school table appears with the worst first: the accuracy
+across everybody, and how many students are below the line. Press **Who?** on a
+row for the names.
+
+Two settings decide what "weak" means, and both are yours to set:
+
+- **Weak means below** — the accuracy threshold, 40% to 80%.
+- **Over at least** — how many questions on that tag a child must actually have
+  answered before the number means anything. Below it they are still listed, but
+  greyed out and marked *too few to judge*, rather than quietly dropped: a list
+  that hides them makes a child with three answered questions look fine.
+
+Each row shows which papers the figure came from, so a surprising number can be
+traced back to the paper that produced it. **Download the list** gives the same
+CSV treatment.
+
 ### Backups
 
 From the UI: **Admin → Backups → Generate backup**, then download the archive

@@ -79,7 +79,7 @@ function questionsVisibleTo(request: Actor) {
  * Applied to every route that takes an id, not only the listing: an id copied
  * from a colleague's URL would otherwise open their paper, answer keys and all.
  */
-function testsVisibleTo(request: Actor) {
+export function testsVisibleTo(request: Actor) {
   return ownedBy(request, 'createdById');
 }
 

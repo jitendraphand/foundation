@@ -11,6 +11,7 @@ import AdminSettings from './AdminSettings';
 import AdminBackups from './AdminBackups';
 import AdminPeople from './AdminPeople';
 import AdminActivities from './AdminActivities';
+import AdminReports from './AdminReports';
 
 /**
  * Nav entries carry the privilege they need. A user only sees what they can
@@ -24,6 +25,7 @@ const NAV: Array<{ to: string; label: string; end?: boolean; needs: string[] }> 
   { to: '/admin/tests', label: 'Tests', needs: ['tests.manage', 'results.release'] },
   { to: '/admin/activities', label: 'Activities', needs: ['activities.manage'] },
   { to: '/admin/students', label: 'Students', needs: ['users.manage', 'analytics.view'] },
+  { to: '/admin/reports', label: 'Reports', needs: ['analytics.view'] },
   { to: '/admin/people', label: 'Administrators', needs: ['admins.manage'] },
   { to: '/admin/backups', label: 'Backups', needs: ['backups.manage'] },
   { to: '/admin/settings', label: 'Settings', needs: ['settings.manage'] },
@@ -90,6 +92,7 @@ export default function AdminShell() {
           <Route path="activities" element={<Guard needs={['activities.manage']} home={home}><AdminActivities /></Guard>} />
           <Route path="students" element={<Guard needs={['users.manage', 'analytics.view']} home={home}><AdminStudents /></Guard>} />
           <Route path="students/:studentId" element={<Guard needs={['users.manage', 'analytics.view']} home={home}><AdminStudentDetail /></Guard>} />
+          <Route path="reports" element={<Guard needs={['analytics.view']} home={home}><AdminReports /></Guard>} />
           <Route path="people" element={<Guard needs={['admins.manage']} home={home}><AdminPeople /></Guard>} />
           <Route path="backups" element={<Guard needs={['backups.manage']} home={home}><AdminBackups /></Guard>} />
           <Route path="settings" element={<Guard needs={['settings.manage']} home={home}><AdminSettings /></Guard>} />

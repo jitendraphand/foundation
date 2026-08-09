@@ -4,6 +4,7 @@ import { prisma } from '../../db.js';
 import { audit } from '../../middleware/auth.js';
 import { normalizeActivityContent, EMPTY_ACTIVITY_CONTENT } from '../../lib/content.js';
 import { parseVideoUrl } from '../../lib/video.js';
+import { audienceWhere } from '../../lib/audience.js';
 
 /**
  * Activities: a flashcard stack and/or a video that a student must go through
@@ -279,17 +280,8 @@ export default async function adminActivityRoutes(app: FastifyInstance) {
     const activity = await prisma.activity.findFirst({ where: { id, deletedAt: null } });
     if (!activity) return reply.code(404).send({ error: 'Activity not found.' });
 
-    const audience = activity.targetUserId
-      ? { id: activity.targetUserId }
-      : {
-          role: 'STUDENT' as const,
-          isActive: true,
-          deletedAt: null,
-          ...(activity.targetGrades.length ? { grade: { in: activity.targetGrades } } : {}),
-          // Membership, so a child in a second division is counted in that
-          // division's audience too.
-          ...(activity.targetDivisions.length ? { divisions: { hasSome: activity.targetDivisions } } : {}),
-        };
+    // The same three rules the test rosters use; see lib/audience.ts.
+    const audience = audienceWhere(activity);
 
     const [students, completions] = await Promise.all([
       prisma.user.findMany({
