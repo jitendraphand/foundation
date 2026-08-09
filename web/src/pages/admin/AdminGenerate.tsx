@@ -376,12 +376,15 @@ export default function AdminGenerate() {
                 <span className="ml-2 text-warn">({mixTotal} allocated, {form.count} requested)</span>
               )}
             </span>
-            <div className="grid grid-cols-3 gap-3">
+            {/* One per row on a phone, three across from sm. Three fixed
+                columns squeezed an 80px label and a number box into 110px,
+                which left the input with no width at all. */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               {ctx.tags.difficulty.map((tag) => (
                 <label key={tag.code} className="flex items-center gap-2">
-                  <span className="text-xs text-ink-muted w-20 shrink-0">{tag.label}</span>
+                  <span className="text-xs text-ink-muted flex-1 sm:flex-none sm:w-20">{tag.label}</span>
                   <input
-                    type="number" min={0} className="input py-1.5"
+                    type="number" min={0} className="input py-1.5 w-24 sm:w-auto"
                     value={difficultyMix[tag.code] ?? 0}
                     onChange={(e) => setDifficultyMix((m) => ({ ...m, [tag.code]: Number(e.target.value) }))}
                   />

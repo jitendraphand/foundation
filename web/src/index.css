@@ -38,6 +38,9 @@
 @layer components {
   .card {
     @apply bg-surface-raised border border-line rounded-xl shadow-card;
+    /* Cards sit in grids and hold charts; see the note on .scroll-x for why
+       min-width matters more than it looks. */
+    min-width: 0;
   }
 
   .btn {
@@ -62,8 +65,20 @@
            border border-line bg-surface-sunken text-ink-muted whitespace-nowrap;
   }
 
-  /* Wide content must scroll inside its own box, never the page body. */
-  .scroll-x { @apply overflow-x-auto -mx-1 px-1; }
+  /*
+   * Wide content scrolls inside its own box, never the page body.
+   *
+   * overflow-x on its own is not enough. A grid or flex child defaults to
+   * min-width:auto, which means it refuses to shrink below its content's
+   * min-content width - so a 640px chart widened the card, the card widened
+   * the grid, and the page grew by 300px on a phone. Worse, the chart measures
+   * its container to decide how wide to draw, so it then measured the widened
+   * container and stayed at 640: a loop that never converged downwards.
+   *
+   * min-width:0 breaks the loop by letting the box shrink, and max-width
+   * stops it exceeding its parent in ordinary flow.
+   */
+  .scroll-x { @apply overflow-x-auto -mx-1 px-1; min-width: 0; max-width: 100%; }
 
   .table-base { @apply w-full text-sm border-collapse; }
   .table-base th {
