@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type { Prisma } from '@prisma/client';
 import { prisma } from '../../db.js';
 import { audit, requirePermission } from '../../middleware/auth.js';
+import { ownedBy, type Actor } from '../../lib/ownership.js';
 
 const testFields = z.object({
   title: z.string().trim().min(1).max(200),
@@ -62,6 +63,26 @@ const WINDOW_ERROR = 'A daily window needs a start time and an end time, and the
 
 const testSchema = testFields.refine(windowIsComplete, { message: WINDOW_ERROR });
 
+/** The same ownership rule the question bank applies; see lib/ownership.ts. */
+function questionsVisibleTo(request: Actor) {
+  return ownedBy(request, 'createdById', true);
+}
+
+/**
+ * And the same rule for the papers themselves.
+ *
+ * A test is one colleague's work in the same way a question is: they chose its
+ * questions, its marking scheme and its audience. Seeing every paper in the
+ * school is the invigilator's job rather than a side effect of being able to
+ * make one, so it takes content.viewAll.
+ *
+ * Applied to every route that takes an id, not only the listing: an id copied
+ * from a colleague's URL would otherwise open their paper, answer keys and all.
+ */
+function testsVisibleTo(request: Actor) {
+  return ownedBy(request, 'createdById');
+}
+
 /**
  * Whether a paper's question list may still be changed, and why not.
  *
@@ -74,18 +95,6 @@ const testSchema = testFields.refine(windowIsComplete, { message: WINDOW_ERROR }
  * Publishing is reversible, so this is a lock rather than a dead end: move the
  * test back to draft, change it, publish again.
  */
-/**
- * The same ownership rule the question bank applies, so the two screens agree
- * on what exists. Kept beside the routes that need it rather than shared
- * through a module, because it is three lines and one import would drag the
- * whole question router in.
- */
-function questionsVisibleTo(request: { user?: { sub: string; permissions: readonly string[] } }) {
-  const user = request.user!;
-  if (user.permissions.includes('admins.manage')) return {};
-  return { OR: [{ createdById: user.sub }, { createdById: null }] };
-}
-
 function compositionLock(test: { status: string; _count: { attempts: number } }): string | null {
   if (test._count.attempts > 0) {
     return 'Students have already attempted this test, so its questions can no longer be changed.';
@@ -113,6 +122,7 @@ export default async function adminTestRoutes(app: FastifyInstance) {
 
     const where = {
       deletedAt: null,
+      ...testsVisibleTo(request),
       ...(q.kind ? { kind: q.kind } : {}),
       ...(q.status ? { status: q.status } : {}),
       ...(q.targetUserId ? { targetUserId: q.targetUserId } : {}),
@@ -139,7 +149,7 @@ export default async function adminTestRoutes(app: FastifyInstance) {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
 
     const test = await prisma.test.findFirst({
-      where: { id, deletedAt: null },
+      where: { id, deletedAt: null, ...testsVisibleTo(request) },
       include: {
         questions: { include: { question: true }, orderBy: { position: 'asc' } },
         targetUser: { select: { id: true, username: true, firstName: true, lastName: true } },
@@ -185,7 +195,7 @@ export default async function adminTestRoutes(app: FastifyInstance) {
     const body = testFields.partial().parse(request.body);
 
     // Merged against the stored row, because a PATCH may set only the mode.
-    const existingForWindow = await prisma.test.findFirst({ where: { id, deletedAt: null } });
+    const existingForWindow = await prisma.test.findFirst({ where: { id, deletedAt: null, ...testsVisibleTo(request) } });
     if (!existingForWindow) return reply.code(404).send({ error: 'Test not found.' });
     if (!windowIsComplete({
       availabilityMode: body.availabilityMode ?? existingForWindow.availabilityMode,
@@ -195,7 +205,7 @@ export default async function adminTestRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: WINDOW_ERROR });
     }
 
-    const existing = await prisma.test.findFirst({ where: { id, deletedAt: null }, include: { _count: { select: { attempts: true } } } });
+    const existing = await prisma.test.findFirst({ where: { id, deletedAt: null, ...testsVisibleTo(request) }, include: { _count: { select: { attempts: true } } } });
     if (!existing) return reply.code(404).send({ error: 'Test not found.' });
 
     // Changing the marking scheme after students have sat the test would make
@@ -237,7 +247,7 @@ export default async function adminTestRoutes(app: FastifyInstance) {
       })
       .parse(request.body);
 
-    const test = await prisma.test.findFirst({ where: { id, deletedAt: null }, include: { _count: { select: { attempts: true } } } });
+    const test = await prisma.test.findFirst({ where: { id, deletedAt: null, ...testsVisibleTo(request) }, include: { _count: { select: { attempts: true } } } });
     if (!test) return reply.code(404).send({ error: 'Test not found.' });
     const locked = compositionLock(test);
     if (locked) return reply.code(409).send({ error: locked });
@@ -370,7 +380,7 @@ export default async function adminTestRoutes(app: FastifyInstance) {
     const { status } = z.object({ status: z.enum(['DRAFT', 'PUBLISHED', 'CLOSED']) }).parse(request.body);
 
     const test = await prisma.test.findFirst({
-      where: { id, deletedAt: null },
+      where: { id, deletedAt: null, ...testsVisibleTo(request) },
       include: { _count: { select: { questions: true } } },
     });
     if (!test) return reply.code(404).send({ error: 'Test not found.' });
@@ -410,7 +420,7 @@ export default async function adminTestRoutes(app: FastifyInstance) {
     const { released } = z.object({ released: z.boolean() }).parse(request.body);
 
     const test = await prisma.test.findFirst({
-      where: { id, deletedAt: null },
+      where: { id, deletedAt: null, ...testsVisibleTo(request) },
       include: { _count: { select: { attempts: true } } },
     });
     if (!test) return reply.code(404).send({ error: 'Test not found.' });
@@ -455,7 +465,7 @@ export default async function adminTestRoutes(app: FastifyInstance) {
   app.delete('/api/admin/tests/:id', { preHandler: requirePermission('tests.manage') }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
 
-    const test = await prisma.test.findFirst({ where: { id, deletedAt: null }, include: { _count: { select: { attempts: true } } } });
+    const test = await prisma.test.findFirst({ where: { id, deletedAt: null, ...testsVisibleTo(request) }, include: { _count: { select: { attempts: true } } } });
     if (!test) return reply.code(404).send({ error: 'Test not found.' });
 
     if (test._count.attempts > 0) {
@@ -472,7 +482,7 @@ export default async function adminTestRoutes(app: FastifyInstance) {
   app.get('/api/admin/tests/:id/results', async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
 
-    const test = await prisma.test.findFirst({ where: { id, deletedAt: null } });
+    const test = await prisma.test.findFirst({ where: { id, deletedAt: null, ...testsVisibleTo(request) } });
     if (!test) return reply.code(404).send({ error: 'Test not found.' });
 
     const attempts = await prisma.attempt.findMany({

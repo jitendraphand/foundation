@@ -88,7 +88,12 @@ export default function AdminGenerate() {
     avoidImages: false,
   });
 
-  const [difficultyMix, setDifficultyMix] = useState<Record<string, number>>({ easy: 4, moderate: 4, difficult: 2 });
+  // Seeded from the live tag vocabulary once it arrives, never from a hard-coded
+  // list. It used to start { easy: 4, moderate: 4, difficult: 2 } - the codes
+  // from before difficulty was renamed to easy/medium/hard. The two retired keys
+  // had no box to show them in, so they were invisible, but they were still
+  // counted: putting 10 in Hard read "16 allocated, 10 requested".
+  const [difficultyMix, setDifficultyMix] = useState<Record<string, number>>({});
   const [cognitiveMix, setCognitiveMix] = useState<Record<string, number>>({});
   const [skillFocus, setSkillFocus] = useState<string[]>([]);
   const [systemPrompt, setSystemPrompt] = useState('');
@@ -116,7 +121,47 @@ export default function AdminGenerate() {
   const credential = ctx?.credentials.find((c) => c.id === form.credentialId);
   const provider = ctx?.providers.find((p) => p.id === credential?.provider);
 
-  const mixTotal = useMemo(() => Object.values(difficultyMix).reduce((s, n) => s + n, 0), [difficultyMix]);
+  const difficultyCodes = useMemo(() => ctx?.tags.difficulty.map((t) => t.code) ?? [], [ctx]);
+
+  // Only codes that exist. A key left over from a renamed tag cannot inflate
+  // the total again, whatever put it there.
+  const mixTotal = useMemo(
+    () => difficultyCodes.reduce((sum, code) => sum + (difficultyMix[code] ?? 0), 0),
+    [difficultyMix, difficultyCodes],
+  );
+
+  /** Spreads `count` across the difficulty levels, remainder to the easier end. */
+  const spreadMix = useCallback(
+    (count: number, codes: string[]): Record<string, number> => {
+      if (codes.length === 0) return {};
+      const each = Math.floor(count / codes.length);
+      let left = count - each * codes.length;
+      return Object.fromEntries(codes.map((code) => [code, each + (left-- > 0 ? 1 : 0)]));
+    },
+    [],
+  );
+
+  // Seed once the vocabulary is known.
+  useEffect(() => {
+    if (difficultyCodes.length === 0) return;
+    setDifficultyMix((m) => (Object.keys(m).length ? m : spreadMix(form.count, difficultyCodes)));
+    // form.count is deliberately not a dependency: this seeds, it does not follow.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [difficultyCodes, spreadMix]);
+
+  // Follow the requested count while the mix is still whatever we spread. The
+  // moment an admin types a number of their own the totals stop matching and
+  // this leaves them alone - it is their allocation, not ours to overwrite.
+  const lastCount = useRef(form.count);
+  useEffect(() => {
+    const previous = lastCount.current;
+    lastCount.current = form.count;
+    if (previous === form.count || difficultyCodes.length === 0) return;
+    setDifficultyMix((m) => {
+      const total = difficultyCodes.reduce((sum, code) => sum + (m[code] ?? 0), 0);
+      return total === previous ? spreadMix(form.count, difficultyCodes) : m;
+    });
+  }, [form.count, difficultyCodes, spreadMix]);
 
   const spec = () => ({
     subject: form.subject.trim(),
@@ -125,7 +170,9 @@ export default function AdminGenerate() {
     grade: form.grade || undefined,
     count: form.count,
     marksPerQuestion: form.marksPerQuestion,
-    difficultyMix,
+    // Only real codes travel: the server rejects a question tagged with
+    // vocabulary it does not know, so asking for one would be self-defeating.
+    difficultyMix: Object.fromEntries(difficultyCodes.map((c) => [c, difficultyMix[c] ?? 0])),
     cognitiveMix: Object.keys(cognitiveMix).length ? cognitiveMix : undefined,
     skillFocus: skillFocus.length ? skillFocus : undefined,
     formats: form.formats,

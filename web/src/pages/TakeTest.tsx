@@ -446,7 +446,7 @@ function AnswerInput({
               />
               <span className="min-w-0 flex-1">
                 <span className="text-xs font-medium text-ink-faint mr-1.5">{option.id.toUpperCase()}.</span>
-                <BlocksRenderer blocks={option.blocks} className="inline [&>p]:my-0 [&>p]:inline" />
+                <BlocksRenderer blocks={option.blocks} className="inline [&>p]:my-0 [&>p]:inline" dense />
               </span>
             </label>
           ))}
@@ -479,7 +479,7 @@ function AnswerInput({
               />
               <span className="min-w-0 flex-1">
                 <span className="text-xs font-medium text-ink-faint mr-1.5">{option.id.toUpperCase()}.</span>
-                <BlocksRenderer blocks={option.blocks} className="inline [&>p]:my-0 [&>p]:inline" />
+                <BlocksRenderer blocks={option.blocks} className="inline [&>p]:my-0 [&>p]:inline" dense />
               </span>
             </label>
           ))}

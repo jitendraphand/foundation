@@ -259,7 +259,7 @@ function QuestionReview({ question, index, showAnswers }: { question: PaperQuest
                   >
                     <span className="text-xs font-medium text-ink-faint mt-0.5">{option.id.toUpperCase()}.</span>
                     <span className="min-w-0 flex-1">
-                      <BlocksRenderer blocks={option.blocks} className="[&>p]:my-0" />
+                      <BlocksRenderer blocks={option.blocks} className="[&>p]:my-0" dense />
                     </span>
                     {chosen && <span className="text-[11px] text-ink-muted shrink-0">your answer</span>}
                     {correct && !chosen && <span className="text-[11px] text-good shrink-0">correct</span>}

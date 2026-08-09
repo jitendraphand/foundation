@@ -57,8 +57,14 @@ Content is an ordered list of typed blocks. Choose the right block; never put La
 
 2. Mathematics - ALWAYS use this for fractions, roots, powers, integrals, matrices, vectors, chemical equations. NEVER write maths as plain text or ASCII art:
    { "type": "math", "tex": "\\\\frac{3}{4} + \\\\frac{5}{8}", "display": true }
-   Use "display": true for a formula on its own line, false for inline.
+   Use "display": true ONLY for a formula standing alone on its own line. Use false for anything inside a sentence, and false for an ANSWER OPTION - an option is one short thing on a line beside its letter, never a displayed equation.
    Write LaTeX only. Correct: \\\\frac{a}{b}, \\\\sqrt{x}, x^{2}, \\\\int_{0}^{1}, \\\\begin{pmatrix}1&2\\\\\\\\3&4\\\\end{pmatrix}
+   A sentence that mixes words and symbols is SEVERAL blocks, not one text block with symbols typed into it:
+     WRONG:   { "type": "text", "value": "If 5^x = 125 and 5^y = 25, what is x - y?" }
+     RIGHT:   { "type": "text", "value": "If " }, { "type": "math", "tex": "5^{x} = 125", "display": false },
+              { "type": "text", "value": " and " }, { "type": "math", "tex": "5^{y} = 25", "display": false },
+              { "type": "text", "value": ", what is " }, { "type": "math", "tex": "x - y", "display": false }, { "type": "text", "value": "?" }
+   Never type a power as ^ or a subscript as _ inside a "text" block. The renderer joins consecutive blocks into one sentence, so splitting like this does not break the line.
 
 3. Diagrams you draw yourself - inline SVG. Use for geometry, figures, labelled apparatus, shapes, angles:
    { "type": "svg", "svg": "<svg viewBox=\\"0 0 200 120\\" xmlns=\\"http://www.w3.org/2000/svg\\">...</svg>", "caption": "Triangle ABC" }

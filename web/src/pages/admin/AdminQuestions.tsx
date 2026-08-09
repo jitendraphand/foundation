@@ -56,9 +56,9 @@ export default function AdminQuestions() {
   const carryOver = useRef<string[] | null>(null);
   const [counts, setCounts] = useState<Record<Bucket, number> | null>(null);
 
-  // Four exclusive places, not three states: an approved question already on
-  // a paper is spoken for, and showing it under "Approved" made an admin
-  // building a second test think it was still free.
+  // Three lists, and "Approved" means approved and still free: a question on a
+  // paper is spoken for, and leaving it here made an admin building a second
+  // test think it was available.
   const bucket = (params.get('bucket') ?? params.get('status') ?? 'DRAFT') as Bucket;
   const subject = params.get('subject') ?? '';
   const runId = params.get('generationRunId') ?? '';
@@ -434,7 +434,7 @@ function QuestionCard({
                   >
                     <span className="text-xs font-medium text-ink-faint mt-0.5">{option.id.toUpperCase()}.</span>
                     <span className="min-w-0 flex-1">
-                      <BlocksRenderer blocks={option.blocks} className="[&>p]:my-0" />
+                      <BlocksRenderer blocks={option.blocks} className="[&>p]:my-0" dense />
                     </span>
                     {showAnswer && correct && <span className="text-[11px] text-good shrink-0">correct</span>}
                   </li>

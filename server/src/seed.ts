@@ -136,26 +136,37 @@ async function seedPrompts() {
 }
 
 async function seedAdmin() {
-  const existing = await prisma.user.findFirst({ where: { role: 'ADMIN', deletedAt: null } });
-  if (existing) {
-    const missing = ALL_PERMISSIONS.filter((p) => !existing.permissions.includes(p));
+  // Every administrator, not the first one that happens to come back. This used
+  // to be findFirst, which meant that on a school with three administrators the
+  // top-up below landed on whichever row Postgres returned - usually a
+  // colleague without admins.manage - and the actual system administrator was
+  // never given the privileges a new release added.
+  const admins = await prisma.user.findMany({
+    where: { role: 'ADMIN', deletedAt: null },
+    orderBy: { createdAt: 'asc' },
+  });
 
-    if (existing.permissions.length === 0) {
-      // Upgrading from a version that had no per-privilege model, where being
-      // an ADMIN simply meant full access. Preserve exactly that, otherwise
-      // the upgrade would silently lock the only administrator out of
-      // everything - including the screen used to grant privileges back.
-      await prisma.user.update({ where: { id: existing.id }, data: { permissions: ALL_PERMISSIONS } });
-      console.log(`[seed] ${existing.username} predates per-privilege access; granted all ${ALL_PERMISSIONS.length} privileges`);
-    } else if (existing.permissions.includes('admins.manage') && missing.length > 0) {
-      // A later upgrade added privileges that did not exist before. Top up
-      // whoever holds the keys so no area is left unreachable; everyone else
-      // keeps exactly what they were given.
-      await prisma.user.update({ where: { id: existing.id }, data: { permissions: ALL_PERMISSIONS } });
-      console.log(`[seed] granted ${missing.length} new privilege(s) to ${existing.username}: ${missing.join(', ')}`);
-    } else {
-      console.log(`[seed] administrator already exists (${existing.username})`);
+  if (admins.length > 0) {
+    for (const admin of admins) {
+      const missing = ALL_PERMISSIONS.filter((p) => !admin.permissions.includes(p));
+
+      if (admin.permissions.length === 0) {
+        // Upgrading from a version that had no per-privilege model, where being
+        // an ADMIN simply meant full access. Preserve exactly that, otherwise
+        // the upgrade would silently lock an administrator out of everything -
+        // including the screen used to grant privileges back.
+        await prisma.user.update({ where: { id: admin.id }, data: { permissions: ALL_PERMISSIONS } });
+        console.log(`[seed] ${admin.username} predates per-privilege access; granted all ${ALL_PERMISSIONS.length} privileges`);
+      } else if (admin.permissions.includes('admins.manage') && missing.length > 0) {
+        // A later release added privileges that did not exist before. Top up
+        // whoever holds the keys so no area is left unreachable; everyone else
+        // keeps exactly what they were given, which is the point of the
+        // privilege model.
+        await prisma.user.update({ where: { id: admin.id }, data: { permissions: ALL_PERMISSIONS } });
+        console.log(`[seed] granted ${missing.length} new privilege(s) to ${admin.username}: ${missing.join(', ')}`);
+      }
     }
+    console.log(`[seed] ${admins.length} administrator(s) already exist`);
     return;
   }
 

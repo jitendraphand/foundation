@@ -58,7 +58,9 @@ function groupBlocks(blocks: Block[]): Array<{ inline: boolean; blocks: Block[] 
   );
 }
 
-function GroupedBlocks({ blocks, className = '' }: { blocks: Block[]; className?: string }) {
+function GroupedBlocks({
+  blocks, className = '', dense = false,
+}: { blocks: Block[]; className?: string; dense?: boolean }) {
   const groups = useMemo(() => groupBlocks(blocks), [blocks]);
 
   return (
@@ -71,7 +73,7 @@ function GroupedBlocks({ blocks, className = '' }: { blocks: Block[]; className?
             ))}
           </p>
         ) : (
-          <BlockRenderer key={i} block={group.blocks[0]} />
+          <BlockRenderer key={i} block={group.blocks[0]} dense={dense} />
         ),
       )}
     </div>
@@ -109,17 +111,27 @@ export function ContentRenderer({ content, className = '' }: { content?: Content
   return <GroupedBlocks blocks={content.blocks} className={className} />;
 }
 
-export function BlocksRenderer({ blocks, className = '' }: { blocks?: Block[] | null; className?: string }) {
+/**
+ * `dense` is for an answer option: a short thing sitting on one line beside a
+ * letter. Models mark those as display maths - `{"display": true}` on a formula
+ * whose whole content is "1" - and KaTeX then centres it in the middle of the
+ * option box, which is how four answers ended up floating in the middle of four
+ * wide empty rows. An option is never a displayed equation, so say so here
+ * rather than hoping the model stops.
+ */
+export function BlocksRenderer({
+  blocks, className = '', dense = false,
+}: { blocks?: Block[] | null; className?: string; dense?: boolean }) {
   if (!blocks?.length) return null;
-  return <GroupedBlocks blocks={blocks} className={className} />;
+  return <GroupedBlocks blocks={blocks} className={className} dense={dense} />;
 }
 
-export function BlockRenderer({ block }: { block: Block }) {
+export function BlockRenderer({ block, dense = false }: { block: Block; dense?: boolean }) {
   switch (block.type) {
     case 'text':
       return <TextBlock value={block.value} />;
     case 'math':
-      return <MathBlock tex={block.tex} display={block.display} />;
+      return <MathBlock tex={block.tex} display={block.display && !dense} />;
     case 'svg':
       return <SvgBlock svg={block.svg} caption={block.caption} />;
     case 'mermaid':
@@ -172,18 +184,94 @@ function InlineText({ value }: { value: string }) {
   );
 }
 
-function splitInlineMath(text: string): Array<{ type: 'text' | 'math'; value: string }> {
+/**
+ * Every way a model actually delimits maths inside a text block.
+ *
+ * The prompt asks for a `math` block. Models comply most of the time and then,
+ * mid-sentence, write `$x^2$`, or `\(x^2\)`, or - most often of all - plain
+ * `5^x` with no delimiters at all, because that is how it is typed in an
+ * ordinary conversation. A question reading "If 5^x = 125 and 5^y = 25, what is
+ * x - y?" is correct and unreadable, and no amount of prompt wording has stopped
+ * it.
+ *
+ * So the delimiters are all recognised here, and the last case - bare
+ * superscript and subscript notation - is recognised too. Doing it in the
+ * renderer rather than at generation time means every question already in the
+ * bank is fixed as well, with nothing to re-run.
+ *
+ * The bare-notation pattern is deliberately narrow, because the cost of a false
+ * positive is high: a base, a caret or underscore, and one operand, with word
+ * characters forbidden on either side. That last part is what keeps
+ * `report_final` a file name rather than r-e-p-o-r-t subscript f-i-n-a-l, which
+ * is exactly what a looser pattern did.
+ *
+ * Matches: `5^x`, `2^-2`, `10^{-3}`, `(x+1)^2`, `a_1`, `v_max`.
+ * Leaves alone: `report_final`, `snake_case_name`, `x - y`, and every sentence
+ * with no caret or underscore in it at all.
+ */
+const MATH_TOKEN = new RegExp(
+  [
+    '\\$\\$([^$]+?)\\$\\$', // $$...$$
+    '\\$([^$\\n]+?)\\$', //   $...$
+    '\\\\\\(([\\s\\S]+?)\\\\\\)', // \(...\)
+    '\\\\\\[([\\s\\S]+?)\\\\\\]', // \[...\]
+    // Bare a^b / a_b, bounded on both sides so it cannot start or end inside a
+    // word. The base is one letter, a number, or a bracketed group; the operand
+    // may be braced, so 10^{-3} survives whole.
+    '(?<![A-Za-z0-9_])' +
+      '((?:\\([^()\\n]{1,40}\\)|[A-Za-z]|[0-9]+)' +
+      '(?:\\^|_)' +
+      '(?:\\{[^{}\\n]{1,32}\\}|-?[A-Za-z0-9]{1,4}))' +
+      '(?![A-Za-z0-9_])',
+  ].join('|'),
+  'g',
+);
+
+/** A lone multiplication sign between two formulae, which reads as a footnote. */
+const LONE_TIMES = /^(\s*)\*(\s*)$/;
+
+/**
+ * Braces the operand of a bare `a^b` or `a_b`.
+ *
+ * In TeX a caret binds to one token, so `2^-2` means "two to the minus, then a
+ * two" and renders as 2⁻2. Everyone writing it means 2⁻². Braces say so.
+ */
+function braceOperand(token: string): string {
+  return token.replace(/([\^_])(?!\{)(.+)$/, (_all, op: string, operand: string) => `${op}{${operand}}`);
+}
+
+export function splitInlineMath(text: string): Array<{ type: 'text' | 'math'; value: string }> {
   const out: Array<{ type: 'text' | 'math'; value: string }> = [];
-  const re = /\$([^$\n]+)\$/g;
   let last = 0;
   let m: RegExpExecArray | null;
 
-  while ((m = re.exec(text)) !== null) {
+  MATH_TOKEN.lastIndex = 0;
+  while ((m = MATH_TOKEN.exec(text)) !== null) {
+    // Zero-length matches would loop for ever; nothing here can produce one,
+    // but the guard costs a line and a hung exam page costs rather more.
+    if (m[0].length === 0) {
+      MATH_TOKEN.lastIndex++;
+      continue;
+    }
     if (m.index > last) out.push({ type: 'text', value: text.slice(last, m.index) });
-    out.push({ type: 'math', value: m[1] });
+    // Whichever alternative matched. A delimited formula is the author's own
+    // TeX and is passed through untouched; only the bare form is adjusted, and
+    // only to brace its operand.
+    const delimited = m[1] ?? m[2] ?? m[3] ?? m[4];
+    out.push({ type: 'math', value: delimited ?? braceOperand(m[5] ?? '') });
     last = m.index + m[0].length;
   }
   if (last < text.length) out.push({ type: 'text', value: text.slice(last) });
+
+  // "2^4 * 2^-2" comes out as two formulae with a bare asterisk between them,
+  // which reads as a footnote marker. Between two formulae it is multiplication.
+  for (let i = 1; i < out.length - 1; i++) {
+    const between = out[i];
+    if (out[i - 1].type !== 'math' || out[i + 1].type !== 'math') continue;
+    const times = LONE_TIMES.exec(between.value);
+    if (times) between.value = `${times[1]}×${times[2]}`;
+  }
+
   return out.length ? out : [{ type: 'text', value: text }];
 }
 
@@ -200,7 +288,11 @@ function renderKatex(tex: string, displayMode: boolean): { html: string; error: 
         // lock the browser during an exam.
         maxExpand: 200,
         trust: false,
-        output: 'html',
+        // HTML for sighted readers plus MathML for everyone else. KaTeX's own
+        // default, and the reason for it is that the HTML alone is a pile of
+        // positioned spans that a screen reader turns into gibberish - which
+        // for a maths paper means the question cannot be answered at all.
+        output: 'htmlAndMathml',
       }),
       error: null,
     };

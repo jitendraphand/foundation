@@ -8,6 +8,7 @@ import { importQuestions, runGeneration, buildUserPrompt, sweepAbandonedRuns } f
 import { IMPORT_TEMPLATE } from '../../llm/import-template.js';
 import { LlmError, PROVIDERS } from '../../llm/providers.js';
 import { capabilitiesOf } from '../../llm/capabilities.js';
+import { ownedBy, seesEverything, type Actor } from '../../lib/ownership.js';
 import { generateImage } from '../../llm/images.js';
 import { imagePromptSchema } from '../../llm/schema.js';
 import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_TEMPLATE } from '../../llm/prompts.js';
@@ -135,35 +136,17 @@ async function liveTestLock(id: string): Promise<string | null> {
 }
 
 /**
- * Which questions a given administrator may see.
- *
- * A school runs several people who set papers, and one colleague's half-baked
- * drafts appearing in another's review queue is noise at best and confusing at
- * worst - two people can approve the same question for two different papers
- * without ever knowing.
- *
- * So a question belongs to whoever put it in the bank. The exception is
- * admins.manage, the keys-to-the-kingdom privilege that already grants
- * authority over every other administrator: that holder sees everything,
- * because somebody has to be able to audit and clean up.
- *
- * Questions with no author - imported before authorship was recorded - are
- * visible to everybody. Hiding them would strand real work behind a column
- * that was NULL for historical reasons rather than for any decision anyone
- * made.
+ * Which questions this administrator may see; see lib/ownership.ts. The third
+ * argument says questions with no author are everybody's - only this table has
+ * any, from before authorship was recorded.
  */
-function visibleToUser(request: { user?: { sub: string; permissions: readonly string[] } }) {
-  const user = request.user!;
-  if (user.permissions.includes('admins.manage')) return {};
-  return { OR: [{ createdById: user.sub }, { createdById: null }] };
+function visibleToUser(request: Actor) {
+  return ownedBy(request, 'createdById', true);
 }
 
 /** Whether this administrator may act on one particular question. */
-async function mayTouch(
-  request: { user?: { sub: string; permissions: readonly string[] } },
-  questionId: string,
-): Promise<boolean> {
-  if (request.user!.permissions.includes('admins.manage')) return true;
+async function mayTouch(request: Actor, questionId: string): Promise<boolean> {
+  if (seesEverything(request)) return true;
   const q = await prisma.question.findUnique({ where: { id: questionId }, select: { createdById: true } });
   return !q || q.createdById === null || q.createdById === request.user!.sub;
 }
@@ -371,9 +354,12 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
     // never shows a spinner that will never stop.
     await sweepAbandonedRuns().catch(() => undefined);
 
+    const mine = ownedBy(request, 'requestedById');
+
     const [total, runs] = await Promise.all([
-      prisma.generationRun.count(),
+      prisma.generationRun.count({ where: mine }),
       prisma.generationRun.findMany({
+        where: mine,
         orderBy: { createdAt: 'desc' },
         skip: (q.page - 1) * q.pageSize,
         take: q.pageSize,
@@ -392,8 +378,10 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
 
   app.get('/api/admin/generation/runs/:id', async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
-    const run = await prisma.generationRun.findUnique({
-      where: { id },
+    const run = await prisma.generationRun.findFirst({
+      // Scoped, not just listed-scoped: an id copied from elsewhere must not
+      // open somebody else's run, prompt and raw model reply included.
+      where: { id, ...ownedBy(request, 'requestedById') },
       include: { questions: { orderBy: { createdAt: 'asc' } }, requestedBy: { select: { username: true } } },
     });
     if (!run) return reply.code(404).send({ error: 'Generation run not found.' });

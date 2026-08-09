@@ -709,6 +709,20 @@ they must change it at first sign-in.
 Grant **Manage administrators** sparingly — a holder can change anybody's
 privileges, including yours. The system will not let you remove the last one.
 
+**Everyone's work is their own.** A colleague sees the questions they wrote, the
+papers they built and their own generation history — not anybody else's. Two
+people preparing different papers stay out of each other's way, and neither can
+open the other's test by pasting its address. Two privileges lift that:
+
+- **See colleagues' work** — for an invigilator or head of department whose job
+  spans papers they did not set. It is in the *Invigilator* preset and not in
+  the *Teacher* one.
+- **Manage administrators**, which already implies authority over everybody.
+
+Upgrading adds this privilege without granting it to anyone except the system
+administrator, so an existing colleague who was relying on seeing everything
+will find their lists shorter until you tick the box for them.
+
 ### Grades and divisions
 
 **Admin → Settings → Grades & divisions.** Type a name and press **Add** — the
@@ -784,6 +798,27 @@ what you want after correcting a card half the class has read.
 
 To take an activity down, **Unpublish** it (returns it to draft) or **Archive**
 it, which keeps the record of who completed it.
+
+### Maths in a question
+
+Formulae are LaTeX, rendered by KaTeX. The generator is asked to put every
+formula in its own block, and mostly does — but models also type maths straight
+into a sentence, the way anyone would in a chat window, and a question reading
+"If 5^x = 125 and 5^y = 25, what is x - y?" is correct and unreadable.
+
+Rather than hope the wording stops it, the renderer reads it. Inside ordinary
+question text it recognises `$…$`, `\(…\)`, `$$…$$`, `\[…\]`, and plain
+superscript and subscript notation — `5^x`, `2^-2`, `10^{-3}`, `(x+1)^2`, `a_1`
+— and renders each as maths. An asterisk between two formulae becomes a proper
+multiplication sign. This applies to questions already in the bank, so nothing
+needs regenerating.
+
+The pattern is deliberately narrow: it needs a caret or an underscore with a
+short operand on each side and no word characters around it, so `report_final`
+stays a file name and a sentence with no symbols in it is never touched.
+
+Answer options are never rendered as centred display equations, whatever the
+model marks them as — an option is one short thing on a line beside its letter.
 
 ### Putting approved questions on a test
 

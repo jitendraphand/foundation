@@ -44,6 +44,15 @@ export const PERMISSIONS = [
     description: 'Edit, approve and reject draft questions, and attach images to questions that need one.',
   },
   {
+    code: 'content.viewAll',
+    label: "See colleagues' work",
+    group: 'Questions',
+    description:
+      'See every question, test and generation run in the school, not only your own. Without this, two colleagues ' +
+      'preparing different papers stay out of each other\'s way. An invigilator or head of department needs it; ' +
+      'a teacher setting their own papers does not.',
+  },
+  {
     code: 'tests.manage',
     label: 'Manage tests',
     group: 'Tests',
@@ -137,7 +146,9 @@ export const PRESETS: Array<{ code: string; label: string; description: string; 
     code: 'invigilator',
     label: 'Invigilator',
     description: 'Watch tests in progress and release results. Cannot change questions.',
-    permissions: ['tests.manage', 'results.release', 'analytics.view'],
+    // Includes content.viewAll: supervising papers they did not set is the
+    // entire job, and without it this role would open to an empty list.
+    permissions: ['tests.manage', 'results.release', 'analytics.view', 'content.viewAll'],
   },
   {
     code: 'office',
