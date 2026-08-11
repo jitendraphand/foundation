@@ -15,5 +15,5 @@
  * Commit and push this file; GitHub Pages redeploys within about a minute.
  */
 window.FOUNDATION_CONFIG = {
-  SERVER_URL: 'https://REPLACE_ME.sslip.io',
+  SERVER_URL: 'https://80-255-199-192.sslip.io',
 };
