@@ -49,6 +49,32 @@ const schema = z.object({
   BACKUP_DIR: z.string().default('/app/backups'),
 
   /**
+   * How many API worker processes to run.
+   *
+   * Node runs JavaScript on one thread, so one process uses one core however
+   * large the machine is. Measured with 200 students on the dashboard at once:
+   * the process sat at 100% of a single core while the database was idle and
+   * the other cores did nothing, and every reply took about a second. The
+   * hardware was not the limit; the fact that only one core was being asked
+   * was.
+   *
+   * 0 means "one per core, capped at 8" - more workers than that buys little
+   * for this workload and costs a database connection each. 1 disables
+   * clustering entirely, which is what development does.
+   */
+  WEB_CONCURRENCY: z.coerce.number().int().min(0).max(64).default(0),
+
+  /**
+   * Database connections across *all* workers, not per worker.
+   *
+   * Stated as a total because that is the number Postgres cares about:
+   * max_connections is a property of the server, and getting this wrong is how
+   * a deployment starts refusing connections under exam load. Each worker is
+   * given an equal share, and at least two.
+   */
+  DB_POOL_SIZE: z.coerce.number().int().min(2).max(500).default(20),
+
+  /**
    * Marks the session cookie Secure, so the browser only ever sends it over
    * HTTPS. Defaults to on in production and must stay on for a real
    * deployment.

@@ -77,4 +77,4 @@ RUN chmod +x docker-entrypoint.sh \
 USER node
 EXPOSE 4000
 ENTRYPOINT ["/usr/bin/tini", "--", "./docker-entrypoint.sh"]
-CMD ["node", "dist/index.js"]
+CMD ["node", "dist/cluster.js"]

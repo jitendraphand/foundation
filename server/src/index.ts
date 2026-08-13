@@ -43,6 +43,30 @@ const prettyTransport = (() => {
   }
 })();
 
+/**
+ * Rate limits under clustering.
+ *
+ * The limits below are counted in this process's memory, so with N workers each
+ * one enforces the configured number independently. They are deliberately left
+ * that way rather than divided by the worker count.
+ *
+ * The reason is that a browser keeps its connection open, so one client's
+ * requests overwhelmingly land on one worker. Dividing would therefore punish
+ * the case these limits exist for - a single runaway tab, still correctly
+ * stopped at its ceiling - while barely inconveniencing someone opening
+ * connections deliberately, who spreads across workers either way.
+ *
+ * That is an acceptable trade because none of these is a security boundary,
+ * and the things that are boundaries do not live in memory: brute force is
+ * stopped by the per-account lockout in the database, sessions are revoked in
+ * the database, and every privilege is checked against it. See the note on
+ * EXAM_LIMIT in routes/student.ts.
+ */
+const workerCount = Math.max(1, Number(process.env.FOUNDATION_WORKERS ?? 1));
+
+/** Exactly one worker runs the scheduled jobs; the primary decides which. */
+const runsJobs = (process.env.FOUNDATION_RUNS_JOBS ?? 'true') === 'true';
+
 const app = Fastify({
   logger: {
     level: isProd ? 'info' : 'debug',
@@ -132,16 +156,22 @@ await adminArea('activities.manage', adminActivityRoutes);
 await fs.mkdir(env.UPLOAD_DIR, { recursive: true }).catch(() => undefined);
 await fs.mkdir(env.BACKUP_DIR, { recursive: true }).catch(() => undefined);
 
-// Close attempts whose timer expired while the student's browser was shut.
-const sweepTimer = setInterval(() => {
-  sweepExpiredAttempts().catch((err) => app.log.error({ err }, 'attempt sweep failed'));
-}, 60_000);
+// The scheduled work, owned by one worker. Every worker running these would
+// mean four sweeps a minute against the same rows and four nightly prunes -
+// harmless in outcome, wasteful under load, and confusing in the logs.
+const sweepTimer = runsJobs
+  ? setInterval(() => {
+      sweepExpiredAttempts().catch((err) => app.log.error({ err }, 'attempt sweep failed'));
+    }, 60_000)
+  : undefined;
 
 // Nightly prune of old local archives. Downloaded copies are unaffected.
-const pruneTimer = setInterval(() => {
-  pruneBackups().catch((err) => app.log.error({ err }, 'backup prune failed'));
-  pruneSessions().catch((err) => app.log.error({ err }, 'session prune failed'));
-}, 24 * 60 * 60_000);
+const pruneTimer = runsJobs
+  ? setInterval(() => {
+      pruneBackups().catch((err) => app.log.error({ err }, 'backup prune failed'));
+      pruneSessions().catch((err) => app.log.error({ err }, 'session prune failed'));
+    }, 24 * 60 * 60_000)
+  : undefined;
 
 const shutdown = async (signal: string) => {
   app.log.info(`${signal} received, shutting down`);
@@ -157,7 +187,10 @@ process.on('SIGINT', () => void shutdown('SIGINT'));
 
 try {
   await app.listen({ port: env.PORT, host: '0.0.0.0' });
-  app.log.info(`API listening on :${env.PORT}`);
+  app.log.info(
+    `API listening on :${env.PORT}` +
+    (workerCount > 1 ? ` (worker ${process.pid}, 1 of ${workerCount}${runsJobs ? ', runs scheduled jobs' : ''})` : ''),
+  );
 } catch (err) {
   app.log.error(err);
   process.exit(1);

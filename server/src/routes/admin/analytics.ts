@@ -1,12 +1,44 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
+import { Readable } from 'node:stream';
 import { z } from 'zod';
 import { prisma } from '../../db.js';
-import { ALL_AXES, findWeakAreas, type Breakdown, type Cell, type WeakArea } from '../../lib/analytics.js';
+import { ALL_AXES, findWeakAreas, type Breakdown, type WeakArea } from '../../lib/analytics.js';
 import { describeAudience, inAudience } from '../../lib/audience.js';
 import { testsVisibleTo } from './tests.js';
 import { csvCell } from '../../lib/csv.js';
+import {
+  AXIS_FIELD,
+  byClass,
+  bySubject,
+  hardestQuestions,
+  headline,
+  paperTallies,
+  studentRows,
+  studentTagTallies,
+  studentsOnTag,
+  tagSummaries,
+  tagTallies,
+  trendByDay,
+  type AttemptFilter,
+} from '../../lib/aggregate.js';
 
 const today = () => new Date().toISOString().slice(0, 10);
+
+/** One thing worth a teacher's attention, in words rather than in axes. */
+interface Finding {
+  id: string;
+  severity: 'high' | 'medium' | 'low';
+  /** The whole point, in one sentence, with the number in it. */
+  headline: string;
+  /** The evidence, and what it usually means. */
+  detail: string;
+  action: { label: string; to: string };
+}
+
+const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
+
+/** "fraction_operations" reads as "fraction operations" in a sentence. */
+const humanTag = (key: string) => key.replace(/_/g, ' ');
 
 interface WeakStudent {
   student: { id: string; publicId: string; username: string; name: string; grade: string; division: string; rollNo: string };
@@ -17,37 +49,18 @@ interface WeakStudent {
   papers: Array<{ testId: string; title: string; correct: number; total: number }>;
 }
 
-/** Which field of a breakdown each axis reads. */
-const AXIS_FIELD: Record<WeakArea['axis'], keyof Breakdown> = {
-  difficulty: 'byDifficulty',
-  cognitive: 'byCognitive',
-  skill: 'bySkill',
-  topic: 'byTopic',
-  subtopic: 'bySubtopic',
-};
-
 /**
  * Everything the admin's charts and tables are built from.
  *
  * REGULAR and PRACTICE data are kept apart at every level: the `kind` filter
  * defaults to REGULAR so practice attempts never quietly inflate class
  * performance figures.
+ *
+ * The counting itself lives in lib/aggregate.ts and happens in the database.
+ * See the note there for why: folding every attempt's breakdown in JavaScript
+ * cost seconds of blocked event loop, and the API is one process, so those
+ * seconds were taken from the students sitting a paper at the time.
  */
-
-function mergeCells(target: Record<string, Cell>, source: Record<string, Cell> | undefined) {
-  if (!source) return;
-  for (const [key, cell] of Object.entries(source)) {
-    const t = (target[key] ??= { correct: 0, total: 0, answered: 0, marks: 0, maxMarks: 0, accuracy: 0, avgTimeMs: 0 });
-    t.correct += cell.correct;
-    t.total += cell.total;
-    t.answered += cell.answered;
-    t.marks += cell.marks;
-    t.maxMarks += cell.maxMarks;
-  }
-  for (const cell of Object.values(target)) {
-    cell.accuracy = cell.total > 0 ? Math.round((cell.correct / cell.total) * 100) / 100 : 0;
-  }
-}
 
 export default async function adminAnalyticsRoutes(app: FastifyInstance) {
   /** Headline numbers for the admin landing page. */
@@ -56,98 +69,37 @@ export default async function adminAnalyticsRoutes(app: FastifyInstance) {
       .object({
         kind: z.enum(['REGULAR', 'PRACTICE', 'ALL']).default('REGULAR'),
         days: z.coerce.number().int().min(1).max(3650).default(90),
+        grade: z.string().max(20).optional(),
+        division: z.string().max(20).optional(),
       })
       .parse(request.query);
 
-    const since = new Date(Date.now() - q.days * 86_400_000);
+    const filter: AttemptFilter = {
+      kind: q.kind,
+      since: new Date(Date.now() - q.days * 86_400_000),
+      grade: q.grade,
+      division: q.division,
+    };
     const kindFilter = q.kind === 'ALL' ? {} : { kind: q.kind };
 
-    const [totalStudents, activeStudents, totalTests, publishedTests, questionCounts, attempts] = await Promise.all([
+    const [
+      totalStudents, activeStudents, totalTests, publishedTests, questionCounts,
+      stats, trend, classPerformance, subjectPerformance, tagMastery, hardest,
+    ] = await Promise.all([
       prisma.user.count({ where: { role: 'STUDENT', deletedAt: null } }),
       prisma.user.count({ where: { role: 'STUDENT', deletedAt: null, isActive: true } }),
       prisma.test.count({ where: { deletedAt: null, ...kindFilter } }),
       prisma.test.count({ where: { deletedAt: null, status: 'PUBLISHED', ...kindFilter } }),
       prisma.question.groupBy({ by: ['status'], where: { deletedAt: null }, _count: { _all: true } }),
-      prisma.attempt.findMany({
-        where: {
-          status: { in: ['SUBMITTED', 'AUTO_SUBMITTED'] },
-          submittedAt: { gte: since },
-          test: { ...kindFilter, deletedAt: null },
-        },
-        select: {
-          percentage: true, submittedAt: true, breakdown: true,
-          user: { select: { grade: true, division: true } },
-          test: { select: { subject: true, kind: true } },
-        },
-      }),
+      headline(filter),
+      trendByDay(filter),
+      byClass(filter),
+      bySubject(filter),
+      tagTallies(filter),
+      hardestQuestions(filter, 8),
     ]);
 
-    const pcts = attempts.map((a) => a.percentage);
-    const average = pcts.length ? Math.round((pcts.reduce((s, p) => s + p, 0) / pcts.length) * 10) / 10 : 0;
-
-    // Score distribution in ten-point bands, for the histogram.
-    const distribution = Array.from({ length: 10 }, (_, i) => ({
-      band: `${i * 10}-${i * 10 + 9}`,
-      from: i * 10,
-      count: 0,
-    }));
-    for (const p of pcts) {
-      const idx = Math.min(9, Math.max(0, Math.floor(p / 10)));
-      distribution[idx].count++;
-    }
-
-    // Attempts per day, for the trend line.
-    const byDay = new Map<string, { date: string; attempts: number; totalPct: number }>();
-    for (const a of attempts) {
-      if (!a.submittedAt) continue;
-      const key = a.submittedAt.toISOString().slice(0, 10);
-      const row = byDay.get(key) ?? { date: key, attempts: 0, totalPct: 0 };
-      row.attempts++;
-      row.totalPct += a.percentage;
-      byDay.set(key, row);
-    }
-    const trend = [...byDay.values()]
-      .sort((a, b) => a.date.localeCompare(b.date))
-      .map((r) => ({ date: r.date, attempts: r.attempts, avgPercentage: Math.round((r.totalPct / r.attempts) * 10) / 10 }));
-
-    // Class-by-class comparison.
-    const byClass = new Map<string, { grade: string; division: string; attempts: number; totalPct: number }>();
-    for (const a of attempts) {
-      const key = `${a.user.grade}-${a.user.division}`;
-      const row = byClass.get(key) ?? { grade: a.user.grade, division: a.user.division, attempts: 0, totalPct: 0 };
-      row.attempts++;
-      row.totalPct += a.percentage;
-      byClass.set(key, row);
-    }
-    const classPerformance = [...byClass.values()]
-      .map((r) => ({ ...r, avgPercentage: Math.round((r.totalPct / r.attempts) * 10) / 10 }))
-      .sort((a, b) => b.avgPercentage - a.avgPercentage);
-
-    // Subject-by-subject comparison.
-    const bySubject = new Map<string, { subject: string; attempts: number; totalPct: number }>();
-    for (const a of attempts) {
-      const row = bySubject.get(a.test.subject) ?? { subject: a.test.subject, attempts: 0, totalPct: 0 };
-      row.attempts++;
-      row.totalPct += a.percentage;
-      bySubject.set(a.test.subject, row);
-    }
-    const subjectPerformance = [...bySubject.values()]
-      .map((r) => ({ ...r, avgPercentage: Math.round((r.totalPct / r.attempts) * 10) / 10 }))
-      .sort((a, b) => b.avgPercentage - a.avgPercentage);
-
-    // Cohort-wide tag mastery: which axes is the whole school weak on.
-    const merged: Breakdown = { byDifficulty: {}, byCognitive: {}, bySkill: {}, byTopic: {}, bySubtopic: {} };
-    for (const a of attempts) {
-      const b = a.breakdown as unknown as Breakdown | null;
-      if (!b) continue;
-      mergeCells(merged.byDifficulty, b.byDifficulty);
-      mergeCells(merged.byCognitive, b.byCognitive);
-      mergeCells(merged.bySkill, b.bySkill);
-      mergeCells(merged.byTopic, b.byTopic);
-      mergeCells(merged.bySubtopic, b.bySubtopic);
-    }
-
-    const cohortWeakAreas = findWeakAreas([merged], { minSample: 10, accuracyThreshold: 0.65, limit: 10 });
+    const cohortWeakAreas = findWeakAreas([tagMastery], { minSample: 10, accuracyThreshold: 0.65, limit: 10 });
 
     return {
       totals: {
@@ -161,17 +113,188 @@ export default async function adminAnalyticsRoutes(app: FastifyInstance) {
           approved: questionCounts.find((c) => c.status === 'APPROVED')?._count._all ?? 0,
           rejected: questionCounts.find((c) => c.status === 'REJECTED')?._count._all ?? 0,
         },
-        attempts: attempts.length,
-        averagePercentage: average,
+        attempts: stats.attempts,
+        // How many children are actually behind these figures. An average over
+        // 8,000 attempts means something different if it is 40 students or 240.
+        studentsSat: stats.students,
+        averagePercentage: stats.average,
+        medianPercentage: stats.median,
+        passRate: stats.passRate,
       },
-      distribution,
+      distribution: stats.distribution,
       trend,
       classPerformance,
       subjectPerformance,
-      tagMastery: merged,
+      tagMastery,
       cohortWeakAreas,
-      filter: { kind: q.kind, days: q.days },
+      /** Questions almost nobody could answer - usually a wording problem. */
+      hardestQuestions: hardest,
+      filter: { kind: q.kind, days: q.days, grade: q.grade ?? null, division: q.division ?? null },
     };
+  });
+
+  /**
+   * What needs a teacher's attention, in sentences.
+   *
+   * The charts below this on the screen are evidence; they are not an answer.
+   * A histogram of score bands and a mastery grid both require the reader to
+   * do the interpreting, every time they look, and the interpreting is the
+   * part a computer can do: which child, which topic, which paper, and how
+   * many. So this endpoint does it, and the screen leads with the result.
+   *
+   * Each finding names a number, says what it means, and links to the screen
+   * where something can be done about it. Nothing is invented - every item is
+   * a query the reports already supported, asked without being asked.
+   */
+  app.get('/api/admin/analytics/briefing', async (request) => {
+    const q = z
+      .object({
+        kind: z.enum(['REGULAR', 'PRACTICE', 'ALL']).default('REGULAR'),
+        days: z.coerce.number().int().min(1).max(3650).default(90),
+        grade: z.string().max(20).optional(),
+        division: z.string().max(20).optional(),
+      })
+      .parse(request.query);
+
+    const filter: AttemptFilter = {
+      kind: q.kind,
+      since: new Date(Date.now() - q.days * 86_400_000),
+      grade: q.grade,
+      division: q.division,
+    };
+
+    const [stats, classes, skills, hardest, ranked, drafts, unreleased] = await Promise.all([
+      headline(filter),
+      byClass(filter),
+      tagSummaries(filter, 'skill', 0.6, 4),
+      hardestQuestions(filter, 5),
+      studentRows(filter, 1),
+      prisma.question.count({ where: { deletedAt: null, status: 'DRAFT' } }),
+      // Papers everybody has finished whose marks are still hidden. Nowhere
+      // else says this, and it is the one item on the list where children are
+      // actually waiting on somebody.
+      prisma.test.findMany({
+        where: {
+          deletedAt: null, status: { in: ['PUBLISHED', 'CLOSED'] },
+          kind: 'REGULAR', resultsReleased: false,
+          ...testsVisibleTo(request),
+          attempts: { some: { status: { in: ['SUBMITTED', 'AUTO_SUBMITTED'] } } },
+        },
+        select: {
+          id: true, title: true,
+          _count: { select: { attempts: { where: { status: { in: ['SUBMITTED', 'AUTO_SUBMITTED'] } } } } },
+        },
+        orderBy: { createdAt: 'desc' },
+        take: 5,
+      }),
+    ]);
+
+    const findings: Finding[] = [];
+
+    if (stats.attempts === 0) {
+      return { findings, totals: stats, filter: q };
+    }
+
+    // Children who are behind. The pass mark is per paper, so "below 40%
+    // average" is the plainest cohort-wide line to draw.
+    const behind = ranked.filter((s) => s.averagePercentage < 40);
+    if (behind.length > 0) {
+      findings.push({
+        id: 'students-behind',
+        severity: 'high',
+        headline: `${behind.length} ${plural(behind.length, 'student is', 'students are')} averaging under 40%`,
+        detail: behind.slice(0, 4).map((s) => `${s.name} (${s.averagePercentage}%)`).join(', ')
+          + (behind.length > 4 ? `, and ${behind.length - 4} more` : ''),
+        action: { label: 'See the ranked list', to: '/admin/students' },
+      });
+    }
+
+    // Children who are slipping, which a average alone hides completely.
+    const slipping = ranked.filter((s) => s.trend <= -10).sort((a, b) => a.trend - b.trend);
+    if (slipping.length > 0) {
+      findings.push({
+        id: 'students-slipping',
+        severity: 'high',
+        headline: `${slipping.length} ${plural(slipping.length, 'student has', 'students have')} dropped 10 points or more`,
+        detail: slipping.slice(0, 4).map((s) => `${s.name} (${s.trend} points)`).join(', ')
+          + ' — comparing their latest three papers with their first three.',
+        action: { label: 'See the ranked list', to: '/admin/students' },
+      });
+    }
+
+    // The weakest thing in the school, counted by children rather than by
+    // percentage: one tag at 40% across six answers matters less than one at
+    // 58% that sixty children are below.
+    const worstSkill = [...skills].sort((a, b) => b.weak - a.weak || a.accuracy - b.accuracy)[0];
+    if (worstSkill && worstSkill.weak > 0) {
+      findings.push({
+        id: 'weak-skill',
+        severity: worstSkill.weak >= stats.students / 4 ? 'high' : 'medium',
+        headline: `${worstSkill.weak} ${plural(worstSkill.weak, 'student is', 'students are')} below 60% on ${humanTag(worstSkill.key)}`,
+        detail: `Across the whole cohort that skill sits at ${Math.round(worstSkill.accuracy * 100)}% `
+          + `(${worstSkill.correct} of ${worstSkill.total} answers). It is the widest gap on the skill axis.`,
+        action: { label: 'See who', to: `/admin/reports?tab=weakness&axis=skill&key=${encodeURIComponent(worstSkill.key)}` },
+      });
+    }
+
+    // A gap between two classes sitting the same papers is a teaching signal
+    // rather than a pupil one, so it is worth saying separately.
+    if (classes.length >= 2) {
+      const best = classes[0];
+      const worst = classes[classes.length - 1];
+      const gap = Math.round((best.avgPercentage - worst.avgPercentage) * 10) / 10;
+      if (gap >= 10) {
+        findings.push({
+          id: 'class-gap',
+          severity: 'medium',
+          headline: `${worst.grade} ${worst.division} is ${gap} points behind ${best.grade} ${best.division}`,
+          detail: `${worst.avgPercentage}% against ${best.avgPercentage}%, over ${worst.attempts} and ${best.attempts} papers.`,
+          action: { label: 'Compare classes', to: '/admin/students' },
+        });
+      }
+    }
+
+    // A question almost nobody gets right is usually a wording problem, not a
+    // hard question, and it is quietly costing every child marks until somebody
+    // reads it.
+    const broken = hardest.filter((h) => h.accuracy < 0.2);
+    if (broken.length > 0) {
+      findings.push({
+        id: 'suspect-questions',
+        severity: 'medium',
+        headline: `${broken.length} ${plural(broken.length, 'question was', 'questions were')} answered correctly by fewer than 1 in 5`,
+        detail: `Lowest: "${broken[0].preview}" — ${broken[0].correct} of ${broken[0].served} correct. `
+          + 'That usually means the wording or the answer key, not the difficulty.',
+        action: { label: 'Open the question bank', to: '/admin/questions' },
+      });
+    }
+
+    if (unreleased.length > 0) {
+      const total = unreleased.reduce((s, t) => s + t._count.attempts, 0);
+      findings.push({
+        id: 'unreleased-results',
+        severity: 'medium',
+        headline: `${unreleased.length} ${plural(unreleased.length, 'paper has', 'papers have')} marks nobody can see yet`,
+        detail: `${total} submitted ${plural(total, 'paper', 'papers')} waiting to be released, including "${unreleased[0].title}". `
+          + 'Students see "submitted, awaiting your teacher" until you release them.',
+        action: { label: 'Release results', to: '/admin/tests' },
+      });
+    }
+
+    if (drafts > 0) {
+      findings.push({
+        id: 'unreviewed-questions',
+        severity: 'low',
+        headline: `${drafts} generated ${plural(drafts, 'question is', 'questions are')} waiting for review`,
+        detail: 'Nothing generated reaches a student until somebody approves it.',
+        action: { label: 'Review them', to: '/admin/questions' },
+      });
+    }
+
+    const order = { high: 0, medium: 1, low: 2 } as const;
+    findings.sort((a, b) => order[a.severity] - order[b.severity]);
+
+    return { findings, totals: stats, filter: q };
   });
 
   /** Ranked student list, for spotting who needs help. */
@@ -185,66 +308,56 @@ export default async function adminAnalyticsRoutes(app: FastifyInstance) {
       })
       .parse(request.query);
 
-    const kindFilter = q.kind === 'ALL' ? {} : { kind: q.kind };
+    const filter: AttemptFilter = { kind: q.kind, grade: q.grade, division: q.division };
 
-    const students = await prisma.user.findMany({
-      where: {
-        role: 'STUDENT',
-        deletedAt: null,
-        ...(q.grade ? { grade: q.grade } : {}),
-        // Membership rather than the home division; see the User model.
-        ...(q.division ? { divisions: { has: q.division } } : {}),
-      },
-      select: {
-        id: true, publicId: true, username: true, firstName: true, lastName: true, grade: true, division: true,
-        rollNo: true, isActive: true, lastLoginAt: true,
-        attempts: {
-          where: { status: { in: ['SUBMITTED', 'AUTO_SUBMITTED'] }, test: { ...kindFilter, deletedAt: null } },
-          select: { percentage: true, submittedAt: true, breakdown: true },
-          orderBy: { submittedAt: 'desc' },
-        },
-      },
-    });
+    // The table itself, and each student's own worst tags, are two queries
+    // rather than one per student: the second groups by student and tag in the
+    // database and is then matched up here.
+    const [rows, weakByStudent] = await Promise.all([
+      studentRows(filter, q.minAttempts),
+      weakTagsPerStudent(filter),
+    ]);
 
-    const rows = students
-      .filter((s) => s.attempts.length >= q.minAttempts)
-      .map((s) => {
-        const pcts = s.attempts.map((a) => a.percentage);
-        const avg = pcts.length ? Math.round((pcts.reduce((x, y) => x + y, 0) / pcts.length) * 10) / 10 : 0;
-
-        // Trend = mean of the newest three minus mean of the oldest three.
-        const recent = pcts.slice(0, 3);
-        const older = pcts.slice(-3);
-        const mean = (a: number[]) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
-        const trend = pcts.length >= 4 ? Math.round((mean(recent) - mean(older)) * 10) / 10 : 0;
-
-        const weak = findWeakAreas(
-          s.attempts.map((a) => a.breakdown as unknown as Breakdown).filter(Boolean),
-          { minSample: 3, accuracyThreshold: 0.7, limit: 4 },
-        );
-
-        return {
-          id: s.id,
-          publicId: s.publicId,
-          username: s.username,
-          name: `${s.firstName} ${s.lastName}`,
-          grade: s.grade,
-          division: s.division,
-          rollNo: s.rollNo,
-          isActive: s.isActive,
-          lastLoginAt: s.lastLoginAt,
-          attempts: s.attempts.length,
-          averagePercentage: avg,
-          bestPercentage: pcts.length ? Math.max(...pcts) : 0,
-          lastPercentage: pcts[0] ?? 0,
-          trend,
-          weakAreas: weak,
-        };
-      })
-      .sort((a, b) => a.averagePercentage - b.averagePercentage);
-
-    return { students: rows, filter: q };
+    return {
+      students: rows.map((s) => ({ ...s, weakAreas: weakByStudent.get(s.id) ?? [] })),
+      filter: q,
+    };
   });
+
+  /**
+   * Each student's four worst tags, from one query.
+   *
+   * Reported as part of the ranked table because "62% average" is a number a
+   * teacher cannot act on, and "62%, weakest at fractions and ratios" is. The
+   * same two guards as findWeakAreas: a minimum sample, and a confidence weight
+   * so 4/10 outranks 1/3.
+   */
+  async function weakTagsPerStudent(filter: AttemptFilter): Promise<Map<string, WeakArea[]>> {
+    const tallies = await studentTagTallies(filter);
+    const out = new Map<string, WeakArea[]>();
+
+    for (const t of tallies) {
+      if (t.total < 3) continue;
+      const accuracy = t.correct / t.total;
+      if (accuracy >= 0.7) continue;
+      const confidence = Math.min(1, t.total / 20);
+      const list = out.get(t.userId) ?? [];
+      list.push({
+        axis: t.axis,
+        key: t.key,
+        accuracy: Math.round(accuracy * 100) / 100,
+        correct: t.correct,
+        total: t.total,
+        priority: Math.round((1 - accuracy) * 100 * (0.5 + 0.5 * confidence)),
+      });
+      out.set(t.userId, list);
+    }
+
+    for (const [id, list] of out) {
+      out.set(id, list.sort((a, b) => b.priority - a.priority).slice(0, 4));
+    }
+    return out;
+  }
 
   /** One student's full profile, and the practice-test seed for them. */
   app.get('/api/admin/analytics/students/:id', async (request, reply) => {
@@ -259,8 +372,10 @@ export default async function adminAnalyticsRoutes(app: FastifyInstance) {
     const attempts = await prisma.attempt.findMany({
       where: { userId: id, status: { in: ['SUBMITTED', 'AUTO_SUBMITTED'] } },
       orderBy: { submittedAt: 'asc' },
+      // No breakdown: the tag mastery below is aggregated by the database, so
+      // pulling every attempt's JSON here would be paying for it twice.
       select: {
-        id: true, percentage: true, score: true, maxScore: true, submittedAt: true, breakdown: true,
+        id: true, percentage: true, score: true, maxScore: true, submittedAt: true,
         correctCount: true, incorrectCount: true, unansweredCount: true,
         test: { select: { id: true, title: true, subject: true, kind: true } },
       },
@@ -269,17 +384,7 @@ export default async function adminAnalyticsRoutes(app: FastifyInstance) {
     const regular = attempts.filter((a) => a.test.kind === 'REGULAR');
     const practice = attempts.filter((a) => a.test.kind === 'PRACTICE');
 
-    const merged: Breakdown = { byDifficulty: {}, byCognitive: {}, bySkill: {}, byTopic: {}, bySubtopic: {} };
-    for (const a of regular) {
-      const b = a.breakdown as unknown as Breakdown | null;
-      if (!b) continue;
-      mergeCells(merged.byDifficulty, b.byDifficulty);
-      mergeCells(merged.byCognitive, b.byCognitive);
-      mergeCells(merged.bySkill, b.bySkill);
-      mergeCells(merged.byTopic, b.byTopic);
-      mergeCells(merged.bySubtopic, b.bySubtopic);
-    }
-
+    const merged = await tagTallies({ kind: 'REGULAR', userId: id }, ALL_AXES);
     const weakAreas = findWeakAreas([merged], { minSample: 3, accuracyThreshold: 0.7, limit: 12 });
 
     // Which subjects and topics to seed a practice test with.
@@ -550,108 +655,76 @@ export default async function adminAnalyticsRoutes(app: FastifyInstance) {
       })
       .parse(request.query);
 
-    const field = AXIS_FIELD[q.axis];
-    const kindFilter = q.kind === 'ALL' ? {} : { kind: q.kind };
-
-    const students = await prisma.user.findMany({
-      where: {
-        role: 'STUDENT',
-        deletedAt: null,
-        isActive: true,
-        ...(q.grade ? { grade: q.grade } : {}),
-        ...(q.division ? { divisions: { has: q.division } } : {}),
-      },
-      select: {
-        id: true, publicId: true, username: true, firstName: true, lastName: true,
-        grade: true, division: true, rollNo: true,
-        attempts: {
-          where: {
-            status: { in: ['SUBMITTED', 'AUTO_SUBMITTED'] },
-            submittedAt: { gte: new Date(Date.now() - q.days * 86_400_000) },
-            test: { ...kindFilter, deletedAt: null },
-          },
-          select: { breakdown: true, submittedAt: true, test: { select: { id: true, title: true } } },
-        },
-      },
-    });
-
-    /** correct/total on one tag for one student, across their attempts. */
-    const tally = (attempts: (typeof students)[number]['attempts'], key: string) => {
-      let correct = 0;
-      let total = 0;
-      const papers: Array<{ testId: string; title: string; correct: number; total: number }> = [];
-      for (const a of attempts) {
-        const cell = ((a.breakdown as unknown as Breakdown | null)?.[field] ?? {})[key];
-        if (!cell) continue;
-        correct += cell.correct;
-        total += cell.total;
-        papers.push({ testId: a.test.id, title: a.test.title, correct: cell.correct, total: cell.total });
-      }
-      return { correct, total, papers };
+    const filter: AttemptFilter = {
+      kind: q.kind,
+      since: new Date(Date.now() - q.days * 86_400_000),
+      grade: q.grade,
+      division: q.division,
     };
 
-    // Every tag anybody has actually been examined on, with the cohort figure.
-    const seen = new Map<string, { key: string; correct: number; total: number; students: number; weak: number }>();
-    for (const s of students) {
-      const keys = new Set<string>();
-      for (const a of s.attempts) {
-        for (const k of Object.keys(((a.breakdown as unknown as Breakdown | null)?.[field] ?? {}))) keys.add(k);
-      }
-      for (const k of keys) {
-        const { correct, total } = tally(s.attempts, k);
-        const row = seen.get(k) ?? { key: k, correct: 0, total: 0, students: 0, weak: 0 };
-        row.correct += correct;
-        row.total += total;
-        row.students++;
-        if (total >= q.minQuestions && correct / total < q.threshold) row.weak++;
-        seen.set(k, row);
-      }
-    }
-
-    const tags = [...seen.values()]
-      .map((t) => ({ ...t, accuracy: t.total ? Math.round((t.correct / t.total) * 100) / 100 : 0 }))
-      .sort((a, b) => b.weak - a.weak || a.accuracy - b.accuracy);
+    // Every tag anybody has actually been examined on, with the cohort figure
+    // and how many children are below the line on it.
+    const tags = await tagSummaries(filter, q.axis, q.threshold, q.minQuestions);
 
     if (!q.key) return { axis: q.axis, key: null as string | null, tags, students: [] as WeakStudent[], filter: q };
 
-    const rows = students
+    const [tallies, papers] = await Promise.all([
+      studentsOnTag(filter, q.axis, q.key),
+      papersForTag(filter, q.axis, q.key),
+    ]);
+
+    const rows: WeakStudent[] = tallies
       .map((s) => {
-        const { correct, total, papers } = tally(s.attempts, q.key!);
+        // The threshold is applied to the real figure, not the displayed one.
+        // Rounding first dropped a child on 59.74% from the list of children
+        // below 60% - they are below the line, and the line is what the list is
+        // for. Only the number shown on screen is rounded.
+        const exact = s.total ? s.correct / s.total : 0;
         return {
           student: {
             id: s.id, publicId: s.publicId, username: s.username,
-            name: `${s.firstName} ${s.lastName}`,
-            grade: s.grade, division: s.division, rollNo: s.rollNo,
+            name: s.name, grade: s.grade, division: s.division, rollNo: s.rollNo,
           },
-          correct,
-          total,
-          accuracy: total ? Math.round((correct / total) * 100) / 100 : 0,
+          correct: s.correct,
+          total: s.total,
+          accuracy: Math.round(exact * 100) / 100,
+          exact,
           /** Too few questions to say anything - reported, never counted. */
-          thin: total < q.minQuestions,
-          papers,
+          thin: s.total < q.minQuestions,
+          papers: papers.get(s.id) ?? [],
         };
       })
-      .filter((r) => r.total > 0 && (r.thin || r.accuracy < q.threshold))
-      .sort((a, b) => Number(a.thin) - Number(b.thin) || a.accuracy - b.accuracy || b.total - a.total);
+      .filter((r) => r.total > 0 && (r.thin || r.exact < q.threshold))
+      .sort((a, b) => Number(a.thin) - Number(b.thin) || a.exact - b.exact || b.total - a.total)
+      .map(({ exact: _exact, ...row }) => row);
 
     return { axis: q.axis, key: q.key, tags, students: rows, filter: q };
   }
 
-  /** CSV export of all results, for a spreadsheet. */
+  /** Which papers each student met this tag on, for the expandable row. */
+  async function papersForTag(filter: AttemptFilter, axis: WeakArea['axis'], key: string) {
+    const rows = await paperTallies(filter, axis, key);
+    const out = new Map<string, Array<{ testId: string; title: string; correct: number; total: number }>>();
+    for (const r of rows) {
+      const list = out.get(r.userId) ?? [];
+      list.push({ testId: r.testId, title: r.title, correct: r.correct, total: r.total });
+      out.set(r.userId, list);
+    }
+    return out;
+  }
+
+  /**
+   * CSV export of all results, for a spreadsheet.
+   *
+   * Streamed in pages rather than assembled in memory. Every result the school
+   * has ever recorded is by definition the largest thing this API produces, and
+   * the version that built one big string held the whole export and the whole
+   * query result at once - on a single-process API that is the download most
+   * likely to take the exam down with it.
+   */
   app.get('/api/admin/analytics/export.csv', async (request, reply) => {
     const q = z.object({ kind: z.enum(['REGULAR', 'PRACTICE', 'ALL']).default('ALL') }).parse(request.query);
     const kindFilter = q.kind === 'ALL' ? {} : { kind: q.kind };
-
-    const attempts = await prisma.attempt.findMany({
-      where: { status: { in: ['SUBMITTED', 'AUTO_SUBMITTED'] }, test: { ...kindFilter } },
-      orderBy: { submittedAt: 'desc' },
-      select: {
-        score: true, maxScore: true, percentage: true, submittedAt: true, startedAt: true,
-        correctCount: true, incorrectCount: true, unansweredCount: true, status: true,
-        user: { select: { username: true, firstName: true, lastName: true, grade: true, division: true, rollNo: true } },
-        test: { select: { title: true, subject: true, kind: true } },
-      },
-    });
 
     const header = [
       'username', 'first_name', 'last_name', 'grade', 'division', 'roll_no',
@@ -659,19 +732,41 @@ export default async function adminAnalyticsRoutes(app: FastifyInstance) {
       'correct', 'incorrect', 'unanswered', 'status', 'started_at', 'submitted_at',
     ];
 
-    const lines = [header.join(',')];
-    for (const a of attempts) {
-      lines.push([
-        a.user.username, a.user.firstName, a.user.lastName, a.user.grade, a.user.division, a.user.rollNo,
-        a.test.title, a.test.subject, a.test.kind, a.score, a.maxScore, a.percentage,
-        a.correctCount, a.incorrectCount, a.unansweredCount, a.status,
-        a.startedAt.toISOString(), a.submittedAt?.toISOString() ?? '',
-      ].map(csvCell).join(','));
-    }
-
     reply.header('Content-Type', 'text/csv; charset=utf-8');
     reply.header('Content-Disposition', `attachment; filename="results-${today()}.csv"`);
-    return lines.join('\n');
+
+    const PAGE = 1000;
+    async function* rows() {
+      yield `${header.join(',')}\n`;
+      let cursor: string | undefined;
+      for (;;) {
+        const page = await prisma.attempt.findMany({
+          where: { status: { in: ['SUBMITTED', 'AUTO_SUBMITTED'] }, test: { ...kindFilter } },
+          orderBy: { id: 'asc' },
+          take: PAGE,
+          ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+          select: {
+            id: true,
+            score: true, maxScore: true, percentage: true, submittedAt: true, startedAt: true,
+            correctCount: true, incorrectCount: true, unansweredCount: true, status: true,
+            user: { select: { username: true, firstName: true, lastName: true, grade: true, division: true, rollNo: true } },
+            test: { select: { title: true, subject: true, kind: true } },
+          },
+        });
+        if (page.length === 0) return;
+        yield page
+          .map((a) => [
+            a.user.username, a.user.firstName, a.user.lastName, a.user.grade, a.user.division, a.user.rollNo,
+            a.test.title, a.test.subject, a.test.kind, a.score, a.maxScore, a.percentage,
+            a.correctCount, a.incorrectCount, a.unansweredCount, a.status,
+            a.startedAt.toISOString(), a.submittedAt?.toISOString() ?? '',
+          ].map(csvCell).join(',')).join('\n') + '\n';
+        if (page.length < PAGE) return;
+        cursor = page[page.length - 1].id;
+      }
+    }
+
+    return reply.send(Readable.from(rows()));
   });
 }
 

@@ -663,6 +663,10 @@ model Attempt {
   @@index([userId, status])
   @@index([testId, status])
   @@index([submittedAt])
+  /// The expiry sweep, which runs every minute forever. Without this it walks
+  /// the whole status index looking for the handful of papers still open - fine
+  /// on a new install, linear in the school's entire history by year three.
+  @@index([status, expiresAt])
 }
 
 model Answer {

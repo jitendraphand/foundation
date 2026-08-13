@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client';
 import { prisma } from '../db.js';
 import { gradeAnswer, marksFor, round2 } from '../lib/grading.js';
 import { buildBreakdown, type GradedRow } from '../lib/analytics.js';
@@ -108,9 +109,24 @@ export function resultsAreVisible(test: Pick<Test, 'kind' | 'resultsReleased'>):
 }
 
 /**
- * Grades and finalises an attempt. Idempotent: re-running on an already
- * submitted attempt returns the stored result rather than double-counting the
- * per-question statistics.
+ * Grades and finalises an attempt.
+ *
+ * Idempotent under concurrency, which is the whole difficulty here. This is
+ * called from five places - submit, the timer, the tick, loading a paper, and
+ * the expiry sweep - and the sweep runs on every student's dashboard load, so
+ * during a class the same expired attempt is picked up by several requests
+ * within milliseconds of each other.
+ *
+ * Checking the status before starting is not enough: every caller reads
+ * IN_PROGRESS, every caller proceeds, and every caller adds one to
+ * `timesServed` on all 25 questions. Six dashboards open meant a paper sat once
+ * counted six times, and `observedP` - the number a teacher uses to spot a
+ * badly worded question - was wrong by that factor.
+ *
+ * So the attempt is *claimed* instead: one conditional UPDATE moves it out of
+ * IN_PROGRESS, and only the caller whose update actually matched a row goes on
+ * to write the statistics. The losers return the stored result, which is what
+ * they wanted anyway.
  */
 export async function finalizeAttempt(attemptId: string, auto: boolean) {
   const attempt = await prisma.attempt.findUniqueOrThrow({
@@ -184,31 +200,10 @@ export async function finalizeAttempt(attemptId: string, auto: boolean) {
   const breakdown = buildBreakdown(rows);
 
   const updated = await prisma.$transaction(async (tx) => {
-    for (const u of updates) {
-      await tx.answer.update({
-        where: { id: u.id },
-        data: { isCorrect: u.isCorrect, marksAwarded: u.marksAwarded },
-      });
-    }
-
-    // Live difficulty statistics, used to spot questions that are badly worded.
-    //
-    // No ::uuid cast on the id: Prisma maps `String @id @default(uuid())` to a
-    // TEXT column unless @db.Uuid is declared, and Postgres has no
-    // text = uuid operator, so casting here fails every submission.
-    for (const row of rows) {
-      if (!row.answered) continue;
-      const hit = row.isCorrect ? 1 : 0;
-      await tx.$executeRaw`
-        UPDATE "Question"
-        SET "timesServed" = "timesServed" + 1,
-            "timesCorrect" = "timesCorrect" + ${hit},
-            "observedP" = ("timesCorrect" + ${hit})::float / ("timesServed" + 1)
-        WHERE "id" = ${row.questionId}`;
-    }
-
-    return tx.attempt.update({
-      where: { id: attemptId },
+    // Claim the attempt. `status: 'IN_PROGRESS'` in the filter is the lock:
+    // exactly one concurrent caller can match, and the rest see count 0.
+    const claim = await tx.attempt.updateMany({
+      where: { id: attemptId, status: 'IN_PROGRESS' },
       data: {
         status: auto ? 'AUTO_SUBMITTED' : 'SUBMITTED',
         submittedAt: new Date(),
@@ -220,11 +215,78 @@ export async function finalizeAttempt(attemptId: string, auto: boolean) {
         unansweredCount,
         breakdown: breakdown as object,
       },
-      include: { test: true },
     });
+    if (claim.count === 0) return null;
+
+    // One statement rather than one per answer. A fifty-question paper used to
+    // be fifty sequential round trips inside this transaction, and a class
+    // submitting together queued behind every one of them.
+    if (updates.length > 0) {
+      await tx.$executeRaw`
+        UPDATE "Answer" AS a
+        SET "isCorrect" = v.is_correct, "marksAwarded" = v.marks
+        FROM (VALUES ${Prisma.join(
+          updates.map((u) => Prisma.sql`(${u.id}, ${u.isCorrect}::boolean, ${u.marksAwarded}::double precision)`),
+        )}) AS v(id, is_correct, marks)
+        WHERE a.id = v.id`;
+    }
+
+    // Live difficulty statistics, used to spot questions that are badly worded.
+    //
+    // No ::uuid cast on the id: Prisma maps `String @id @default(uuid())` to a
+    // TEXT column unless @db.Uuid is declared, and Postgres has no
+    // text = uuid operator, so casting here fails every submission.
+    const answered = rows.filter((r) => r.answered);
+    if (answered.length > 0) {
+      await tx.$executeRaw`
+        UPDATE "Question" AS q
+        SET "timesServed"  = q."timesServed" + 1,
+            "timesCorrect" = q."timesCorrect" + v.hit,
+            "observedP"    = (q."timesCorrect" + v.hit)::float / (q."timesServed" + 1)
+        FROM (VALUES ${Prisma.join(
+          answered.map((r) => Prisma.sql`(${r.questionId}, ${r.isCorrect ? 1 : 0}::int)`),
+        )}) AS v(id, hit)
+        WHERE q.id = v.id`;
+    }
+
+    return tx.attempt.findUniqueOrThrow({ where: { id: attemptId }, include: { test: true } });
   });
 
+  // Somebody else finalised it while we were grading. Their result is the one
+  // that counts, and it is already written.
+  if (!updated) {
+    return prisma.attempt.findUniqueOrThrow({ where: { id: attemptId }, include: { test: true } });
+  }
+
   return updated;
+}
+
+/**
+ * The opportunistic sweep, throttled.
+ *
+ * A background timer sweeps every minute regardless; the dashboard also asks,
+ * so a paper is never left un-graded for a full minute after the student comes
+ * back. But a whole class refreshing at once meant two hundred sweeps in a few
+ * seconds - two hundred scans for the same handful of rows, each blocking the
+ * one process everybody else is waiting on.
+ *
+ * One sweep at a time, and at most one every fifteen seconds. Everybody who
+ * asks in between gets the in-flight one, or nothing to do.
+ */
+let sweepInFlight: Promise<number> | null = null;
+let lastSweepAt = 0;
+const SWEEP_EVERY_MS = 15_000;
+
+export function sweepExpiredAttemptsThrottled(): Promise<number> {
+  if (sweepInFlight) return sweepInFlight;
+  if (Date.now() - lastSweepAt < SWEEP_EVERY_MS) return Promise.resolve(0);
+
+  sweepInFlight = sweepExpiredAttempts()
+    .finally(() => {
+      lastSweepAt = Date.now();
+      sweepInFlight = null;
+    });
+  return sweepInFlight;
 }
 
 /**

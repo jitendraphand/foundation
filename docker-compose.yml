@@ -2,6 +2,32 @@ services:
   db:
     image: postgres:16-alpine
     restart: unless-stopped
+    # Postgres ships tuned for a machine far smaller than any it is likely to
+    # be run on: 128 MB of cache and 4 MB of working memory, whatever the host
+    # has. The defaults below are the same conservative figures, so nothing
+    # changes for a 4 GB box; a school with a large machine raises them in .env
+    # and gets the machine it paid for. See DEPLOYMENT.md, "Sizing the database".
+    command:
+      - postgres
+      - -c
+      - shared_buffers=${DB_SHARED_BUFFERS:-256MB}
+      - -c
+      - effective_cache_size=${DB_EFFECTIVE_CACHE:-1GB}
+      - -c
+      - work_mem=${DB_WORK_MEM:-8MB}
+      - -c
+      - maintenance_work_mem=${DB_MAINTENANCE_WORK_MEM:-128MB}
+      - -c
+      - max_connections=${DB_MAX_CONNECTIONS:-100}
+      # Nothing here runs on a spinning disk any more, and the planner's
+      # defaults still assume one - which is what makes it prefer a sequential
+      # scan over an index it should be using.
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - effective_io_concurrency=200
+      - -c
+      - checkpoint_completion_target=0.9
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -38,10 +64,17 @@ services:
     environment:
       NODE_ENV: production
       PORT: "4000"
-      # connection_limit is set explicitly because Prisma's default is
-      # cpus*2+1 - five on a 2-core box - and a whole class starting a paper at
-      # once queues behind it, then fails with P2024 after the pool timeout.
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?schema=public&connection_limit=${DB_POOL_SIZE:-20}&pool_timeout=20
+      # No connection_limit in the URL: the API divides DB_POOL_SIZE between
+      # its workers and sets each one's share itself, so the total stays the
+      # number configured here however many cores the machine has. Prisma's own
+      # default is cpus*2+1, which a whole class starting a paper at once
+      # queues behind and then fails with P2024.
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?schema=public&pool_timeout=20
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-20}
+      # API worker processes. 0 means one per core, capped at 8 - a single Node
+      # process uses a single core, so this is what decides whether a large
+      # machine is used or merely owned.
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-0}
       JWT_SECRET: ${JWT_SECRET}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
       ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}

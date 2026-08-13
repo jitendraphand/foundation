@@ -3,11 +3,12 @@ import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../db.js';
 import { authenticate, requireActivitiesComplete, requireFreshPassword } from '../middleware/auth.js';
-import { finalizeAttempt, buildLayout, publicQuestion, remainingMs, resultsAreVisible, sweepExpiredAttempts } from '../services/attempt.js';
+import { finalizeAttempt, buildLayout, publicQuestion, remainingMs, resultsAreVisible, sweepExpiredAttemptsThrottled } from '../services/attempt.js';
 import { generateStepUp, stepUpAllowanceFor } from '../llm/step-up.js';
 import { proctoringFor, proctorStateOf, recordProctorEvent } from '../services/proctoring.js';
 import { LlmError } from '../llm/providers.js';
-import { findWeakAreas, STUDENT_AXES, type Breakdown } from '../lib/analytics.js';
+import { findWeakAreas, STUDENT_AXES } from '../lib/analytics.js';
+import { tagTallies } from '../lib/aggregate.js';
 import { evaluateAvailability } from '../lib/availability.js';
 import { getSchoolTimezone } from '../services/settings.js';
 import { validateResponse } from '../lib/grading.js';
@@ -39,8 +40,10 @@ export default async function studentRoutes(app: FastifyInstance) {
     const userId = request.user!.sub;
 
     // Close anything whose timer expired while the student was away, so the
-    // dashboard never shows a stale "in progress".
-    await sweepExpiredAttempts().catch(() => undefined);
+    // dashboard never shows a stale "in progress". Throttled: a whole class
+    // refreshing together must not become a class-sized pile of identical
+    // scans, all queued in front of everyone still writing.
+    await sweepExpiredAttemptsThrottled().catch(() => undefined);
 
     const me = await prisma.user.findUniqueOrThrow({
       where: { id: userId },
@@ -127,13 +130,17 @@ export default async function studentRoutes(app: FastifyInstance) {
       };
     });
 
+    // No breakdown: the weak areas below are counted by the database. Loading
+    // sixty breakdown JSONs per dashboard was the single most expensive thing
+    // the student side did, and it did it on every refresh, for every child in
+    // the room.
     const attempts = await prisma.attempt.findMany({
       where: { userId, status: { in: ['SUBMITTED', 'AUTO_SUBMITTED'] } },
       orderBy: { submittedAt: 'desc' },
       take: 60,
       select: {
         id: true, score: true, maxScore: true, percentage: true, submittedAt: true,
-        correctCount: true, incorrectCount: true, unansweredCount: true, breakdown: true,
+        correctCount: true, incorrectCount: true, unansweredCount: true,
         test: { select: { id: true, publicId: true, title: true, subject: true, kind: true, passPercentage: true, resultsReleased: true } },
       },
     });
@@ -158,8 +165,15 @@ export default async function studentRoutes(app: FastifyInstance) {
       };
     };
 
+    // Released papers only, enforced in the query rather than afterwards: a
+    // mark the teacher has not released must not reach the child through a
+    // summary either.
+    const mastery = await tagTallies(
+      { kind: 'ALL', userId, releasedOnly: true },
+      STUDENT_AXES,
+    );
     const weakAreas = findWeakAreas(
-      released.map((a) => a.breakdown as unknown as Breakdown).filter(Boolean),
+      [mastery],
       // No topic or subtopic: see the note on findWeakAreas.
       { minSample: 3, accuracyThreshold: 0.7, limit: 6, axes: STUDENT_AXES },
     );
