@@ -11,6 +11,8 @@ import { getStepUpConfig, setStepUpConfig, DEFAULT_STEP_UP_QUOTA } from '../../l
 import { getImageConfig, setImageConfig } from '../../llm/images.js';
 import { capabilitiesOf, imageProblem, imageSupportOf } from '../../llm/capabilities.js';
 import { callParamsFor, packIamSecret } from '../../llm/credentials.js';
+import { buildChatRequest } from '../../llm/providers.js';
+import { resolveCeiling } from '../../llm/limits.js';
 import { modelTuningSchema, reservedKeysIn } from '../../llm/tuning.js';
 import { trialGeneration } from '../../llm/generate.js';
 import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_TEMPLATE } from '../../llm/prompts.js';
@@ -529,6 +531,75 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
       detail: { model, ok: result.ok, latencyMs: result.latencyMs },
     });
     return result;
+  });
+
+  /**
+   * The exact request this credential would send.
+   *
+   * Vendors publish a different code sample per model, and the question an
+   * administrator is really asking when they read one is "what does mine do
+   * differently?". Describing our request in prose cannot answer that; showing
+   * it can. This is assembled by buildChatRequest, the same function the real
+   * call uses, so what is displayed is what would be sent.
+   *
+   * Between this and Model settings, everything a vendor sample varies by is
+   * visible and adjustable from the browser. What is deliberately *not* offered
+   * is running code typed into this screen: it would execute inside the API,
+   * with the database, the key encryption and the network in reach, which turns
+   * one phished administrator password into the whole school's records. The
+   * request body is data, so it is editable; the code that sends it is not.
+   */
+  app.get('/api/admin/credentials/:id/request', async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const query = z.object({ model: z.string().max(200).optional() }).parse(request.query ?? {});
+
+    const credential = await prisma.apiCredential.findUnique({ where: { id } });
+    if (!credential) return reply.code(404).send({ error: 'Credential not found.' });
+
+    const model = query.model || credential.defaultModel || PROVIDERS[credential.provider]?.suggestedModels[0];
+    if (!model) return reply.code(400).send({ error: 'Choose a model first.' });
+
+    const provider = PROVIDERS[credential.provider];
+    if (provider?.dialect && provider.dialect !== 'openai' && provider.dialect !== 'azure') {
+      return {
+        model,
+        shown: false,
+        // Bedrock, Vertex and Oracle are signed and shaped differently, and a
+        // preview built for the OpenAI shape would be a lie about all three.
+        note: `${provider.label} does not use the OpenAI request shape - it has its own protocol and signing, `
+          + 'so there is no equivalent body to show. Model settings still apply where the provider accepts them.',
+      };
+    }
+
+    const call = await callParamsFor(credential);
+    const built = await buildChatRequest({
+      ...call,
+      model,
+      // Stand-ins rather than the real prompts: the shape of the request is
+      // what is being examined, and the system prompt is thousands of words
+      // that would bury it.
+      messages: [
+        { role: 'system', content: '<the question-writing system prompt>' },
+        { role: 'user', content: '<the request for this run>' },
+      ],
+      jsonMode: provider?.supportsJsonMode ?? false,
+      maxTokens: resolveCeiling(credential, model),
+    });
+
+    return {
+      model,
+      shown: true,
+      url: built.url,
+      // Never the key. The point is the shape of the request, and a screenshot
+      // of this pasted into a support thread must not leak a credential.
+      headers: Object.fromEntries(
+        Object.entries(built.headers).map(([k, v]) =>
+          /^authorization$/i.test(k) || /^api-key$/i.test(k) ? [k, '<your API key>'] : [k, v],
+        ),
+      ),
+      body: built.body,
+      streaming: built.streaming,
+    };
   });
 
   /**

@@ -438,6 +438,31 @@ export async function chatComplete(req: ChatRequest): Promise<ChatResponse> {
     });
   }
 
+  const { url, headers, body, streaming } = await buildChatRequest(req);
+  const started = Date.now();
+
+  return streaming
+    ? streamCompletion({ url, headers, body, started })
+    : wholeCompletion({ url, headers, body, started });
+}
+
+export interface BuiltRequest {
+  url: string;
+  headers: Record<string, string>;
+  body: Record<string, unknown>;
+  streaming: boolean;
+}
+
+/**
+ * Exactly what goes on the wire, in one place.
+ *
+ * Split out from chatComplete so the settings screen can show an administrator
+ * the real request for a credential rather than a description of it. A vendor's
+ * per-model sample is only useful if you can see what your own request differs
+ * by, and a preview assembled separately would drift from the real one and be
+ * worse than none at all. This is the same function the real call uses.
+ */
+export async function buildChatRequest(req: ChatRequest): Promise<BuiltRequest> {
   const isAzure = req.dialect === 'azure';
   const base = req.baseUrl.replace(/\/+$/, '');
 
@@ -449,7 +474,6 @@ export async function chatComplete(req: ChatRequest): Promise<ChatResponse> {
       `?api-version=${encodeURIComponent(req.azure?.apiVersion ?? DEFAULT_AZURE_API_VERSION)}`
     : `${base}/chat/completions`;
 
-  const started = Date.now();
   const reasoning = isReasoningModel(req.model);
   const tuning = req.tuning ?? {};
 
@@ -498,9 +522,7 @@ export async function chatComplete(req: ChatRequest): Promise<ChatResponse> {
     'X-Title': 'Foundation Exam System',
   };
 
-  return streaming
-    ? streamCompletion({ url, headers, body, started })
-    : wholeCompletion({ url, headers, body, started });
+  return { url, headers, body, streaming };
 }
 
 /**

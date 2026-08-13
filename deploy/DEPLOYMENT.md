@@ -445,6 +445,41 @@ becomes: Temperature `1`, Top P `0.95`, and in the extra fields box
 
 Save, then press **Try 2 questions**.
 
+### Seeing the request, and why you cannot edit the code
+
+**Show the request** on any credential row prints the exact JSON this system
+would send for that model, with your key replaced by a placeholder — and a
+`curl` version of the same thing, so you can run it outside the system when a
+provider's support desk asks what you sent.
+
+That panel exists to answer the question behind "why is the code different for
+every model". Put a vendor's sample next to it and every difference is visible,
+and every difference that matters is a **Model settings** field. It is built by
+the same function that makes the real call, so it cannot drift into describing
+a request we do not actually send.
+
+What is deliberately not offered is a box for typing code that the server then
+runs. It is worth being plain about why, because it sounds like the more
+flexible option:
+
+- Code typed there would execute **inside the API process**, with the database,
+  the key-encryption secret and the internal network all in reach. One phished
+  administrator password would stop being an account problem and become every
+  student record, every result, and every API key in one step.
+- It would not actually buy the flexibility. Everything a vendor's samples vary
+  by — sampling defaults, `extra_body`, whether the model thinks, whether it
+  accepts a JSON mode, the model id itself — is already a setting. A new model
+  appearing at build.nvidia.com needs no release from anyone.
+- The one thing settings genuinely cannot reach is a provider that does not
+  speak the OpenAI protocol at all. Bedrock, Vertex AI and Oracle each sign and
+  shape requests their own way, and that is a *protocol*, not a snippet: no
+  amount of pasted code in a text box would make one of them work, which is why
+  those three say so instead of showing a body.
+
+So: the request body is data, and you can change all of it. The code that signs
+and sends it is not, and a school server is exactly the kind of machine where
+that distinction should be kept.
+
 ### Amazon Bedrock
 
 Bedrock is the one provider that does not speak the OpenAI shape, and the one
@@ -792,6 +827,58 @@ docker compose down                # stop everything (data is safe in volumes)
 docker compose up -d               # start everything
 ```
 
+### Sizing the API and the database for your machine
+
+Two things do not size themselves, and on a large machine both of them leave
+most of it idle. Everything below has a working default; this section is for a
+school that has bought something substantial and wants it used.
+
+**The API uses one core per worker.** Node runs JavaScript on a single thread,
+so one API process is one core no matter how many the host has. Measured with
+200 students refreshing the dashboard together: the process sat at 100% of one
+core while Postgres was idle and the remaining cores did nothing, and replies
+took about a second each. Nothing was overloaded except the one thread everyone
+was queued behind.
+
+`WEB_CONCURRENCY` decides this. Left at `0` the API starts one worker per core,
+capped at eight, which is what you want; the startup log says what it chose:
+
+```
+[cluster] 4 API workers on 4 cores, 10 database connections each (40 of 40 budgeted)
+```
+
+Workers share the listening socket, so there is no load balancer to configure
+and Caddy is unchanged. Exactly one worker runs the scheduled jobs — the expiry
+sweep and the nightly prune — so those do not multiply. Set it to `1` to go back
+to a single process.
+
+**`DB_POOL_SIZE` is a total, not a per-worker figure.** It is divided between
+the workers, so the number of connections Postgres sees is the number you
+configured. Keep it comfortably below `DB_MAX_CONNECTIONS`; a backup and a
+`psql` session need connections too.
+
+**Postgres ships sized for a very small machine** and never looks at the host:
+128 MB of cache and 4 MB of working memory, on a 4 GB box and a 128 GB one
+alike. The `DB_*` settings in `.env` raise them. Rules of thumb for a machine
+doing nothing else:
+
+| Setting | Rule | 4 GB host | 100 GB host |
+|---|---|---|---|
+| `DB_SHARED_BUFFERS` | 25% of RAM | `256MB` | `24GB` |
+| `DB_EFFECTIVE_CACHE` | 50–75% of RAM — a hint to the planner, it allocates nothing | `1GB` | `72GB` |
+| `DB_WORK_MEM` | RAM ÷ max_connections ÷ 4, and it is *per sort* | `8MB` | `64MB` |
+| `DB_MAINTENANCE_WORK_MEM` | 1–2 GB is plenty; used by VACUUM and index builds | `128MB` | `2GB` |
+| `DB_MAX_CONNECTIONS` | above `DB_POOL_SIZE`, with room to spare | `100` | `200` |
+
+Changing these needs `docker compose up -d` to recreate the database container.
+No data is touched — the volume is unchanged — but it is a restart, so do it
+outside exam hours.
+
+**What is worth spending on.** For 200 concurrent students the answer is cores
+first, then RAM. The analytics are counted by the database rather than in the
+API, so memory mostly buys cache; the API is the part that queues, and the API
+scales with cores.
+
 ### Updating to a new version
 
 ```bash
@@ -1070,6 +1157,35 @@ they sit, so they mean something by the time they appear.
 Their teacher keeps every axis — under **Students → Performance** and on each
 student's own page — because a teacher has the whole cohort behind each row and
 can see how many questions it rests on.
+
+### The overview: what needs your attention
+
+**Admin → Overview** opens with a short list of findings rather than with
+charts. Each one is a sentence with a number in it and a link to the screen
+where something can be done:
+
+- children averaging under 40%, and which ones
+- children who have **dropped ten points or more**, comparing their latest three
+  papers with their first three — the thing an average hides completely
+- the skill the most children are below the line on, counted by children rather
+  than by percentage, because one tag at 40% across six answers matters less
+  than one at 58% that sixty children are below
+- a class more than ten points behind another sitting the same papers
+- **questions almost nobody answered correctly** — under one in five usually
+  means the wording or the answer key, not the difficulty, and it is quietly
+  costing every child marks until somebody reads it
+- papers whose marks are submitted but not released, where children are waiting
+- questions generated but not yet reviewed
+
+If none of those apply it says so, rather than showing zeroes dressed up as
+findings. The charts are still there, one click away under **Show the figures
+behind this** — they are the evidence for the findings, not a substitute for
+reading them.
+
+The headline tiles also give the **median** next to the average and the pass
+rate, because one child on 4% drags a mean down in a way that misrepresents a
+class, and they say how many children are behind the figure: an average over
+8,000 papers means something different if it is 40 students or 240.
 
 ### Reports: who is missing, and who is weak at what
 

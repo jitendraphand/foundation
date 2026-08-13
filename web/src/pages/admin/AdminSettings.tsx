@@ -262,6 +262,8 @@ function Providers() {
   const [tuningFor, setTuningFor] = useState<string | null>(null);
   const [trialling, setTrialling] = useState<string | null>(null);
   const [trials, setTrials] = useState<Record<string, TrialResult | null>>({});
+  const [requestFor, setRequestFor] = useState<string | null>(null);
+  const [requests, setRequests] = useState<Record<string, RequestPreviewData>>({});
 
   const load = useCallback(async () => {
     try {
@@ -393,6 +395,32 @@ function Providers() {
       await load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not change that setting.');
+    }
+  };
+
+  /**
+   * Fetch and show the real request body for one credential.
+   *
+   * The vendor's page shows their Python; this shows the equivalent JSON this
+   * system would send, so the two can be compared line by line. That comparison
+   * is what an administrator is actually trying to make when they ask why the
+   * code is different for every model.
+   */
+  const showRequest = async (credential: Credential) => {
+    if (requestFor === credential.id) {
+      setRequestFor(null);
+      return;
+    }
+    setRequestFor(credential.id);
+    if (requests[credential.id]) return;
+    try {
+      const preview = await api.get<RequestPreviewData>(`/api/admin/credentials/${credential.id}/request`);
+      setRequests((p) => ({ ...p, [credential.id]: preview }));
+    } catch (err) {
+      setRequests((p) => ({
+        ...p,
+        [credential.id]: { shown: false, model: '', note: err instanceof ApiError ? err.message : 'Could not build the request.' },
+      }));
     }
   };
 
@@ -544,6 +572,13 @@ function Providers() {
                       >
                         {tuningFor === credential.id ? 'Close' : 'Model settings'}
                       </button>
+                      <button
+                        type="button"
+                        className="btn-ghost btn-sm"
+                        onClick={() => void showRequest(credential)}
+                      >
+                        {requestFor === credential.id ? 'Close' : 'Show the request'}
+                      </button>
                       <button type="button" className="btn-ghost btn-sm text-bad" onClick={() => remove(credential)}>Delete</button>
                     </td>
                   </tr>
@@ -571,6 +606,15 @@ function Providers() {
                               onCancel={() => setTuningFor(null)}
                               onSave={(tuning) => void saveTuning(credential, tuning)}
                             />
+                          </td>
+                        </tr>,
+                      );
+                    }
+                    if (requestFor === credential.id) {
+                      extras.push(
+                        <tr key={`${credential.id}-request`}>
+                          <td colSpan={9} className="bg-surface-sunken">
+                            <RequestPreview preview={requests[credential.id] ?? null} />
                           </td>
                         </tr>,
                       );
@@ -1334,6 +1378,77 @@ function TrialReport({ result, onDismiss }: { result: TrialResult; onDismiss: ()
           </pre>
         </details>
       )}
+    </div>
+  );
+}
+
+interface RequestPreviewData {
+  model: string;
+  shown: boolean;
+  note?: string;
+  url?: string;
+  headers?: Record<string, string>;
+  body?: Record<string, unknown>;
+  streaming?: boolean;
+}
+
+/**
+ * The request this credential actually sends.
+ *
+ * This exists to answer one question directly: "the vendor's page shows
+ * different code for every model - what does mine send?". Prose cannot answer
+ * it; the body can. It is built by the same function the real call uses, so it
+ * cannot drift into being a flattering description of what we wish we sent.
+ *
+ * The key is never in it. This is the panel most likely to be screenshotted
+ * into a support thread.
+ */
+function RequestPreview({ preview }: { preview: RequestPreviewData | null }) {
+  if (!preview) {
+    return <div className="p-3"><Spinner label="Building the request" /></div>;
+  }
+
+  if (!preview.shown) {
+    return (
+      <div className="p-3">
+        <p className="text-xs text-ink-muted">{preview.note}</p>
+      </div>
+    );
+  }
+
+  const curl = [
+    `curl ${preview.url} \\`,
+    ...Object.entries(preview.headers ?? {}).map(([k, v]) => `  -H '${k}: ${v}' \\`),
+    `  -d '${JSON.stringify(preview.body)}'`,
+  ].join('\n');
+
+  return (
+    <div className="p-3 space-y-3">
+      <div>
+        <h4 className="text-xs font-semibold">What this credential sends</h4>
+        <p className="text-[11px] text-ink-faint mt-0.5">
+          The real request for <code>{preview.model}</code>, assembled by the same code that makes the call.
+          Compare it with the vendor&rsquo;s sample; anything that differs can be set under <strong>Model settings</strong>.
+          {preview.streaming ? ' The reply is read as it arrives.' : ' Streaming is off for this credential.'}
+        </p>
+      </div>
+
+      <label className="block">
+        <span className="text-[11px] font-medium text-ink-muted">Request body</span>
+        <pre className="mt-1 max-h-64 overflow-auto rounded-lg border border-line bg-white p-2 text-[11px] whitespace-pre-wrap break-words">
+          {JSON.stringify(preview.body, null, 2)}
+        </pre>
+      </label>
+
+      <details className="text-xs">
+        <summary className="cursor-pointer text-ink-muted">As a curl command, to try it outside the system</summary>
+        <pre className="mt-1 max-h-48 overflow-auto rounded-lg border border-line bg-white p-2 text-[11px] whitespace-pre-wrap break-words">
+          {curl}
+        </pre>
+        <p className="mt-1 text-[11px] text-ink-faint">
+          Your key is not shown here — put it in place of <code>&lt;your API key&gt;</code> if you run this.
+        </p>
+      </details>
     </div>
   );
 }
