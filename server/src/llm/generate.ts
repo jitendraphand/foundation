@@ -576,6 +576,123 @@ export async function sweepAbandonedRuns(): Promise<number> {
  * calls behind a single run, so the admin asks for fifty and gets fifty
  * rather than an unexplained format error.
  */
+export interface TrialOutcome {
+  ok: boolean;
+  message: string;
+  latencyMs: number;
+  firstTokenMs?: number;
+  streamed?: boolean;
+  parsed: number;
+  /** Characters of working the model produced before answering, if any. */
+  reasoningChars?: number;
+  finishReason?: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  /** The opening of whatever came back, so a wrong shape is visible. */
+  sample?: string;
+}
+
+/**
+ * Asks a credential for two real questions and reports what happened.
+ *
+ * The cheap ping sends five words and asks for 64 tokens: it proves a key
+ * authenticates and a model is routable, and nothing else. It cannot tell you
+ * whether a model can hold the whole system prompt in mind, whether it will
+ * produce JSON, or whether it will finish before the free tier gives up - and
+ * those are the three ways a run actually fails. A provider can sit at "up"
+ * for weeks while every generation stalls.
+ *
+ * So this sends the genuine article, at the smallest size that still exercises
+ * it, and writes nothing to the database. Two questions, one call, no run
+ * record, no rows - a diagnostic an administrator can press twice without
+ * leaving anything behind.
+ */
+export async function trialGeneration(opts: {
+  credential: Parameters<typeof callParamsFor>[0] & { label?: string };
+  model: string;
+}): Promise<TrialOutcome> {
+  const started = Date.now();
+  const providerDef = PROVIDERS[opts.credential.provider] ?? PROVIDERS.custom;
+  const call = await callParamsFor(opts.credential);
+
+  const tokensPerQuestion = emitsReasoning(opts.model, call.tuning?.thinking) ? 2600 : 1400;
+  const ceiling = resolveCeiling(opts.credential as never, opts.model);
+  const maxTokens = tokenBudget(tokensPerQuestion, 2, ceiling ?? providerDef.maxOutputTokens);
+
+  const messages: ChatMessage[] = [
+    { role: 'system', content: DEFAULT_SYSTEM_PROMPT },
+    {
+      role: 'user',
+      content: buildUserPrompt({
+        subject: 'Mathematics',
+        topic: 'Arithmetic',
+        grade: '8',
+        count: 2,
+        marksPerQuestion: 1,
+        avoidImages: true,
+        extraInstructions: 'Keep both questions short. This is a connection test, not a real paper.',
+      }),
+    },
+  ];
+
+  let response;
+  try {
+    response = await chatComplete({
+      ...call,
+      model: opts.model,
+      messages,
+      temperature: 0.2,
+      jsonMode: providerDef.supportsJsonMode,
+      maxTokens,
+    });
+  } catch (err) {
+    // A failure explains itself better with the numbers attached: how long it
+    // took, and how much the model wrote before it gave up on answering.
+    return {
+      ok: false,
+      message: err instanceof Error ? err.message : String(err),
+      latencyMs: Date.now() - started,
+      parsed: 0,
+      ...(err instanceof LlmError
+        ? { reasoningChars: err.reasoningChars, sample: err.body?.slice(0, 400) }
+        : {}),
+    };
+  }
+
+  const base = {
+    latencyMs: Date.now() - started,
+    firstTokenMs: response.firstTokenMs,
+    streamed: response.streamed,
+    reasoningChars: response.reasoningText?.length,
+    finishReason: response.finishReason,
+    promptTokens: response.promptTokens,
+    completionTokens: response.completionTokens,
+    sample: response.text.slice(0, 400),
+  };
+
+  try {
+    const questions = llmResponseSchema.parse(extractJson(response.text)).questions;
+    return {
+      ...base,
+      ok: true,
+      parsed: questions.length,
+      message:
+        `Generated ${questions.length} question${questions.length === 1 ? '' : 's'} in ` +
+        `${(base.latencyMs / 1000).toFixed(1)}s.` +
+        (response.finishReason === 'length' ? ' The reply hit the token limit, so a real batch may be truncated.' : ''),
+    };
+  } catch (err) {
+    return {
+      ...base,
+      ok: false,
+      parsed: 0,
+      message:
+        'The model answered but not in the required format, so a real run would reject the batch. ' +
+        (err instanceof Error ? err.message.slice(0, 200) : ''),
+    };
+  }
+}
+
 export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutcome> {
   const credential = await prisma.apiCredential.findUnique({ where: { id: opts.credentialId } });
   if (!credential || !credential.isActive) {
@@ -595,8 +712,9 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
 
   // A model that thinks out loud spends output tokens before it writes a word
   // of the answer, so it needs a bigger budget for the same number of
-  // questions.
-  const tokensPerQuestion = emitsReasoning(opts.model) ? 2600 : 1400;
+  // questions. The administrator's setting decides when they have one; the
+  // guess from the model name is only the fallback.
+  const tokensPerQuestion = emitsReasoning(opts.model, call.tuning?.thinking) ? 2600 : 1400;
 
   // What this provider will actually accept decides the batch size, not the
   // other way round. Both can change mid-run: a refusal that names the real

@@ -327,6 +327,12 @@ export interface ChatRequest {
    * the API version is a required query parameter that Azure pins per feature.
    */
   azure?: { apiVersion: string };
+
+  /**
+   * The administrator's per-model settings; see llm/tuning.ts. Sampling
+   * defaults, vendor extensions and whether to stream all come from here.
+   */
+  tuning?: import('./tuning.js').ModelTuning;
 }
 
 export interface ChatResponse {
@@ -334,9 +340,30 @@ export interface ChatResponse {
   promptTokens?: number;
   completionTokens?: number;
   latencyMs: number;
+  /**
+   * A thinking model's working, kept apart from the answer.
+   *
+   * Never parsed - it is here so a stalled or empty reply can be explained
+   * ("it thought for 4,000 tokens and never started the answer") instead of
+   * arriving as an unexplained blank.
+   */
+  reasoningText?: string;
+  /** "stop", "length", … as the provider reported it. */
+  finishReason?: string;
+  /** Whether the reply was streamed, for the diagnostics screen. */
+  streamed?: boolean;
+  /** How long until the first token arrived. Streaming only. */
+  firstTokenMs?: number;
 }
 
 export class LlmError extends Error {
+  /**
+   * How much working the model produced before failing, when that is the
+   * explanation. Carried structurally as well as in the message so a screen
+   * can show it as a figure rather than having to read English back out.
+   */
+  reasoningChars?: number;
+
   constructor(message: string, readonly status?: number, readonly body?: string) {
     super(message);
     this.name = 'LlmError';
@@ -369,9 +396,20 @@ function isReasoningModel(model: string): boolean {
  * truncated - which looks like the model ignoring the format. Give them room.
  * See stripReasoning in llm/schema.ts for the other half of this.
  */
-export function emitsReasoning(model: string): boolean {
+export function emitsReasoning(model: string, setting?: 'auto' | 'yes' | 'no'): boolean {
+  if (setting === 'yes') return true;
+  if (setting === 'no') return false;
+
+  // Guessing from the name is wrong in both directions, which is why the
+  // setting exists: nvidia/nemotron-3.5-lightning thinks and its name does not
+  // say so, while thinkingmachines/inkling matches only because of the
+  // vendor's name. The guess is the fallback, not the authority.
+  //
+  // The vendor segment is dropped first so a company name cannot decide how a
+  // model is budgeted.
   const name = model.toLowerCase();
-  return /(^|\/)(o\d|gpt-5)|deepseek-r1|reasoner|qwq|glm-4\.[5-9]|glm-[5-9]|thinking|magistral/.test(name);
+  const bare = name.split('/').pop() ?? name;
+  return /^(o\d|gpt-5)|deepseek-r1|reasoner|qwq|glm-4\.[5-9]|glm-[5-9]|thinking|magistral|nemotron-[3-9]/.test(bare);
 }
 
 export async function chatComplete(req: ChatRequest): Promise<ChatResponse> {
@@ -413,8 +451,14 @@ export async function chatComplete(req: ChatRequest): Promise<ChatResponse> {
 
   const started = Date.now();
   const reasoning = isReasoningModel(req.model);
+  const tuning = req.tuning ?? {};
 
+  // The administrator's extra fields go in first, so anything the server owns
+  // below overwrites them rather than the other way round. safeExtraBody has
+  // already removed model, messages and stream; see llm/tuning.ts.
+  const { safeExtraBody } = await import('./tuning.js');
   const body: Record<string, unknown> = {
+    ...safeExtraBody(tuning.extraBody),
     // Azure ignores this - the deployment in the URL decides - but sending it
     // is harmless and keeps the request readable in a log.
     model: req.model,
@@ -424,33 +468,83 @@ export async function chatComplete(req: ChatRequest): Promise<ChatResponse> {
   if (reasoning) {
     body.max_completion_tokens = req.maxTokens ?? 8000;
   } else {
-    body.temperature = req.temperature ?? 0.4;
+    body.temperature = tuning.temperature ?? req.temperature ?? 0.4;
     body.max_tokens = req.maxTokens ?? 8000;
   }
+  if (tuning.topP !== undefined) body.top_p = tuning.topP;
+  if (tuning.seed !== undefined) body.seed = tuning.seed;
 
-  if (req.jsonMode) body.response_format = { type: 'json_object' };
+  const wantsJson = tuning.jsonMode === 'on' ? true : tuning.jsonMode === 'off' ? false : req.jsonMode;
+  if (wantsJson) body.response_format = { type: 'json_object' };
 
+  // Streaming unless the administrator turned it off. Reading the reply as it
+  // arrives is what makes a slow model distinguishable from a dead one, and it
+  // means a stall is measured from the last token rather than from the start.
+  const streaming = tuning.stream !== false;
+  if (streaming) {
+    body.stream = true;
+    // Where it is supported this puts token counts in the final chunk; the
+    // providers that do not know it ignore an unknown field.
+    body.stream_options = { include_usage: true };
+  }
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    // Azure authenticates with its own header; everyone else takes a
+    // bearer token. Sending Bearer to Azure returns 401 PermissionDenied.
+    ...(isAzure ? { 'api-key': req.apiKey } : { Authorization: `Bearer ${req.apiKey}` }),
+    // OpenRouter asks for these; harmless everywhere else.
+    'HTTP-Referer': `https://${env.PUBLIC_HOST}`,
+    'X-Title': 'Foundation Exam System',
+  };
+
+  return streaming
+    ? streamCompletion({ url, headers, body, started })
+    : wholeCompletion({ url, headers, body, started });
+}
+
+/**
+ * Turns a provider's error body into a sentence an administrator can act on.
+ */
+async function providerError(res: Response, text: string): Promise<never> {
+  let detail = text.slice(0, 600);
+  try {
+    const parsed = JSON.parse(text);
+    detail = parsed?.error?.message ?? parsed?.error ?? parsed?.message ?? detail;
+    if (typeof detail !== 'string') detail = JSON.stringify(detail).slice(0, 600);
+  } catch {
+    /* keep the raw text */
+  }
+  const hint =
+    res.status === 401 ? ' (check the API key in Admin > Settings)' :
+    res.status === 400 && /model/i.test(detail) ? ' (check the model name is exactly right for this provider)' :
+    res.status === 402 ? ' (the provider account is out of credit)' :
+    res.status === 403 ? ' (the key is valid but not allowed to use this model)' :
+    res.status === 404 ? ' (check the model name is exactly right for this provider)' :
+    res.status === 429 ? ' (rate limited - wait a moment and retry)' :
+    res.status === 503 ? ' (the model is loading or temporarily unavailable - retry shortly)' : '';
+  throw new LlmError(`Provider returned ${res.status}${hint}: ${detail}`, res.status, text);
+}
+
+/** The old behaviour: one request, wait for the whole body. */
+async function wholeCompletion(args: {
+  url: string;
+  headers: Record<string, string>;
+  body: Record<string, unknown>;
+  started: number;
+}): Promise<ChatResponse> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), env.LLM_TIMEOUT_MS);
 
   let res: Response;
   try {
-    res = await fetch(url, {
+    res = await fetch(args.url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        // Azure authenticates with its own header; everyone else takes a
-        // bearer token. Sending Bearer to Azure returns 401 PermissionDenied.
-        ...(isAzure ? { 'api-key': req.apiKey } : { Authorization: `Bearer ${req.apiKey}` }),
-        // OpenRouter asks for these; harmless everywhere else.
-        'HTTP-Referer': `https://${env.PUBLIC_HOST}`,
-        'X-Title': 'Foundation Exam System',
-      },
-      body: JSON.stringify(body),
+      headers: args.headers,
+      body: JSON.stringify(args.body),
       signal: controller.signal,
     });
   } catch (err) {
-    clearTimeout(timer);
     if ((err as Error).name === 'AbortError') {
       throw new LlmError(
         `Provider did not respond within ${Math.round(env.LLM_TIMEOUT_MS / 1000)}s. Try a smaller batch or a faster model.`,
@@ -462,26 +556,7 @@ export async function chatComplete(req: ChatRequest): Promise<ChatResponse> {
   }
 
   const text = await res.text();
-
-  if (!res.ok) {
-    let detail = text.slice(0, 600);
-    try {
-      const parsed = JSON.parse(text);
-      detail = parsed?.error?.message ?? parsed?.error ?? parsed?.message ?? detail;
-      if (typeof detail !== 'string') detail = JSON.stringify(detail).slice(0, 600);
-    } catch {
-      /* keep the raw text */
-    }
-    const hint =
-      res.status === 401 ? ' (check the API key in Admin > Settings)' :
-      res.status === 400 && /model/i.test(detail) ? ' (check the model name is exactly right for this provider)' :
-      res.status === 402 ? ' (the provider account is out of credit)' :
-      res.status === 403 ? ' (the key is valid but not allowed to use this model)' :
-      res.status === 404 ? ' (check the model name is exactly right for this provider)' :
-      res.status === 429 ? ' (rate limited - wait a moment and retry)' :
-      res.status === 503 ? ' (the model is loading or temporarily unavailable - retry shortly)' : '';
-    throw new LlmError(`Provider returned ${res.status}${hint}: ${detail}`, res.status, text);
-  }
+  if (!res.ok) await providerError(res, text);
 
   let json: any;
   try {
@@ -490,17 +565,237 @@ export async function chatComplete(req: ChatRequest): Promise<ChatResponse> {
     throw new LlmError('Provider returned a response that was not valid JSON.', res.status, text.slice(0, 2000));
   }
 
-  const content: string | undefined = json?.choices?.[0]?.message?.content;
+  const message = json?.choices?.[0]?.message ?? {};
+  const content: unknown = message.content;
+  const reasoningText: string = typeof message.reasoning_content === 'string' ? message.reasoning_content : '';
+
   if (typeof content !== 'string' || content.trim() === '') {
-    throw new LlmError('Provider returned an empty message.', res.status, text.slice(0, 2000));
+    throw emptyAnswer(reasoningText, json?.choices?.[0]?.finish_reason, res.status, text.slice(0, 2000));
   }
 
   return {
     text: content,
+    reasoningText: reasoningText || undefined,
+    finishReason: json?.choices?.[0]?.finish_reason,
     promptTokens: json?.usage?.prompt_tokens,
     completionTokens: json?.usage?.completion_tokens,
-    latencyMs: Date.now() - started,
+    latencyMs: Date.now() - args.started,
+    streamed: false,
   };
+}
+
+/**
+ * A reply read as it arrives.
+ *
+ * Two things this buys, and the second matters more than the first.
+ *
+ * The timeout stops meaning "the whole answer must be finished within N
+ * seconds" and starts meaning "something must arrive every N seconds". A big
+ * batch from a queued free tier no longer looks identical to a dead endpoint,
+ * and when it does fail the message can say whether anything was ever coming.
+ *
+ * And a thinking model's working arrives in its own field, `reasoning_content`,
+ * rather than inside the answer. Waiting for the whole body and reading only
+ * `message.content` is how a model that spent its entire budget reasoning came
+ * back as an unexplained empty reply.
+ */
+async function streamCompletion(args: {
+  url: string;
+  headers: Record<string, string>;
+  body: Record<string, unknown>;
+  started: number;
+}): Promise<ChatResponse> {
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(), env.LLM_MAX_MS);
+
+  // Reset on every chunk: this is the "nothing is arriving" alarm, not a cap
+  // on how long a long answer may legitimately take.
+  let stall: NodeJS.Timeout | undefined;
+  let stalled = false;
+  const resetStall = () => {
+    if (stall) clearTimeout(stall);
+    stall = setTimeout(() => {
+      stalled = true;
+      controller.abort();
+    }, env.LLM_TIMEOUT_MS);
+  };
+  const done = () => {
+    if (stall) clearTimeout(stall);
+    clearTimeout(deadline);
+  };
+
+  resetStall();
+
+  let res: Response;
+  try {
+    res = await fetch(args.url, {
+      method: 'POST',
+      headers: { ...args.headers, Accept: 'text/event-stream' },
+      body: JSON.stringify(args.body),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    done();
+    if ((err as Error).name === 'AbortError') throw stallError(stalled, 0);
+    throw new LlmError(`Could not reach the provider: ${(err as Error).message}`);
+  }
+
+  if (!res.ok) {
+    done();
+    await providerError(res, await res.text());
+  }
+
+  // A provider may answer a streaming request with an ordinary JSON body -
+  // some do when the request errors late, or when they do not stream at all.
+  const contentType = res.headers.get('content-type') ?? '';
+  if (!res.body || contentType.includes('application/json')) {
+    done();
+    const text = await res.text();
+    let json: any;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      throw new LlmError('Provider returned a response that was not valid JSON.', res.status, text.slice(0, 2000));
+    }
+    const message = json?.choices?.[0]?.message ?? {};
+    if (typeof message.content === 'string' && message.content.trim() !== '') {
+      return {
+        text: message.content,
+        reasoningText: typeof message.reasoning_content === 'string' ? message.reasoning_content : undefined,
+        finishReason: json?.choices?.[0]?.finish_reason,
+        promptTokens: json?.usage?.prompt_tokens,
+        completionTokens: json?.usage?.completion_tokens,
+        latencyMs: Date.now() - args.started,
+        streamed: false,
+      };
+    }
+    throw emptyAnswer('', json?.choices?.[0]?.finish_reason, res.status, text.slice(0, 2000));
+  }
+
+  let content = '';
+  let reasoning = '';
+  let finishReason: string | undefined;
+  let promptTokens: number | undefined;
+  let completionTokens: number | undefined;
+  let firstTokenMs: number | undefined;
+  let buffer = '';
+
+  const decoder = new TextDecoder();
+
+  try {
+    for await (const chunk of res.body as unknown as AsyncIterable<Uint8Array>) {
+      resetStall();
+      buffer += decoder.decode(chunk, { stream: true });
+
+      // SSE events are separated by a blank line; a single chunk may hold
+      // several, or half of one.
+      let cut: number;
+      while ((cut = buffer.search(/\r?\n\r?\n/)) !== -1) {
+        const event = buffer.slice(0, cut);
+        buffer = buffer.slice(cut + (buffer[cut] === '\r' ? 4 : 2));
+
+        for (const line of event.split(/\r?\n/)) {
+          if (!line.startsWith('data:')) continue;
+          const payload = line.slice(5).trim();
+          if (payload === '' || payload === '[DONE]') continue;
+
+          let parsed: any;
+          try {
+            parsed = JSON.parse(payload);
+          } catch {
+            continue; // a keep-alive or a comment; not our business
+          }
+
+          // Some providers report a mid-stream failure as a data event.
+          if (parsed?.error) {
+            const message = parsed.error?.message ?? JSON.stringify(parsed.error);
+            throw new LlmError(`Provider failed part-way through the reply: ${String(message).slice(0, 400)}`);
+          }
+
+          if (parsed?.usage) {
+            promptTokens = parsed.usage.prompt_tokens ?? promptTokens;
+            completionTokens = parsed.usage.completion_tokens ?? completionTokens;
+          }
+
+          const choice = parsed?.choices?.[0];
+          if (!choice) continue;
+          if (choice.finish_reason) finishReason = choice.finish_reason;
+
+          const delta = choice.delta ?? choice.message ?? {};
+          if (typeof delta.reasoning_content === 'string') reasoning += delta.reasoning_content;
+          if (typeof delta.content === 'string' && delta.content !== '') {
+            if (firstTokenMs === undefined) firstTokenMs = Date.now() - args.started;
+            content += delta.content;
+          }
+        }
+      }
+    }
+  } catch (err) {
+    done();
+    if (err instanceof LlmError) throw err;
+    if ((err as Error).name === 'AbortError') throw stallError(stalled, content.length + reasoning.length);
+    throw new LlmError(`The reply stopped part-way through: ${(err as Error).message}`);
+  }
+
+  done();
+
+  if (content.trim() === '') {
+    throw emptyAnswer(reasoning, finishReason, 200, reasoning.slice(0, 2000));
+  }
+
+  return {
+    text: content,
+    reasoningText: reasoning || undefined,
+    finishReason,
+    promptTokens,
+    completionTokens,
+    latencyMs: Date.now() - args.started,
+    streamed: true,
+    firstTokenMs,
+  };
+}
+
+function stallError(stalled: boolean, received: number): LlmError {
+  const seconds = Math.round(env.LLM_TIMEOUT_MS / 1000);
+  if (!stalled) {
+    return new LlmError(
+      `The reply ran past ${Math.round(env.LLM_MAX_MS / 1000)}s and was given up on. Ask for fewer questions at a time.`,
+    );
+  }
+  return new LlmError(
+    received > 0
+      ? `The provider started answering and then went quiet for ${seconds}s. It is overloaded rather than unreachable - retry, or use a faster model.`
+      : `Nothing arrived from the provider for ${seconds}s. Check the model name, or try a smaller batch or a faster model.`,
+  );
+}
+
+/**
+ * An empty answer, explained.
+ *
+ * The common cause on NVIDIA NIM is a thinking model with a budget that ran
+ * out before it started writing: the tokens all went to reasoning_content,
+ * which is not the answer and is never parsed. Saying so is the difference
+ * between a fixable setting and an unexplained blank.
+ */
+function emptyAnswer(reasoning: string, finishReason: string | undefined, status: number, raw: string): LlmError {
+  if (reasoning.trim() !== '') {
+    const err = new LlmError(
+      `The model spent its whole reply thinking (${reasoning.length} characters of working) and never wrote an answer. ` +
+        'Raise the reply limit for this credential, or set Thinking to "no" if the model does not need it.',
+      status,
+      raw,
+    );
+    err.reasoningChars = reasoning.length;
+    return err;
+  }
+  if (finishReason === 'length') {
+    return new LlmError(
+      'The reply hit the token limit before any of the answer arrived. Raise the reply limit, or ask for fewer questions at a time.',
+      status,
+      raw,
+    );
+  }
+  return new LlmError('Provider returned an empty message.', status, raw);
 }
 
 /** Cheap credential check used by the "Test connection" button. */

@@ -29,7 +29,21 @@ const schema = z.object({
     .default('true')
     .transform((v) => v === 'true'),
   BACKUP_RETENTION_DAYS: z.coerce.number().default(7),
+  /**
+   * How long to wait with *nothing arriving* before giving up on a provider.
+   *
+   * With streaming this is a silence alarm rather than a deadline: a long
+   * answer may legitimately take many minutes, but a gap this long means the
+   * provider has stopped sending. Non-streaming calls still treat it as the
+   * whole-request timeout, because there is nothing else to measure.
+   */
   LLM_TIMEOUT_MS: z.coerce.number().default(180_000),
+  /**
+   * The backstop for a streamed reply that keeps trickling for ever. Generous
+   * on purpose: it exists so a run cannot hang indefinitely, not to bound how
+   * long a big batch may take.
+   */
+  LLM_MAX_MS: z.coerce.number().default(900_000),
   PUBLIC_HOST: z.string().default('localhost'),
   UPLOAD_DIR: z.string().default('/app/uploads'),
   BACKUP_DIR: z.string().default('/app/backups'),

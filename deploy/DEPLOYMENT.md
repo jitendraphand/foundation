@@ -329,13 +329,39 @@ OpenAI's reasoning models (`o1`/`o3`/`o4`/`gpt-5` lines) are detected
 automatically and sent `max_completion_tokens` with no `temperature`, which is
 what they require; everything else gets the usual parameters.
 
-**Reasoning models generally** — GLM 4.5/4.6, DeepSeek-R1, QwQ and the rest —
-write their working out before the answer. On providers without a JSON mode
-(NVIDIA NIM, Hugging Face) that working arrives in the reply, so it is stripped
-before the JSON is read, and those models are given roughly twice the token
-budget per question so they do not run out mid-thought. Copy the model id
-exactly as build.nvidia.com shows it; the field is free text, so any id in the
-catalogue works whether or not it is in the suggestion list.
+**Reasoning models generally** — GLM 5.x, Nemotron 3/3.5, DeepSeek-R1, QwQ and
+the rest — write their working out before the answer. Two things follow from
+that, and both are handled for you.
+
+The working may come back in its own field (`reasoning_content`) rather than
+mixed into the answer, and it is read from there and kept apart, so the answer
+is the answer. Where a model instead writes its working inline — providers
+without a JSON mode, chiefly NVIDIA NIM and Hugging Face — it is stripped before
+the JSON is read. Either way those models are given roughly twice the token
+budget per question so they do not run out mid-thought.
+
+Copy the model id exactly as build.nvidia.com shows it; the field is free text,
+so any id in the catalogue works whether or not it is in the suggestion list.
+
+**Replies are streamed.** Every request asks the provider to send the reply as
+it is written. This is not about speed: a large model behind a free endpoint can
+take four or five minutes over fifty questions, and a single silent HTTP request
+that long is indistinguishable from a hang — proxies drop it, and the run
+appears stuck with nothing to say. Streaming turns that into a running signal,
+so the timeout below can be an alarm on *silence* rather than a stopwatch on the
+whole reply.
+
+Two settings, both in `.env` and both optional:
+
+| Setting | Default | What it means |
+|---|---|---|
+| `LLM_TIMEOUT_MS` | `180000` | Give up after this much **silence**. The clock resets on every piece of the reply, so a model that is steadily writing is never cut off. |
+| `LLM_MAX_MS` | `900000` | An absolute ceiling on one call, however chatty. A backstop, not a working limit. |
+
+A provider that ignores the streaming flag and answers with an ordinary JSON
+body is read as usual — nothing to configure. If you have an endpoint that
+cannot cope with streaming at all, turn it off for that credential under **Model
+settings** below.
 
 **Asking for a lot of questions.** A request is split into calls of ten,
 because one reply cannot hold more than that with worked explanations and
@@ -348,6 +374,76 @@ others are kept and the run says which one failed.
 Hugging Face routes to whichever backend provider is fastest by default. To pin
 one, append a suffix to the model id — `openai/gpt-oss-120b:groq` — or use
 `:cheapest` / `:fastest`.
+
+### Checking a model before you rely on it
+
+Each credential row has two checks, and they answer different questions.
+
+**Test connection** is a ping. It proves the key is accepted and the model id
+exists. It does not prove the model can write a question — a model can answer a
+one-word ping and still be useless for a real run, which is exactly what happens
+with a thinking model whose whole reply is working out.
+
+**Try 2 questions** does the real thing: the actual system prompt, the actual
+question format, two questions, parsed the same way a run parses them. Nothing
+is written to the question bank — it is a rehearsal, not a generation. Use this
+one before pointing a class at a model.
+
+What it reports, and what each outcome means:
+
+| It says | What happened | What to do |
+|---|---|---|
+| **generated** | Two questions came back in the required format. | Nothing. The model works. |
+| *never wrote an answer* | The model spent its entire reply thinking. **Thought first** shows how many characters of working. | Raise the **Reply limit** for this credential, or set **Thinking model → No** if it does not need to think. |
+| *not in the required format* | Plenty came back, none of it usable. Open **What it actually sent back**. | Usually a JSON-mode problem: try **JSON mode → Always ask**. Some small models simply cannot hold the format. |
+| *cut off* (**Stopped because: length**) | It ran out of room mid-answer. | Raise the **Reply limit**. |
+| *went quiet* | It started answering and then stopped sending. | The provider is overloaded, not unreachable. Retry, or use a faster model. |
+| *nothing arrived* | No reply at all within the silence window. | The endpoint or the model is down. The provider health panel will usually agree. |
+
+The line also shows how long it took, how long until the first words appeared,
+whether the reply streamed, and how many tokens the reply used — which is what
+tells you whether a model is affordable at fifty questions a run.
+
+### Model settings: when a model needs something different
+
+Vendors hand out a per-model code sample, and the samples differ. NVIDIA's, for
+instance, differ by sampling defaults, by an `extra_body` carrying
+`chat_template_kwargs: {enable_thinking: true}` and a reasoning budget, and by
+whether the answer has to be read out of `reasoning_content`.
+
+None of that is a different protocol, so none of it needs different code, and
+none of it should mean waiting for a new release when a model appears. It is
+settings, and they live on the credential: **Admin → Settings → LLM providers →
+Model settings**.
+
+| Setting | Default | When to touch it |
+|---|---|---|
+| **Thinking model** | Work it out | Whether the reply carries separate working. The guess reads the model id and is usually right; override it when a new model is not recognised, or to switch thinking off on a model that offers the choice. |
+| **JSON mode** | As the provider | Whether to ask for a JSON object. Force it **on** for an OpenAI-compatible endpoint that supports it but is not recognised as doing so; **off** for one that errors when asked. |
+| **Temperature**, **Top P**, **Seed** | the provider's own | Copy from the vendor's sample. A seed makes a run repeatable, which is mostly useful when reporting a problem. |
+| **Read the reply as it arrives** | on | Turn off only for an endpoint that cannot stream. You lose the silence alarm described above. |
+| **Extra request fields** | empty | Anything else from the sample's `extra_body`, as JSON. Merged into every request on this credential. |
+
+The extra fields box takes **JSON, never code**. Nothing typed there is
+executed; it is parsed and merged into the request body. Invalid JSON is refused
+with a reason before it can be saved, and the fields the server owns — `model`,
+`messages`, `stream`, `stream_options` — are refused rather than quietly
+dropped, so a setting can never redirect a request somewhere else.
+
+So the NVIDIA sample that reads
+
+```python
+extra_body={"chat_template_kwargs": {"enable_thinking": True}, "reasoning_budget": 16384},
+temperature=1, top_p=0.95
+```
+
+becomes: Temperature `1`, Top P `0.95`, and in the extra fields box
+
+```json
+{ "chat_template_kwargs": { "enable_thinking": true }, "reasoning_budget": 16384 }
+```
+
+Save, then press **Try 2 questions**.
 
 ### Amazon Bedrock
 
@@ -676,7 +772,10 @@ is unrelated to the key.
 Keys are encrypted with AES-256-GCM before they touch the database and are
 never displayed again. Use **Test connection** to confirm one works before
 spending a real generation call — it names the problem when the saved key
-itself cannot work, rather than passing the provider's error through.
+itself cannot work, rather than passing the provider's error through. A key that
+passes and a model that can still write questions are two different claims: for
+the second, use **Try 2 questions** (see [Checking a model before you rely on
+it](#checking-a-model-before-you-rely-on-it)).
 
 ---
 
@@ -1157,6 +1256,16 @@ Common causes, in order of likelihood:
 
 **"Provider returned 401"** — the API key is wrong or expired. Re-enter it under
 Admin → Settings.
+
+**The connection check is green but generation never finishes.** The two are
+answering different questions: the check sends five words and asks for 64
+tokens, which a model can satisfy while being quite unable to write a question.
+Press **Try 2 questions** on that credential — it runs the real prompt and says
+which of the four things went wrong. Most often it is a thinking model spending
+its whole budget on working out and never starting the answer, which the report
+names outright and which is fixed by raising the **Reply limit** or setting
+**Model settings → Thinking model → No**. See [Checking a model before you rely
+on it](#checking-a-model-before-you-rely-on-it).
 
 **"Could not decrypt stored API key"** — `ENCRYPTION_KEY` in `.env` changed.
 Restore the old value, or re-enter the keys.

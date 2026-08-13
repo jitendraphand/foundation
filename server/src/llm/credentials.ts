@@ -4,6 +4,7 @@ import { LlmError, DEFAULT_AZURE_API_VERSION } from './providers.js';
 import { accessTokenFor, parseServiceAccount, vertexBaseUrl } from './google-auth.js';
 import type { BedrockConfig } from './bedrock.js';
 import type { OciCredentials } from './oci-signer.js';
+import { tuningOf, type ModelTuning } from './tuning.js';
 
 /**
  * Turning a stored credential into the parameters a call needs.
@@ -61,6 +62,13 @@ export interface CallParams {
   oci?: { credentials: OciCredentials; baseUrl?: string };
   dialect?: 'openai' | 'azure' | 'bedrock' | 'oci';
   azure?: { apiVersion: string };
+  /**
+   * The administrator's per-model settings, carried alongside the credentials
+   * so that the connection test and a real run send exactly the same request.
+   * A check that speaks differently from the thing it is checking is worse
+   * than no check.
+   */
+  tuning?: ModelTuning;
 }
 
 /** The secret half of an IAM credential, as stored. */
@@ -93,6 +101,7 @@ export async function callParamsFor(
   credential: Pick<ApiCredential, 'provider' | 'baseUrl' | 'encryptedKey' | 'meta'>,
 ): Promise<CallParams> {
   const secret = decryptSecret(credential.encryptedKey);
+  const tuning = tuningOf(credential);
 
   if (credential.provider === 'azure') {
     const meta = (credential.meta ?? {}) as AzureMeta;
@@ -101,6 +110,7 @@ export async function callParamsFor(
       apiKey: secret,
       dialect: 'azure',
       azure: { apiVersion: meta.apiVersion || DEFAULT_AZURE_API_VERSION },
+      tuning,
     };
   }
 
@@ -115,6 +125,7 @@ export async function callParamsFor(
       // normally it is the regional one derived when the credential was saved.
       baseUrl: credential.baseUrl || vertexBaseUrl(meta.projectId, meta.region),
       apiKey: await accessTokenFor(account),
+      tuning,
     };
   }
 
@@ -131,11 +142,12 @@ export async function callParamsFor(
         credentials: { ...meta, privateKey: secret },
         baseUrl: credential.baseUrl || undefined,
       },
+      tuning,
     };
   }
 
   if (credential.provider !== 'bedrock') {
-    return { baseUrl: credential.baseUrl, apiKey: secret };
+    return { baseUrl: credential.baseUrl, apiKey: secret, tuning };
   }
 
   const meta = bedrockMetaOf(credential);
@@ -148,6 +160,7 @@ export async function callParamsFor(
       baseUrl: credential.baseUrl,
       apiKey: secret,
       bedrock: { region: meta.region, baseUrl: credential.baseUrl, auth: { mode: 'apiKey', apiKey: secret } },
+      tuning,
     };
   }
 
@@ -175,5 +188,6 @@ export async function callParamsFor(
         sessionToken: iam.sessionToken,
       },
     },
+    tuning,
   };
 }

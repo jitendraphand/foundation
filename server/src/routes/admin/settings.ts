@@ -11,6 +11,8 @@ import { getStepUpConfig, setStepUpConfig, DEFAULT_STEP_UP_QUOTA } from '../../l
 import { getImageConfig, setImageConfig } from '../../llm/images.js';
 import { capabilitiesOf, imageProblem, imageSupportOf } from '../../llm/capabilities.js';
 import { callParamsFor, packIamSecret } from '../../llm/credentials.js';
+import { modelTuningSchema, reservedKeysIn } from '../../llm/tuning.js';
+import { trialGeneration } from '../../llm/generate.js';
 import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_TEMPLATE } from '../../llm/prompts.js';
 import { COMMON_TIMEZONES, WINDOW_PRESETS, isValidTimezone, zonedNow, formatMinute } from '../../lib/availability.js';
 import { getSchoolTimezone, setSchoolTimezone } from '../../services/settings.js';
@@ -347,6 +349,12 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
          * express turning the last one off. See llm/capabilities.ts.
          */
         capabilities: z.object({ text: z.boolean(), images: z.boolean() }).optional(),
+        /**
+         * The per-model settings; see llm/tuning.ts. Sent whole, because it is
+         * edited as one form and a partial update could not express clearing a
+         * field back to the default.
+         */
+        tuning: modelTuningSchema.optional(),
 
         region: z.string().trim().max(40).optional(),
         awsAuthMode: z.enum(['apiKey', 'sigv4']).optional(),
@@ -392,6 +400,21 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
       // store a null - resolveCeiling reads the key's presence.
       if (body.maxOutputTokens === null) delete meta.maxOutputTokens;
       else meta.maxOutputTokens = body.maxOutputTokens;
+      metaChanged = true;
+    }
+
+    if (body.tuning) {
+      // Said out loud rather than dropped: an administrator who pasted a whole
+      // request body would otherwise watch half of it vanish without a word.
+      const reserved = reservedKeysIn(body.tuning.extraBody);
+      if (reserved.length > 0) {
+        return reply.code(400).send({
+          error:
+            `Extra request fields cannot include ${reserved.join(', ')} - the server sets ${reserved.length === 1 ? 'that one' : 'those'} ` +
+            'itself from the prompt and the reply limit. Remove them and save again.',
+        });
+      }
+      meta.tuning = body.tuning;
       metaChanged = true;
     }
 
@@ -478,6 +501,34 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
     }
 
     return pingProvider({ ...call, model });
+  });
+
+  /**
+   * The check that matters: two real questions, through the real prompt.
+   *
+   * Slower and more expensive than the ping, so it is a separate button rather
+   * than something that happens on every page load - but it is the only check
+   * that answers the question an administrator is actually asking, which is
+   * "will this thing generate a paper".
+   */
+  app.post('/api/admin/credentials/:id/trial', {
+    config: { rateLimit: { max: 20, timeWindow: '10 minutes' } },
+  }, async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const body = z.object({ model: z.string().max(200).optional() }).parse(request.body ?? {});
+
+    const credential = await prisma.apiCredential.findUnique({ where: { id } });
+    if (!credential) return reply.code(404).send({ error: 'Credential not found.' });
+
+    const model = body.model || credential.defaultModel || PROVIDERS[credential.provider]?.suggestedModels[0];
+    if (!model) return reply.code(400).send({ error: 'Choose a model to test with.' });
+
+    const result = await trialGeneration({ credential, model });
+    await audit(request.user!.sub, 'credential.trial', {
+      entity: 'ApiCredential', entityId: id, ip: request.ip,
+      detail: { model, ok: result.ok, latencyMs: result.latencyMs },
+    });
+    return result;
   });
 
   /**

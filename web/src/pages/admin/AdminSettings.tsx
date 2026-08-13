@@ -151,6 +151,8 @@ interface Credential {
     maxOutputTokens?: number;
     /** What each model was observed to refuse above, learned from a refusal. */
     tokenCeilings?: Record<string, number>;
+    /** Per-model request settings; see the server's llm/tuning.ts. */
+    tuning?: ModelTuning;
   } | null;
   /** Resolved server-side from the ticks and what the provider can do. */
   capabilities: { text: boolean; images: boolean };
@@ -205,6 +207,36 @@ interface HealthRow {
   useAsFallback: boolean;
 }
 
+/**
+ * The per-model knobs. Everything build.nvidia.com's snippets differ by, as
+ * settings rather than as code - see the server's llm/tuning.ts for why this
+ * is emphatically not a box you paste Python into.
+ */
+interface ModelTuning {
+  extraBody?: Record<string, unknown>;
+  temperature?: number;
+  topP?: number;
+  seed?: number;
+  stream?: boolean;
+  thinking?: 'auto' | 'yes' | 'no';
+  jsonMode?: 'auto' | 'on' | 'off';
+}
+
+/** What a real two-question trial reported. */
+interface TrialResult {
+  ok: boolean;
+  message: string;
+  latencyMs: number;
+  firstTokenMs?: number;
+  streamed?: boolean;
+  parsed: number;
+  reasoningChars?: number;
+  finishReason?: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  sample?: string;
+}
+
 interface ProviderDef {
   id: string;
   label: string;
@@ -227,6 +259,9 @@ function Providers() {
   const [testing, setTesting] = useState<string | null>(null);
   const [health, setHealth] = useState<HealthRow[] | null>(null);
   const [checking, setChecking] = useState(false);
+  const [tuningFor, setTuningFor] = useState<string | null>(null);
+  const [trialling, setTrialling] = useState<string | null>(null);
+  const [trials, setTrials] = useState<Record<string, TrialResult | null>>({});
 
   const load = useCallback(async () => {
     try {
@@ -322,12 +357,53 @@ function Providers() {
     }
   };
 
+  /**
+   * A trial that actually generates.
+   *
+   * "Test connection" sends five words and asks for 64 tokens, which proves a
+   * key works and a model is routable. It cannot say whether the model will
+   * hold the whole system prompt, produce the required JSON, or finish before
+   * a free tier gives up - and those are the three ways a real run fails. A
+   * provider can read "up" for weeks while every generation stalls.
+   */
+  const runTrial = async (credential: Credential) => {
+    setTrialling(credential.id);
+    setTrials((prev) => ({ ...prev, [credential.id]: null }));
+    try {
+      const res = await api.post<TrialResult>(`/api/admin/credentials/${credential.id}/trial`, {});
+      setTrials((prev) => ({ ...prev, [credential.id]: res }));
+    } catch (err) {
+      setTrials((prev) => ({
+        ...prev,
+        [credential.id]: {
+          ok: false,
+          parsed: 0,
+          latencyMs: 0,
+          message: err instanceof ApiError ? err.message : 'The trial could not be run.',
+        },
+      }));
+    } finally {
+      setTrialling(null);
+    }
+  };
+
   const setFallback = async (credential: Credential, useAsFallback: boolean) => {
     try {
       await api.patch(`/api/admin/credentials/${credential.id}`, { useAsFallback });
       await load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not change that setting.');
+    }
+  };
+
+  const saveTuning = async (credential: Credential, tuning: ModelTuning) => {
+    setError(null);
+    try {
+      await api.patch(`/api/admin/credentials/${credential.id}`, { tuning });
+      setTuningFor(null);
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not save those settings.');
     }
   };
 
@@ -452,10 +528,55 @@ function Providers() {
                       <button type="button" className="btn-ghost btn-sm" onClick={() => test(credential)} disabled={testing === credential.id}>
                         {testing === credential.id ? 'Testing…' : 'Test connection'}
                       </button>
+                      <button
+                        type="button"
+                        className="btn-ghost btn-sm"
+                        onClick={() => void runTrial(credential)}
+                        disabled={trialling === credential.id}
+                        title="Ask for two real questions through the real prompt. Slower than the connection test, and the only check that proves a run would work."
+                      >
+                        {trialling === credential.id ? 'Generating…' : 'Try 2 questions'}
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-ghost btn-sm"
+                        onClick={() => setTuningFor(tuningFor === credential.id ? null : credential.id)}
+                      >
+                        {tuningFor === credential.id ? 'Close' : 'Model settings'}
+                      </button>
                       <button type="button" className="btn-ghost btn-sm text-bad" onClick={() => remove(credential)}>Delete</button>
                     </td>
                   </tr>
-                ))}
+                ))
+                  .flatMap((row, i) => {
+                    const credential = credentials[i];
+                    const trial = trials[credential.id];
+                    const extras = [row];
+
+                    if (trial) {
+                      extras.push(
+                        <tr key={`${credential.id}-trial`}>
+                          <td colSpan={9} className="bg-surface-sunken">
+                            <TrialReport result={trial} onDismiss={() => setTrials((p) => ({ ...p, [credential.id]: null }))} />
+                          </td>
+                        </tr>,
+                      );
+                    }
+                    if (tuningFor === credential.id) {
+                      extras.push(
+                        <tr key={`${credential.id}-tuning`}>
+                          <td colSpan={9} className="bg-surface-sunken">
+                            <ModelSettings
+                              credential={credential}
+                              onCancel={() => setTuningFor(null)}
+                              onSave={(tuning) => void saveTuning(credential, tuning)}
+                            />
+                          </td>
+                        </tr>,
+                      );
+                    }
+                    return extras;
+                  })}
               </tbody>
             </table>
           </div>
@@ -1160,6 +1281,201 @@ function EditPromptModal({ template, onClose, onSaved }: { template: Template; o
 }
 
 // --- Tags ------------------------------------------------------------------
+
+/**
+ * What a real two-question trial found.
+ *
+ * Reported in more detail than the ping deliberately: when a run is going to
+ * fail, the useful information is *how* - nothing arrived, or plenty arrived
+ * and none of it was the required format, or it arrived and was cut off. Those
+ * three need three different fixes and the old check could not tell them apart.
+ */
+function TrialReport({ result, onDismiss }: { result: TrialResult; onDismiss: () => void }) {
+  const seconds = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
+
+  return (
+    <div className="p-3 space-y-2">
+      <div className="flex items-start gap-2">
+        <Badge tone={result.ok ? 'good' : 'bad'}>{result.ok ? 'generated' : 'failed'}</Badge>
+        <p className="text-xs text-ink-muted flex-1">{result.message}</p>
+        <button type="button" className="btn-ghost btn-sm" onClick={onDismiss}>Dismiss</button>
+      </div>
+
+      <dl className="flex flex-wrap gap-x-5 gap-y-1 text-[11px] text-ink-muted">
+        <div><dt className="inline font-medium">Took: </dt><dd className="inline tabular-nums">{seconds(result.latencyMs)}</dd></div>
+        {result.firstTokenMs !== undefined && (
+          <div>
+            <dt className="inline font-medium">First words after: </dt>
+            <dd className="inline tabular-nums">{seconds(result.firstTokenMs)}</dd>
+          </div>
+        )}
+        <div><dt className="inline font-medium">Streamed: </dt><dd className="inline">{result.streamed ? 'yes' : 'no'}</dd></div>
+        {result.finishReason && (
+          <div><dt className="inline font-medium">Stopped because: </dt><dd className="inline">{result.finishReason}</dd></div>
+        )}
+        {result.completionTokens !== undefined && (
+          <div><dt className="inline font-medium">Reply tokens: </dt><dd className="inline tabular-nums">{result.completionTokens}</dd></div>
+        )}
+        {/* The number that explains an "empty" answer: a model can spend
+            thousands of characters thinking and never start writing. */}
+        {result.reasoningChars ? (
+          <div>
+            <dt className="inline font-medium">Thought first: </dt>
+            <dd className="inline tabular-nums">{result.reasoningChars} characters</dd>
+          </div>
+        ) : null}
+      </dl>
+
+      {result.sample && (
+        <details className="text-xs">
+          <summary className="cursor-pointer text-ink-muted">What it actually sent back</summary>
+          <pre className="mt-1 max-h-40 overflow-auto rounded-lg border border-line bg-white p-2 text-[11px] whitespace-pre-wrap break-words">
+            {result.sample}
+          </pre>
+        </details>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The per-model settings.
+ *
+ * Every vendor hands out a slightly different code sample per model - NVIDIA's
+ * differ by sampling defaults, by an `extra_body` carrying `enable_thinking`
+ * and a reasoning budget, and by whether the reply has to be read out of
+ * `reasoning_content`. None of that is a different protocol, so none of it
+ * needs different code: it is four settings and a JSON object.
+ *
+ * The extra fields box takes JSON, never code. Nothing typed here is executed;
+ * it is parsed and merged into the request body, and the fields the server owns
+ * are refused rather than silently dropped.
+ */
+function ModelSettings({
+  credential, onCancel, onSave,
+}: {
+  credential: Credential;
+  onCancel: () => void;
+  onSave: (tuning: ModelTuning) => void;
+}) {
+  const saved = credential.meta?.tuning ?? {};
+  const [thinking, setThinking] = useState<'auto' | 'yes' | 'no'>(saved.thinking ?? 'auto');
+  const [jsonMode, setJsonMode] = useState<'auto' | 'on' | 'off'>(saved.jsonMode ?? 'auto');
+  const [stream, setStream] = useState(saved.stream !== false);
+  const [temperature, setTemperature] = useState(saved.temperature?.toString() ?? '');
+  const [topP, setTopP] = useState(saved.topP?.toString() ?? '');
+  const [seed, setSeed] = useState(saved.seed?.toString() ?? '');
+  const [extra, setExtra] = useState(saved.extraBody ? JSON.stringify(saved.extraBody, null, 2) : '');
+  const [jsonError, setJsonError] = useState<string | null>(null);
+
+  const num = (raw: string) => (raw.trim() === '' ? undefined : Number(raw));
+
+  const submit = () => {
+    let extraBody: Record<string, unknown> | undefined;
+    if (extra.trim() !== '') {
+      try {
+        const parsed = JSON.parse(extra);
+        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+          setJsonError('That has to be a JSON object — it should start with { and end with }.');
+          return;
+        }
+        extraBody = parsed as Record<string, unknown>;
+      } catch (err) {
+        setJsonError(`That is not valid JSON: ${err instanceof Error ? err.message : 'check the brackets and commas.'}`);
+        return;
+      }
+    }
+    setJsonError(null);
+    onSave({
+      ...(extraBody ? { extraBody } : {}),
+      ...(num(temperature) !== undefined ? { temperature: num(temperature) } : {}),
+      ...(num(topP) !== undefined ? { topP: num(topP) } : {}),
+      ...(num(seed) !== undefined ? { seed: num(seed) } : {}),
+      stream,
+      thinking,
+      jsonMode,
+    });
+  };
+
+  const field = 'input text-xs w-28 tabular-nums';
+
+  return (
+    <div className="p-3 space-y-3">
+      <div>
+        <h4 className="text-xs font-semibold">Model settings for {credential.label}</h4>
+        <p className="text-[11px] text-ink-faint mt-0.5">
+          These are the things a vendor&rsquo;s per-model code sample differs by. Set them here and any model works
+          without a code change.
+        </p>
+      </div>
+
+      <div className="flex flex-wrap items-end gap-3">
+        <label className="text-[11px] text-ink-muted">
+          <span className="block mb-1">Thinking model</span>
+          <select className="input text-xs w-32" value={thinking} onChange={(e) => setThinking(e.target.value as typeof thinking)}>
+            <option value="auto">Work it out</option>
+            <option value="yes">Yes</option>
+            <option value="no">No</option>
+          </select>
+        </label>
+        <label className="text-[11px] text-ink-muted">
+          <span className="block mb-1">JSON mode</span>
+          <select className="input text-xs w-32" value={jsonMode} onChange={(e) => setJsonMode(e.target.value as typeof jsonMode)}>
+            <option value="auto">As the provider</option>
+            <option value="on">Always ask</option>
+            <option value="off">Never ask</option>
+          </select>
+        </label>
+        <label className="text-[11px] text-ink-muted">
+          <span className="block mb-1">Temperature</span>
+          <input className={field} value={temperature} onChange={(e) => setTemperature(e.target.value)} placeholder="default" />
+        </label>
+        <label className="text-[11px] text-ink-muted">
+          <span className="block mb-1">Top P</span>
+          <input className={field} value={topP} onChange={(e) => setTopP(e.target.value)} placeholder="default" />
+        </label>
+        <label className="text-[11px] text-ink-muted">
+          <span className="block mb-1">Seed</span>
+          <input className={field} value={seed} onChange={(e) => setSeed(e.target.value)} placeholder="none" />
+        </label>
+        <label className="flex items-center gap-2 text-[11px] text-ink-muted pb-2">
+          <input type="checkbox" className="accent-series-1" checked={stream} onChange={(e) => setStream(e.target.checked)} />
+          Read the reply as it arrives
+        </label>
+      </div>
+
+      <label className="block">
+        <span className="text-[11px] font-medium text-ink-muted">
+          Extra request fields — JSON, copied from the vendor&rsquo;s <code>extra_body</code>
+        </span>
+        <textarea
+          className="w-full rounded-lg border border-line bg-white p-2 text-xs font-mono"
+          rows={4}
+          spellCheck={false}
+          value={extra}
+          onChange={(e) => { setExtra(e.target.value); setJsonError(null); }}
+          placeholder={'{\n  "chat_template_kwargs": { "enable_thinking": true },\n  "reasoning_budget": 16384\n}'}
+        />
+        {jsonError
+          ? <p className="mt-1 text-[11px] text-bad">{jsonError}</p>
+          : (
+            <p className="mt-1 text-[11px] text-ink-faint">
+              Merged into every request to this credential. Data only — nothing here is ever run as code, and the
+              model, the messages and the streaming flag are set by the server.
+            </p>
+          )}
+      </label>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <button type="button" className="btn-primary btn-sm" onClick={submit}>Save settings</button>
+        <button type="button" className="btn-ghost btn-sm" onClick={onCancel}>Cancel</button>
+        <span className="text-[11px] text-ink-faint">
+          Then press <strong>Try 2 questions</strong> to see whether it worked.
+        </span>
+      </div>
+    </div>
+  );
+}
 
 function Tags() {
   const [tags, setTags] = useState<Tag[]>([]);
