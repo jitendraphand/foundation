@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { signInAsAdmin, importQuestions, sampleQuestions, watchForBreakage } from '../fixtures/people.js';
+import { ADMIN_STATE, importQuestions, sampleQuestions, watchForBreakage } from '../fixtures/people.js';
 
 /**
  * The screen a teacher opens first.
@@ -11,9 +11,10 @@ import { signInAsAdmin, importQuestions, sampleQuestions, watchForBreakage } fro
  * Runs after first-day.spec, which is what puts a result in the database.
  */
 
+test.use({ storageState: ADMIN_STATE });
+
 test('the overview leads with what needs attention, not with charts', async ({ page }) => {
   const problems = watchForBreakage(page);
-  await signInAsAdmin(page);
   await page.goto('/admin');
 
   // Either there is something to report or there is not; both are answers, and
@@ -36,7 +37,6 @@ test('the overview leads with what needs attention, not with charts', async ({ p
 
 test('opening the figures shows the evidence behind them', async ({ page }) => {
   const problems = watchForBreakage(page);
-  await signInAsAdmin(page);
   await page.goto('/admin');
 
   await page.getByRole('button', { name: /Show the figures/ }).click();
@@ -51,7 +51,6 @@ test('opening the figures shows the evidence behind them', async ({ page }) => {
 });
 
 test('the headline numbers say what they are counting', async ({ page }) => {
-  await signInAsAdmin(page);
   await page.goto('/admin');
   await expect(page.getByText(/What needs your attention|Nothing needs your attention/).first())
     .toBeVisible({ timeout: 30_000 });
@@ -69,7 +68,6 @@ test('the headline numbers say what they are counting', async ({ page }) => {
 });
 
 test('a finding names a number and leads somewhere a teacher can act', async ({ page }) => {
-  await signInAsAdmin(page);
 
   // Give it something to find, rather than hoping the earlier tests left
   // something behind: one question imported and not reviewed. A test that

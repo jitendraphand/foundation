@@ -35,10 +35,25 @@ const serverEnv = {
   // One worker: these tests do not measure throughput, and a single process
   // makes a failure's logs readable.
   WEB_CONCURRENCY: '1',
-  // Several children sign in during the run, which is exactly what single
-  // device login is designed to stop.
-  SINGLE_DEVICE_LOGIN: 'false',
+  // Single-device login is deliberately left at its default. The suite signs
+  // the administrator in once and gives each child its own browser context, so
+  // it works under the protection a school actually runs with - and a run that
+  // starts failing here is telling you something true.
 };
+
+/**
+ * Run against something already running, instead of starting our own.
+ *
+ * Set E2E_BASE_URL to point the whole suite at a deployment - the real Docker
+ * Compose stack, most usefully, where nginx serves the assets and Caddy routes
+ * /api. That is the one arrangement `vite preview` cannot stand in for: preview
+ * serves the right bundle from the wrong server, so the SPA fallback, the cache
+ * headers and the gzip config in web/nginx.conf go untested by a normal run.
+ *
+ * When it is set, nothing is started and nothing is torn down: the stack is
+ * somebody else's to bring up, and it is expected to be freshly deployed.
+ */
+const externalOrigin = process.env.E2E_BASE_URL;
 
 export default defineConfig({
   testDir: './tests',
@@ -56,7 +71,7 @@ export default defineConfig({
     : [['list']],
 
   use: {
-    baseURL: `http://127.0.0.1:${WEB_PORT}`,
+    baseURL: externalOrigin ?? `http://127.0.0.1:${WEB_PORT}`,
     // Kept only for a failure: a passing run should leave nothing behind.
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
@@ -66,9 +81,17 @@ export default defineConfig({
 
   projects: [
     {
+      // Signs in as the administrator once and saves the session; see
+      // tests/auth.setup.ts for why that is worth a project of its own.
+      name: 'setup',
+      use: { ...devices['Desktop Chrome'] },
+      testMatch: /auth\.setup\.ts/,
+    },
+    {
       name: 'desktop',
       use: { ...devices['Desktop Chrome'] },
-      testIgnore: /mobile\./,
+      testIgnore: /mobile\.|auth\.setup\./,
+      dependencies: ['setup'],
     },
     {
       // The system is used on phones by most of the children, so the paper is
@@ -82,7 +105,8 @@ export default defineConfig({
     },
   ],
 
-  webServer: [
+  // Nothing to start when we have been pointed at a running deployment.
+  webServer: externalOrigin ? undefined : [
     {
       // Rebuilds the database and then starts the API, in one process. See the
       // note in serve.mjs: Playwright starts webServer before globalSetup, so

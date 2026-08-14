@@ -1,6 +1,6 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import {
-  signInAsAdmin, signUp, myUsername, sampleQuestions,
+  ADMIN_STATE, signIn, signUp, myUsername, sampleQuestions,
   importQuestions, createPaper, addApprovedQuestions, publish, releaseResults,
   watchForBreakage,
 } from '../fixtures/people.js';
@@ -12,16 +12,33 @@ import {
  * The server suite proves each piece; this proves they add up to a school being
  * able to examine a child and give them a mark - which is the only thing this
  * software is for.
+ *
+ * The teacher's tests reuse the one administrator session the setup project
+ * signed in with. The children open their own browser contexts, because signing
+ * up is the thing being tested and because "one account, one device" is on by
+ * default: a second administrator sign-in would revoke the first, which is the
+ * protection working and a test misbehaving.
  */
 
 test.describe.configure({ mode: 'serial' });
+test.use({ storageState: ADMIN_STATE });
 
 let testId: string;
-let studentPassword = 'bluetiger4291';
+const STUDENT_PASSWORD = 'bluetiger4291';
+
+/** A fresh browser, signed in as nobody - which is how a child arrives. */
+async function asAChild(browser: import('@playwright/test').Browser, body: (page: Page) => Promise<void>) {
+  const context = await browser.newContext({ storageState: { cookies: [], origins: [] } });
+  const page = await context.newPage();
+  try {
+    await body(page);
+  } finally {
+    await context.close();
+  }
+}
 
 test('a teacher loads questions, reviews them, and publishes a paper', async ({ page }) => {
   const problems = watchForBreakage(page);
-  await signInAsAdmin(page);
 
   // The documented route when no model is configured, or when the provider is
   // down and the exam is tomorrow. Same validation, same review queue.
@@ -58,60 +75,59 @@ test('a teacher loads questions, reviews them, and publishes a paper', async ({ 
   expect(problems, 'the teacher hit no errors').toEqual([]);
 });
 
-test('a child signs up, sits the paper, and is told nothing about the answers', async ({ page }) => {
-  const problems = watchForBreakage(page);
+test('a child signs up, sits the paper, and is told nothing about the answers', async ({ browser }) => {
+  await asAChild(browser, async (page) => {
+    const problems = watchForBreakage(page);
 
-  await signUp(page, { firstName: 'Meera', lastName: 'Iyer', rollNo: '17', password: studentPassword });
-  const username = await myUsername(page);
-  expect(username, 'the server allocates a username').toBeTruthy();
+    await signUp(page, { firstName: 'Meera', lastName: 'Iyer', rollNo: '17', password: STUDENT_PASSWORD });
+    expect(await myUsername(page), 'the server allocates a username').toBeTruthy();
 
-  await page.goto('/dashboard');
-  await expect(page.getByText('First-day arithmetic').first()).toBeVisible({ timeout: 20_000 });
+    await page.goto('/dashboard');
+    await expect(page.getByText('First-day arithmetic').first()).toBeVisible({ timeout: 20_000 });
 
-  await page.getByRole('button', { name: /Attempt test|Start|Resume/i }).first().click();
-  await page.waitForURL(/attempt/, { timeout: 25_000 });
-  await expect(page.getByText(/A train travels/).first()).toBeVisible({ timeout: 20_000 });
+    await page.getByRole('button', { name: /Attempt test|Start|Resume/i }).first().click();
+    await page.waitForURL(/attempt/, { timeout: 25_000 });
+    await expect(page.getByText(/A train travels/).first()).toBeVisible({ timeout: 20_000 });
 
-  // The single most damaging thing this system could do. Checked on what the
-  // browser was actually given, not on what the page chose to render.
-  const given = await page.evaluate(async () => {
-    const id = location.pathname.split('/').pop();
-    const res = await fetch(`/api/student/attempts/${id}`, { credentials: 'include' });
-    return JSON.stringify(await res.json());
+    // The single most damaging thing this system could do. Checked on what the
+    // browser was actually given, not on what the page chose to render.
+    const given = await page.evaluate(async () => {
+      const id = location.pathname.split('/').pop();
+      const res = await fetch(`/api/student/attempts/${id}`, { credentials: 'include' });
+      return JSON.stringify(await res.json());
+    });
+    expect(given, 'the answer key reached the browser').not.toMatch(/answerKey|correctOptionId/i);
+    expect(given, 'the explanation reached the browser').not.toMatch(/"explanation"/);
+
+    // And nothing in the rendered page either - a key in the DOM is a key a
+    // curious child can read with the developer tools every browser ships.
+    expect(await page.content()).not.toMatch(/correctOptionId/i);
+
+    // --- answer every question and hand it in -------------------------------
+    for (let i = 0; i < 5; i++) {
+      const options = page.locator('main label, main [role=radio], main button').filter({ hasText: /km\/h/ });
+      if (await options.count()) await options.nth(i % (await options.count())).click();
+      const next = page.getByRole('button', { name: /^Next/ });
+      if (await next.count()) await next.first().click();
+    }
+
+    page.on('dialog', (d) => void d.accept());
+    await page.getByRole('button', { name: /Submit/i }).first().click();
+    const confirm = page.getByRole('button', { name: /Submit|Yes/i }).last();
+    if (await confirm.count()) await confirm.click().catch(() => undefined);
+    await page.waitForURL(/dashboard|result/, { timeout: 30_000 });
+
+    // Submitting does not reveal the mark: the teacher releases it, so nobody
+    // learns the answers from a classmate who sat it earlier.
+    const dashboard = await page.evaluate(async () =>
+      JSON.stringify(await (await fetch('/api/student/dashboard', { credentials: 'include' })).json()));
+    expect(dashboard).toMatch(/awaitingResults/);
+    expect(problems, 'the child hit no errors').toEqual([]);
   });
-  expect(given, 'the answer key reached the browser').not.toMatch(/answerKey|correctOptionId/i);
-  expect(given, 'the explanation reached the browser').not.toMatch(/"explanation"/);
-
-  // And nothing in the rendered page either - a key in the DOM is a key a
-  // curious child can read with the developer tools every browser ships.
-  const html = await page.content();
-  expect(html).not.toMatch(/correctOptionId/i);
-
-  // --- answer every question and hand it in ---------------------------------
-  for (let i = 0; i < 5; i++) {
-    const options = page.locator('main label, main [role=radio], main button').filter({ hasText: /km\/h/ });
-    if (await options.count()) await options.nth(i % (await options.count())).click();
-    const next = page.getByRole('button', { name: /^Next/ });
-    if (await next.count()) await next.first().click();
-  }
-
-  page.on('dialog', (d) => void d.accept());
-  await page.getByRole('button', { name: /Submit/i }).first().click();
-  const confirm = page.getByRole('button', { name: /Submit|Yes/i }).last();
-  if (await confirm.count()) await confirm.click().catch(() => undefined);
-  await page.waitForURL(/dashboard|result/, { timeout: 30_000 });
-
-  // Submitting does not reveal the mark: the teacher releases it, so nobody
-  // learns the answers from a classmate who sat it first.
-  const dashboard = await page.evaluate(async () =>
-    JSON.stringify(await (await fetch('/api/student/dashboard', { credentials: 'include' })).json()));
-  expect(dashboard).toMatch(/awaitingResults/);
-  expect(problems, 'the child hit no errors').toEqual([]);
 });
 
-test('the teacher releases the results and the child can see their mark', async ({ page }) => {
+test('the teacher releases the results', async ({ page }) => {
   const problems = watchForBreakage(page);
-  await signInAsAdmin(page);
 
   await page.goto(`/admin/tests/${testId}`);
   await page.getByRole('tab', { name: /Results/ }).click();
@@ -121,33 +137,24 @@ test('the teacher releases the results and the child can see their mark', async 
   expect(problems).toEqual([]);
 });
 
-test('and the child now sees it', async ({ page }) => {
-  const problems = watchForBreakage(page);
-  await signUpOrSignIn(page);
+test('and the child can then see their mark', async ({ browser }) => {
+  await asAChild(browser, async (page) => {
+    const problems = watchForBreakage(page);
 
-  await page.goto('/dashboard');
-  const released = await page.evaluate(async () => {
-    const d = await (await fetch('/api/student/dashboard', { credentials: 'include' })).json();
-    return d.results?.regular?.length ?? 0;
+    await signIn(page, 'meeraiyer', STUDENT_PASSWORD);
+    await page.waitForURL(/dashboard/, { timeout: 30_000 });
+
+    const released = await page.evaluate(async () => {
+      const d = await (await fetch('/api/student/dashboard', { credentials: 'include' })).json();
+      return d.results?.regular?.length ?? 0;
+    });
+    expect(released, 'the released paper is in their results').toBeGreaterThan(0);
+    expect(problems).toEqual([]);
   });
-  expect(released, 'the released paper is in their results').toBeGreaterThan(0);
-  expect(problems).toEqual([]);
-
-  async function signUpOrSignIn(p: typeof page) {
-    // The child from the earlier test; each test gets a fresh browser context,
-    // so they sign in again rather than carrying a session.
-    await p.goto('/');
-    await p.getByRole('button', { name: 'Sign in', exact: true }).click();
-    await p.fill('input[autocomplete="username"]', 'meeraiyer');
-    await p.fill('input[type="password"]', studentPassword);
-    await p.click('button[type="submit"]');
-    await p.waitForURL(/dashboard/, { timeout: 30_000 });
-  }
 });
 
 test('the reports account for the child who sat it', async ({ page }) => {
   const problems = watchForBreakage(page);
-  await signInAsAdmin(page);
 
   // --- who has not sat it ---------------------------------------------------
   await page.goto('/admin/reports');

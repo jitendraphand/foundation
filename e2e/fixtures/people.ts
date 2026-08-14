@@ -5,8 +5,14 @@ import { expect, type Page } from '@playwright/test';
  * every test would otherwise spell them out.
  */
 
-export const ADMIN_USERNAME = 'admin';
-export const ADMIN_PASSWORD = 'E2E_Admin_4471';
+/**
+ * Where the administrator's signed-in session is kept between tests. Written by
+ * the setup project, adopted by the specs that only need an administrator.
+ */
+export const ADMIN_STATE = 'playwright/.auth/admin.json';
+
+export const ADMIN_USERNAME = process.env.E2E_ADMIN_USERNAME ?? 'admin';
+export const ADMIN_PASSWORD = process.env.E2E_ADMIN_PASSWORD ?? 'E2E_Admin_4471';
 
 export async function signIn(page: Page, username: string, password: string) {
   await page.goto('/');
@@ -101,8 +107,17 @@ export function sampleQuestions(count = 5) {
  * clicking through paper construction in every one of them would make each test
  * slow and make a change to the builder break all of them at once. The builder
  * has its own test.
+ *
+ * They call it from inside the page, so the page has to be *on* the app first:
+ * a relative URL has no origin on about:blank, which is where a test starts
+ * when it adopts a saved session instead of signing in.
  */
+async function onTheApp(page: Page) {
+  if (!/^https?:/.test(page.url())) await page.goto('/');
+}
+
 export async function importQuestions(page: Page, questions: unknown[]) {
+  await onTheApp(page);
   const result = await page.evaluate(async (payload) => {
     const res = await fetch('/api/admin/questions/import', {
       method: 'POST',
@@ -119,6 +134,7 @@ export async function importQuestions(page: Page, questions: unknown[]) {
 }
 
 export async function createPaper(page: Page, title: string, opts: { durationMinutes?: number } = {}) {
+  await onTheApp(page);
   return page.evaluate(async ({ title, durationMinutes }) => {
     const res = await fetch('/api/admin/tests', {
       method: 'POST',
@@ -136,6 +152,7 @@ export async function createPaper(page: Page, title: string, opts: { durationMin
 }
 
 export async function addApprovedQuestions(page: Page, testId: string) {
+  await onTheApp(page);
   return page.evaluate(async (id) => {
     const list = await (await fetch('/api/admin/questions?bucket=APPROVED&pageSize=50', { credentials: 'include' })).json();
     const questionIds = list.questions.map((q: { id: string }) => q.id);
@@ -150,6 +167,7 @@ export async function addApprovedQuestions(page: Page, testId: string) {
 }
 
 export async function publish(page: Page, testId: string) {
+  await onTheApp(page);
   const res = await page.evaluate(async (id) => {
     const r = await fetch(`/api/admin/tests/${id}/publish`, {
       method: 'POST',
@@ -163,6 +181,7 @@ export async function publish(page: Page, testId: string) {
 }
 
 export async function releaseResults(page: Page, testId: string) {
+  await onTheApp(page);
   const res = await page.evaluate(async (id) => {
     const r = await fetch(`/api/admin/tests/${id}/release`, {
       method: 'POST',

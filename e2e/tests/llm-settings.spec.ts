@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { signInAsAdmin, watchForBreakage } from '../fixtures/people.js';
+import { ADMIN_STATE, watchForBreakage } from '../fixtures/people.js';
 
 /**
  * The credentials screen, and the two things on it that exist so nobody has to
@@ -14,14 +14,15 @@ import { signInAsAdmin, watchForBreakage } from '../fixtures/people.js';
 const LABEL = 'E2E NVIDIA';
 const FAKE_KEY = 'nvapi-e2e-not-a-real-key-0000000000';
 
+test.use({ storageState: ADMIN_STATE });
 test.describe.configure({ mode: 'serial' });
 
 test('a credential can be added and given a vendor\'s per-model settings', async ({ page }) => {
   const problems = watchForBreakage(page);
-  await signInAsAdmin(page);
 
   // Creating it through the API: the form has its own coverage, and what this
   // file is about starts once a credential exists.
+  await page.goto('/admin/settings');
   const created = await page.evaluate(async ({ label, key }) => {
     const res = await fetch('/api/admin/credentials', {
       method: 'POST',
@@ -59,7 +60,6 @@ test('a credential can be added and given a vendor\'s per-model settings', async
 });
 
 test('invalid JSON is refused with a reason, and so is anything the server owns', async ({ page }) => {
-  await signInAsAdmin(page);
   await page.goto('/admin/settings');
   await page.getByRole('tab', { name: 'LLM providers' }).click();
   await expect(page.getByText(LABEL).first()).toBeVisible({ timeout: 20_000 });
@@ -81,7 +81,6 @@ test('invalid JSON is refused with a reason, and so is anything the server owns'
 
 test('the request preview shows what would be sent, and never the key', async ({ page }) => {
   const problems = watchForBreakage(page);
-  await signInAsAdmin(page);
   await page.goto('/admin/settings');
   await page.getByRole('tab', { name: 'LLM providers' }).click();
   await expect(page.getByText(LABEL).first()).toBeVisible({ timeout: 20_000 });
@@ -111,7 +110,6 @@ test('the request preview shows what would be sent, and never the key', async ({
 });
 
 test('trying two questions against a dead endpoint says what went wrong', async ({ page }) => {
-  await signInAsAdmin(page);
   await page.goto('/admin/settings');
   await page.getByRole('tab', { name: 'LLM providers' }).click();
   await expect(page.getByText(LABEL).first()).toBeVisible({ timeout: 20_000 });

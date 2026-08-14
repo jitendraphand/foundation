@@ -4,6 +4,8 @@ on:
   push:
     branches: ['**']
   pull_request:
+  # The deployment job is gated on main; this is how to run it on a branch.
+  workflow_dispatch:
 
 # A push that supersedes an earlier one cancels it: the school does not need to
 # pay for CI on a commit nobody will look at.
@@ -153,6 +155,84 @@ jobs:
             e2e/playwright-report/
             e2e/test-results/
           retention-days: 7
+
+  deployment:
+    name: The real stack
+    runs-on: ubuntu-latest
+    needs: [browser]
+    # Builds four images and brings the whole thing up, so it is not run on
+    # every push. It is the only job that exercises what a school actually
+    # installs: nginx serving the assets, Caddy routing /api, the API and
+    # Postgres in their own containers, migrations and seed on first boot.
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: e2e/package-lock.json
+
+      - name: Configure the deployment
+        run: |
+          cp .env.example .env
+          # PUBLIC_HOST=localhost and plain HTTP: the documented way to try it
+          # on a machine with no domain name. See docker-compose.local.yml.
+          sed -i 's|^PUBLIC_HOST=.*|PUBLIC_HOST=localhost|' .env
+          sed -i "s|^JWT_SECRET=.*|JWT_SECRET=$(openssl rand -base64 48 | tr -d '\n')|" .env
+          sed -i "s|^ENCRYPTION_KEY=.*|ENCRYPTION_KEY=$(openssl rand -base64 48 | tr -d '\n')|" .env
+          sed -i "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=$(openssl rand -hex 16)|" .env
+          sed -i 's|^ADMIN_PASSWORD=.*|ADMIN_PASSWORD=E2E_Admin_4471|' .env
+          # Deliberately not relaxing anything else. One account, one device
+          # stays on, which the suite is built to work under: the administrator
+          # signs in once and the children get their own browser contexts.
+
+      - name: Bring the stack up
+        run: docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+
+      - name: Wait for it to answer
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost/api/health > /dev/null; then
+              echo "up after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "the stack never became healthy"
+          docker compose ps
+          docker compose logs --tail=80
+          exit 1
+
+      - name: Install the browser
+        run: |
+          npm ci --prefix e2e
+          npx --prefix e2e playwright install --with-deps chromium
+
+      # Against the deployment rather than a preview server, which is what makes
+      # the checks in served.spec.ts - the SPA fallback, the cache headers, the
+      # compression, the security headers - actually run.
+      - name: Browser tests against the deployment
+        run: npm test --prefix e2e
+        env:
+          E2E_BASE_URL: http://localhost
+
+      - name: What the containers said, if it failed
+        if: failure()
+        run: docker compose logs --tail=200
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report-stack
+          path: |
+            e2e/playwright-report/
+            e2e/test-results/
+          retention-days: 7
+
+      - name: Stop the stack
+        if: always()
+        run: docker compose down -v
 
   migrations:
     name: Migrations match the schema
