@@ -70,6 +70,22 @@ export function sanitizeSvg(input: string): string {
     if (!SVG_ALLOWED_TAGS.has(tag)) return '';
     if (slash) return `</${tag}>`;
 
+    /**
+     * Whether this tag closed itself.
+     *
+     * The attribute group above is greedy and `[^>"']` matches a slash, so it
+     * swallows the trailing one and the `selfClose` group is always empty. That
+     * turned every `<line ... />` into `<line ...>`, and because the markup is
+     * handed to the DOM with innerHTML - where an unclosed SVG element stays
+     * open - each following element became a child of the one before it.
+     *
+     * A velocity-time graph came out as a single horizontal line: sixteen
+     * siblings became a chain ten deep, and the dashes from a guide line were
+     * inherited by all seven labels. So the slash is recovered from the end of
+     * the attributes instead.
+     */
+    const closesItself = Boolean(selfClose) || /\/\s*$/.test(String(rawAttrs));
+
     const attrs: string[] = [];
     const attrRe = /([A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*("([^"]*)"|'([^']*)')/g;
     let m: RegExpExecArray | null;
@@ -82,7 +98,7 @@ export function sanitizeSvg(input: string): string {
       if (/\burl\s*\(\s*['"]?\s*(https?:)?\/\//i.test(value)) continue;
       attrs.push(`${name}="${value.replace(/"/g, '&quot;')}"`);
     }
-    return `<${tag}${attrs.length ? ' ' + attrs.join(' ') : ''}${selfClose ? '/' : ''}>`;
+    return `<${tag}${attrs.length ? ' ' + attrs.join(' ') : ''}${closesItself ? '/' : ''}>`;
   });
 
   if (!/^<svg[\s>]/i.test(svg)) throw new Error('SVG block did not survive sanitisation.');

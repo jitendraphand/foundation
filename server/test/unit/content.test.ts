@@ -51,6 +51,53 @@ describe('filtering an SVG a model produced', () => {
     assert.doesNotMatch(out, /evil\.example/);
   });
 
+  test('a self-closing element stays self-closing', () => {
+    // The bug this guards, and it destroyed whole diagrams: the attribute
+    // pattern is greedy and swallowed the trailing slash, so `<line ... />`
+    // came out as `<line ...>`. The markup is handed to the DOM with
+    // innerHTML, where an unclosed SVG element stays open, so every following
+    // element became a child of the one before it.
+    const out = sanitizeSvg(
+      '<svg viewBox="0 0 100 100">'
+      + '<line x1="0" y1="0" x2="10" y2="10" stroke="#111"/>'
+      + '<circle cx="5" cy="5" r="2" fill="#111"/>'
+      + '</svg>',
+    );
+    assert.equal((out.match(/\/>/g) ?? []).length, 2, `both should close themselves: ${out}`);
+    assert.doesNotMatch(out, /<line[^>]*[^/]>\s*<circle/, 'the line was left open');
+  });
+
+  test('a velocity-time graph survives with every mark a sibling', () => {
+    // The real drawing that found it. Sixteen siblings became a chain ten deep,
+    // and it rendered as a single horizontal line.
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="800" height="500" viewBox="0 0 800 500">
+      <!-- Axes -->
+      <line x1="90" y1="430" x2="730" y2="430" stroke="black" stroke-width="3"/>
+      <line x1="90" y1="430" x2="90" y2="60" stroke="black" stroke-width="3"/>
+      <polygon points="730,430 715,422 715,438" fill="black"/>
+      <line x1="90" y1="340" x2="650" y2="120" stroke="#1769d1" stroke-width="5"/>
+      <circle cx="90" cy="340" r="7" fill="#1769d1"/>
+      <line x1="650" y1="120" x2="650" y2="430" stroke="black" stroke-width="2" stroke-dasharray="8,8"/>
+      <text x="735" y="440" font-size="24" font-style="italic">t</text>
+      <text x="350" y="235" font-size="24" fill="#1769d1" transform="rotate(-21 350 235)">slope = a</text>
+    </svg>`;
+    const out = sanitizeSvg(svg);
+
+    // Six drawing marks, each closing itself, so none of them contains another.
+    assert.equal((out.match(/<line\b[^>]*\/>/g) ?? []).length, 4);
+    assert.equal((out.match(/<polygon\b[^>]*\/>/g) ?? []).length, 1);
+    assert.equal((out.match(/<circle\b[^>]*\/>/g) ?? []).length, 1);
+
+    // The attributes a graph is made of survive: dashes for the guide lines,
+    // the rotation on the slope label, the italic on the axis names.
+    assert.match(out, /stroke-dasharray="8,8"/);
+    assert.match(out, /transform="rotate\(-21 350 235\)"/);
+    assert.match(out, /font-style="italic"/);
+    assert.match(out, /text-anchor|font-size="24"/);
+    assert.match(out, /viewBox="0 0 800 500"/);
+    assert.match(out, /slope = a/);
+  });
+
   test('text and labels are kept, because a diagram without them is useless', () => {
     const out = sanitizeSvg('<svg viewBox="0 0 100 100"><text x="10" y="20" font-size="12">ABC</text></svg>');
     assert.match(out, /ABC/);
