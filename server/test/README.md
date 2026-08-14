@@ -53,6 +53,15 @@ were written before the fix and watched to fail:
 | `unit/csv.test.ts` | `=HYPERLINK(...)` as a child's first name, becoming code on a teacher's laptop when they open the class list. That one was real. |
 | `unit/content.test.ts` | Script tags, event handlers and `foreignObject` in model-generated SVG, rendered on a page where a teacher is signed in. |
 
+## What is not here
+
+Browser journeys. Those live in [`../../e2e`](../../e2e/README.md) — Playwright,
+a real Chromium, against the built app: a teacher publishing a paper, a child
+sitting it on a phone, the mark being released. They are kept separate because
+they need a browser and a build, and because they answer a different question:
+this suite asks whether each part is right, that one asks whether the parts add
+up to a school being able to run an exam.
+
 ## Writing another one
 
 `test/helpers/factories.ts` builds the smallest school that can be examined —

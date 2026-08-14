@@ -89,6 +89,71 @@ jobs:
       - name: Build
         run: npm run build
 
+  browser:
+    name: Browser
+    runs-on: ubuntu-latest
+    # No point driving a browser at a build that does not compile.
+    needs: [server, web]
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      # The run drops and recreates this database itself; see e2e/fixtures/serve.mjs.
+      E2E_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/foundation_e2e
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # psql, for the drop-and-recreate the run does before starting the API.
+      - name: Install the postgres client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Install
+        run: |
+          npm ci --prefix server
+          npm ci --prefix web
+          npm ci --prefix e2e
+
+      # The browser tests run against the built app and the built API, not
+      # against dev servers, so both have to exist first.
+      - name: Build
+        run: |
+          npx --prefix server prisma generate
+          npm run build --prefix server
+          npm run build --prefix web
+
+      - name: Install Chromium
+        run: npx --prefix e2e playwright install --with-deps chromium
+
+      - name: Browser tests
+        run: npm test --prefix e2e
+
+      # Only written when something failed: trace, video and screenshot for
+      # each one, which is the difference between "CI is red" and knowing why.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: |
+            e2e/playwright-report/
+            e2e/test-results/
+          retention-days: 7
+
   migrations:
     name: Migrations match the schema
     runs-on: ubuntu-latest
