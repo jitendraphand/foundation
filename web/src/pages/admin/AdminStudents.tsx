@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, ApiError } from '../../lib/api';
+import { suggestPassword } from '../../lib/passwords';
 import { Alert, Badge, Card, EmptyState, Field, Modal, PageLoader, formatDate, humanizeTag } from '../../components/ui';
 import { AccuracyMeter } from '../../components/charts';
 import { useAuth } from '../../lib/auth';
@@ -278,11 +279,7 @@ function CreateStudentModal({ onClose, onCreated }: { onClose: () => void; onCre
     api.get<typeof classes>('/api/auth/classes').then(setClasses).catch(() => undefined);
   }, []);
 
-  const suggest = () => {
-    const words = ['blue', 'star', 'moon', 'lion', 'tree', 'wave', 'gold', 'rain'];
-    const pick = () => words[Math.floor(Math.random() * words.length)];
-    setForm((f) => ({ ...f, password: `${pick()}${pick()}${Math.floor(100 + Math.random() * 900)}` }));
-  };
+  const suggest = () => setForm((f) => ({ ...f, password: suggestPassword() }));
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -529,12 +526,7 @@ function ResetPasswordModal({ user, onClose, onDone }: { user: UserRow; onClose:
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const suggest = () => {
-    // Readable temporary password: two short words plus digits.
-    const words = ['blue', 'star', 'moon', 'lion', 'tree', 'wave', 'gold', 'rain'];
-    const pick = () => words[Math.floor(Math.random() * words.length)];
-    setPassword(`${pick()}${pick()}${Math.floor(100 + Math.random() * 900)}`);
-  };
+  const suggest = () => setPassword(suggestPassword());
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();

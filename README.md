@@ -481,6 +481,10 @@ Sign in as `admin` with the `ADMIN_PASSWORD` from your `.env`. On a real
 server `deploy/bootstrap.sh` generates one for you and prints it; the example
 value `foundation_123` is for a laptop trial only.
 
+Change it from **Change password** in the admin header. That value in `.env` is
+read once, when the first administrator is created on an empty database, so
+editing it later has no effect.
+
 ---
 
 ## Repository layout

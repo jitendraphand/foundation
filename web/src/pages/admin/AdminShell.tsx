@@ -51,6 +51,18 @@ export default function AdminShell() {
 
           <div className="flex items-center gap-3 shrink-0">
             <span className="hidden sm:block text-xs text-ink-muted">{user?.username}</span>
+            {/*
+              The only route to it. An administrator signing in with the password
+              from .env had nowhere to change it: the seed applies that password
+              once, on the first boot of an empty database, and never looks at it
+              again - so editing .env afterwards does nothing and this link is
+              what actually replaces it.
+            */}
+            <Link to="/change-password" className="btn-ghost btn-sm">
+              {/* Two words is too many beside Sign out on a phone. */}
+              <span className="sm:hidden">Password</span>
+              <span className="hidden sm:inline">Change password</span>
+            </Link>
             <button
               type="button"
               className="btn-ghost btn-sm"

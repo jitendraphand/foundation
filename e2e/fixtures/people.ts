@@ -112,7 +112,7 @@ export function sampleQuestions(count = 5) {
  * a relative URL has no origin on about:blank, which is where a test starts
  * when it adopts a saved session instead of signing in.
  */
-async function onTheApp(page: Page) {
+export async function onTheApp(page: Page) {
   if (!/^https?:/.test(page.url())) await page.goto('/');
 }
 

@@ -24,6 +24,7 @@ export interface Caller {
   get: (url: string) => Promise<Reply>;
   post: (url: string, body?: unknown) => Promise<Reply>;
   patch: (url: string, body?: unknown) => Promise<Reply>;
+  del: (url: string) => Promise<Reply>;
 }
 
 export interface Reply {
@@ -37,7 +38,7 @@ export async function testApi(_prisma: PrismaClient): Promise<TestApi> {
   await app.ready();
 
   const request = (cookie: string) => {
-    const call = async (method: 'GET' | 'POST' | 'PATCH', url: string, payload?: unknown): Promise<Reply> => {
+    const call = async (method: 'GET' | 'POST' | 'PATCH' | 'DELETE', url: string, payload?: unknown): Promise<Reply> => {
       // Only declare a JSON body when there is one: fastify rejects a request
       // that announces application/json and then sends nothing, which several
       // of these routes legitimately do (start, submit).
@@ -55,6 +56,7 @@ export async function testApi(_prisma: PrismaClient): Promise<TestApi> {
       get: (url: string) => call('GET', url),
       post: (url: string, body?: unknown) => call('POST', url, body),
       patch: (url: string, body?: unknown) => call('PATCH', url, body),
+      del: (url: string) => call('DELETE', url),
     };
   };
 

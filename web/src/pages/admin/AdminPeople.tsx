@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, ApiError } from '../../lib/api';
+import { suggestPassword } from '../../lib/passwords';
 import { useAuth } from '../../lib/auth';
 import { Alert, Badge, Card, EmptyState, Field, Modal, PageLoader, Spinner, formatDate } from '../../components/ui';
 import { PermissionPicker, PermissionSummary } from '../../components/PermissionPicker';
@@ -22,6 +23,7 @@ export default function AdminPeople() {
   const [notice, setNotice] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [editing, setEditing] = useState<Administrator | null>(null);
+  const [resetting, setResetting] = useState<Administrator | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -93,7 +95,18 @@ export default function AdminPeople() {
                     <td><PermissionSummary permissions={admin.permissions} catalogue={catalogue} /></td>
                     <td className="text-xs text-ink-muted whitespace-nowrap">{formatDate(admin.lastLoginAt, true)}</td>
                     <td><Badge tone={admin.isActive ? 'good' : 'neutral'}>{admin.isActive ? 'active' : 'deactivated'}</Badge></td>
-                    <td className="text-right">
+                    <td className="text-right whitespace-nowrap">
+                      {/*
+                        Your own password is changed, not reset: that asks for
+                        the current one and keeps you signed in, where a reset
+                        would sign you out of this very session and then demand a
+                        new password at the door. The server refuses it too.
+                      */}
+                      {admin.id !== user?.id && (
+                        <button type="button" className="btn-ghost btn-sm" onClick={() => setResetting(admin)}>
+                          Reset password
+                        </button>
+                      )}
                       <button type="button" className="btn-ghost btn-sm" onClick={() => setEditing(admin)}>
                         Edit privileges
                       </button>
@@ -113,6 +126,18 @@ export default function AdminPeople() {
           onClose={() => setCreating(false)}
           onCreated={async (message) => {
             setCreating(false);
+            setNotice(message);
+            await load();
+          }}
+        />
+      )}
+
+      {resetting && (
+        <ResetAdminPasswordModal
+          admin={resetting}
+          onClose={() => setResetting(null)}
+          onDone={async (message) => {
+            setResetting(null);
             setNotice(message);
             await load();
           }}
@@ -156,11 +181,7 @@ function CreateAdminModal({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const suggest = () => {
-    const words = ['blue', 'star', 'moon', 'lion', 'tree', 'wave', 'gold', 'rain'];
-    const pick = () => words[Math.floor(Math.random() * words.length)];
-    setForm((f) => ({ ...f, password: `${pick()}${pick()}${Math.floor(100 + Math.random() * 900)}` }));
-  };
+  const suggest = () => setForm((f) => ({ ...f, password: suggestPassword() }));
 
   const derived = `${form.firstName}${form.lastName}`.toLowerCase().replace(/[^a-z0-9]/g, '');
 
@@ -237,6 +258,84 @@ function CreateAdminModal({
           <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
           <button type="submit" className="btn-primary" disabled={busy || permissions.length === 0}>
             {busy ? <Spinner label="Creating" /> : 'Create administrator'}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+// --- Reset a colleague's password ------------------------------------------
+
+/**
+ * For the administrator who has forgotten theirs, or the one who has left.
+ *
+ * Without this the only way out was the database: administrators never appear
+ * in the Students list, which is where the reset for everybody else lives, so
+ * their account was unreachable from every screen in the app.
+ */
+function ResetAdminPasswordModal({
+  admin, onClose, onDone,
+}: {
+  admin: Administrator;
+  onClose: () => void;
+  onDone: (message: string) => void;
+}) {
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api.post<{ message: string }>(`/api/admin/users/${admin.id}/reset-password`, {
+        newPassword: password,
+      });
+      onDone(`${res.message} Temporary password: ${password}`);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not reset that password.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal open onClose={onClose} title={`Reset password for ${admin.username}`}>
+      <form onSubmit={submit} className="space-y-4">
+        {error && <Alert tone="error">{error}</Alert>}
+
+        <p className="text-sm text-ink-muted">
+          Set a temporary password and give it to {admin.firstName} in person. They will be asked to choose their own
+          the next time they sign in.
+        </p>
+
+        <Alert tone="warn">
+          This signs {admin.firstName} out everywhere immediately. Anyone holding the old password loses access, which
+          is the point if the account has been compromised.
+        </Alert>
+
+        <Field label="Temporary password" required>
+          <div className="flex gap-2">
+            <input
+              className="input font-mono"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              minLength={8}
+              autoFocus
+            />
+            <button type="button" className="btn-secondary btn-sm shrink-0" onClick={() => setPassword(suggestPassword())}>
+              Suggest
+            </button>
+          </div>
+        </Field>
+
+        <div className="flex justify-end gap-2">
+          <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
+          <button type="submit" className="btn-primary" disabled={busy}>
+            {busy ? <Spinner label="Resetting" /> : 'Reset password'}
           </button>
         </div>
       </form>

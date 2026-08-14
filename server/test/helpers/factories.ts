@@ -32,10 +32,13 @@ export async function makeAdmin(prisma: PrismaClient, permissions: Permission[] 
       permissions,
       firstName: 'Test',
       lastName: 'Admin',
-      grade: '',
-      division: '',
-      divisions: [],
-      rollNo: '',
+      // As the real create does: staff sit outside every student filter, and
+      // the roll number is unique per (grade, division) - so two of them in one
+      // test collided until this stopped being the empty string.
+      grade: 'STAFF',
+      division: 'STAFF',
+      divisions: ['STAFF'],
+      rollNo: `ADM-${unique()}`,
       dateOfBirth: new Date(1990, 0, 1),
       mustChangePassword: false,
     },

@@ -82,6 +82,14 @@ const LABELABLE = new Set(['input', 'select', 'textarea']);
  * the fragment. Anything that is not a form control - a group of checkboxes,
  * a custom picker - is returned untouched and gets no `htmlFor`, since a label
  * pointing at a div names nothing.
+ *
+ * Plain wrappers are looked through as well. Seven of the ninety-nine fields in
+ * this app render `<div className="flex gap-2"><input /><button>Suggest</button>
+ * </div>` or similar - every temporary-password box among them - and stopping at
+ * that div left the label naming nothing, which is the exact failure the id
+ * above exists to prevent. Custom components are still left alone: their
+ * children here are the arguments they were given, not the markup they will
+ * render, so there is nothing reliable to find inside one.
  */
 function wireControl(node: ReactNode, id: string): { node: ReactNode; controlId?: string } {
   // Several children arrive as a plain array, not a fragment - which is the
@@ -97,6 +105,13 @@ function wireControl(node: ReactNode, id: string): { node: ReactNode; controlId?
   }
 
   if (element.type === Fragment) return wireList(Children.toArray(element.props.children), id);
+
+  // A wrapper the field put its control inside. Not <label>: a control already
+  // wrapped in one has a name, and pointing a second label at it gives it two.
+  if (typeof element.type === 'string' && element.type !== 'label') {
+    const found = wireList(Children.toArray(element.props.children), id);
+    if (found.controlId) return { node: cloneElement(element, undefined, found.node), controlId: found.controlId };
+  }
 
   return { node };
 }

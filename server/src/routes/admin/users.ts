@@ -1,4 +1,4 @@
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../db.js';
@@ -42,6 +42,30 @@ async function unknownDivisions(codes: string[]): Promise<string[]> {
     select: { code: true },
   });
   return codes.filter((c) => !found.some((f) => f.code === c));
+}
+
+/**
+ * The account a write is aimed at, or the reason this administrator may not
+ * have it.
+ *
+ * `users.manage` means "enrol and look after students" - it is what the Office
+ * preset grants a school secretary, alongside nothing else but reporting. Every
+ * endpoint below takes a bare user id, and an administrator's id is the same
+ * shape as a child's, so without this the secretary could point the reset at
+ * the founding administrator, choose its new password, and sign in holding
+ * every privilege in the system. Editing, deactivating and deleting one are the
+ * same story more slowly.
+ *
+ * Administrators are managed under `admins.manage`. Somebody without it is told
+ * the account does not exist rather than that they may not touch it: whether a
+ * particular id belongs to an administrator is not a fact worth confirming to
+ * someone who has just tried to reach one.
+ */
+async function accountToWrite(request: FastifyRequest, id: string) {
+  const user = await prisma.user.findFirst({ where: { id, deletedAt: null } });
+  if (!user) return null;
+  if (user.role === 'ADMIN' && !(request.user?.permissions ?? []).includes('admins.manage')) return null;
+  return user;
 }
 
 export default async function adminUserRoutes(app: FastifyInstance) {
@@ -118,7 +142,9 @@ export default async function adminUserRoutes(app: FastifyInstance) {
         createdAt: true, mustChangePassword: true,
       },
     });
-    if (!user) return reply.code(404).send({ error: 'Student not found.' });
+    if (!user || (user.role === 'ADMIN' && !(request.user?.permissions ?? []).includes('admins.manage'))) {
+      return reply.code(404).send({ error: 'Account not found.' });
+    }
 
     const attempts = await prisma.attempt.findMany({
       where: { userId: id, status: { in: ['SUBMITTED', 'AUTO_SUBMITTED'] } },
@@ -167,8 +193,8 @@ export default async function adminUserRoutes(app: FastifyInstance) {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = editSchema.parse(request.body);
 
-    const before = await prisma.user.findFirst({ where: { id, deletedAt: null } });
-    if (!before) return reply.code(404).send({ error: 'Student not found.' });
+    const before = await accountToWrite(request, id);
+    if (!before) return reply.code(404).send({ error: 'Account not found.' });
 
     if (body.grade) {
       const g = await prisma.schoolClass.findUnique({ where: { kind_code: { kind: 'GRADE', code: body.grade } } });
@@ -296,8 +322,8 @@ export default async function adminUserRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: 'You cannot deactivate your own account.' });
     }
 
-    const user = await prisma.user.findFirst({ where: { id, deletedAt: null } });
-    if (!user) return reply.code(404).send({ error: 'Student not found.' });
+    const user = await accountToWrite(request, id);
+    if (!user) return reply.code(404).send({ error: 'Account not found.' });
 
     if (!isActive && user.permissions.includes('admins.manage')) {
       const holders = await prisma.user.count({
@@ -327,8 +353,15 @@ export default async function adminUserRoutes(app: FastifyInstance) {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = z.object({ newPassword: z.string().min(1).max(200) }).parse(request.body);
 
-    const user = await prisma.user.findFirst({ where: { id, deletedAt: null } });
-    if (!user) return reply.code(404).send({ error: 'Student not found.' });
+    // Resetting your own would sign you out of the session you are doing it
+    // from and then demand you choose the password again at the door. Changing
+    // it is the path for that, and it asks for the current one first.
+    if (id === request.user!.sub) {
+      return reply.code(400).send({ error: 'To change your own password, use Change password.' });
+    }
+
+    const user = await accountToWrite(request, id);
+    if (!user) return reply.code(404).send({ error: 'Account not found.' });
 
     const policy = checkPassword(body.newPassword, {
       username: user.username, firstName: user.firstName, lastName: user.lastName,
@@ -373,8 +406,8 @@ export default async function adminUserRoutes(app: FastifyInstance) {
 
     if (id === request.user!.sub) return reply.code(400).send({ error: 'You cannot delete your own account.' });
 
-    const user = await prisma.user.findFirst({ where: { id, deletedAt: null } });
-    if (!user) return reply.code(404).send({ error: 'Student not found.' });
+    const user = await accountToWrite(request, id);
+    if (!user) return reply.code(404).send({ error: 'Account not found.' });
 
     // Never leave the system with nobody able to grant privileges again.
     if (user.permissions.includes('admins.manage')) {

@@ -218,7 +218,15 @@ run — the password is generated per machine, not a default, so it is the one o
 your terminal and nowhere else. If you have lost it, it is also in `.env` on the
 server (`grep ADMIN_PASSWORD .env`).
 
-Then **change it** from the footer link to something you will remember.
+Then **change it** to something you will remember: **Change password** in the
+admin header, top right. Editing `ADMIN_PASSWORD` in `.env` afterwards will not
+do it — that value is read once, when the first administrator is created on an
+empty database, and never again.
+
+If an administrator later forgets their password, another one holding *Manage
+administrators* resets it from **Administrators → Reset password**. There is no
+self-service reset, by design: the school has no mail server to send one
+through, and the people involved work in the same building.
 
 ---
 
