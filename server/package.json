@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
@@ -11,7 +13,11 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",
     "prisma:dev": "prisma migrate dev",
-    "seed": "node dist/seed.js"
+    "seed": "node dist/seed.js",
+    "test": "npm run test:unit && npm run test:db",
+    "test:unit": "node --import tsx --import ./test/helpers/setup.ts --test 'test/unit/**/*.test.ts' 'test/llm/**/*.test.ts'",
+    "test:db": "node --import tsx --import ./test/helpers/setup.ts --test --test-concurrency=1 'test/db/**/*.test.ts'",
+    "test:watch": "node --import tsx --import ./test/helpers/setup.ts --test --watch 'test/**/*.test.ts'"
   },
   "dependencies": {
     "@fastify/cookie": "^9.3.1",
