@@ -31,17 +31,32 @@ import { prisma } from '../db.js';
 export const SCHEMA_VERSION = 4;
 export const APP_VERSION = '1.3.0';
 
-function run(cmd: string, args: string[], opts: { env?: NodeJS.ProcessEnv; cwd?: string } = {}): Promise<void> {
+function run(cmd: string, args: string[], opts: { env?: NodeJS.ProcessEnv; cwd?: string; timeoutMs?: number } = {}): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(cmd, args, { env: { ...process.env, ...opts.env }, cwd: opts.cwd, stdio: ['ignore', 'pipe', 'pipe'] });
     let stderr = '';
+    let stdout = '';
+    // Must drain both stdout and stderr to avoid blocking when the child
+    // writes a lot (e.g., pg_restore verbose output). Not draining stdout
+    // caused the 5-minute hang → Caddy 502.
+    child.stdout.on('data', (d) => {
+      stdout += d.toString();
+    });
     child.stderr.on('data', (d) => {
       stderr += d.toString();
     });
-    child.on('error', (err) => reject(new Error(`${cmd} could not be started: ${err.message}`)));
+    const timeout = opts.timeoutMs ? setTimeout(() => {
+      child.kill('SIGTERM');
+      reject(new Error(`${cmd} timed out after ${opts.timeoutMs}ms: ${stderr.slice(0, 1000)}`));
+    }, opts.timeoutMs) : null;
+    child.on('error', (err) => {
+      if (timeout) clearTimeout(timeout);
+      reject(new Error(`${cmd} could not be started: ${err.message}`));
+    });
     child.on('close', (code) => {
+      if (timeout) clearTimeout(timeout);
       if (code === 0) resolve();
-      else reject(new Error(`${cmd} exited with code ${code}: ${stderr.slice(0, 2000)}`));
+      else reject(new Error(`${cmd} exited with code ${code}: ${(stderr || stdout).slice(0, 2000)}`));
     });
   });
 }
@@ -209,7 +224,7 @@ async function exportJson(): Promise<Record<string, unknown>> {
   const [
     users, schoolClasses, curriculumNodes, tags, questions, assets,
     promptTemplates, generationRuns, apiCredentials, tests, testQuestions,
-    attempts, answers, settings, activities, activityCompletions,
+    attempts, answers, settings, activities, activityCompletions, questionFlags,
   ] = await Promise.all([
     prisma.user.findMany(),
     prisma.schoolClass.findMany(),
@@ -228,6 +243,7 @@ async function exportJson(): Promise<Record<string, unknown>> {
     prisma.setting.findMany(),
     prisma.activity.findMany(),
     prisma.activityCompletion.findMany(),
+    prisma.questionFlag.findMany(),
     // Session rows are deliberately not exported. They are live sign-ins, not
     // data: restoring them would resurrect sessions from whenever the backup
     // was taken. pg_dump carries them for an exact restore; the portable copy
@@ -243,7 +259,7 @@ async function exportJson(): Promise<Record<string, unknown>> {
     tables: {
       users, schoolClasses, curriculumNodes, tags, questions, assets,
       promptTemplates, generationRuns, apiCredentials, tests, testQuestions,
-      attempts, answers, settings, activities, activityCompletions,
+      attempts, answers, settings, activities, activityCompletions, questionFlags,
     },
   };
 }
@@ -373,4 +389,122 @@ export async function pruneBackups(): Promise<number> {
     removed++;
   }
   return removed;
+}
+
+/** Restores the database and uploads from a .tar.gz archive. */
+export async function restoreFromArchive(archivePath: string): Promise<{ manifest: Record<string, unknown>; restoredAt: string }> {
+  const workDir = await fs.mkdtemp(path.join('/tmp', 'restore-'));
+  const extractDir = path.join(workDir, 'extract');
+  await fs.mkdir(extractDir, { recursive: true });
+
+  try {
+    // Verify archive exists
+    await fs.access(archivePath);
+
+    // Extract
+    await run('tar', ['-xzf', archivePath, '-C', extractDir]);
+
+    const dumpPath = path.join(extractDir, 'db.dump');
+    const manifestPath = path.join(extractDir, 'manifest.json');
+    const uploadsSrc = path.join(extractDir, 'uploads');
+
+    await fs.access(dumpPath).catch(() => {
+      throw new Error('Archive does not contain db.dump — not a valid Foundation backup.');
+    });
+
+    // Read manifest if present
+    let manifest: Record<string, unknown> = {};
+    try {
+      const raw = await fs.readFile(manifestPath, 'utf8');
+      manifest = JSON.parse(raw);
+    } catch {
+      // no manifest — continue
+    }
+
+    // Restore DB via pg_restore
+    console.log(`[restore] pg_restore starting for ${dumpPath}`);
+    const pgRestore = await findPgTool('pg_restore');
+    const pgEnvVars = pgEnv();
+    // pg_restore reads from file via -d and file argument; we pass file path
+    await run(pgRestore, ['--clean', '--if-exists', '--no-owner', '--no-privileges', '-d', pgEnvVars.PGDATABASE ?? '', dumpPath], {
+      env: pgEnvVars,
+      timeoutMs: 120000,
+    });
+    console.log('[restore] pg_restore completed');
+
+    // Bring restored DB (which may be old schema, e.g., without timeLimitSeconds) to current code's schema.
+    // The normal deploy path does this on container restart via docker-entrypoint.sh, but HTTP restore stays live.
+    console.log('[restore] migrate deploy starting');
+    try {
+      // Try common locations: /app in container, process.cwd() in dev
+      await run('npx', ['prisma', 'migrate', 'deploy'], { cwd: '/app', timeoutMs: 60000 });
+      console.log('[restore] migrate deploy completed');
+    } catch (e) {
+      console.warn('[restore] migrate deploy /app failed, trying cwd', e);
+      try {
+        await run('npx', ['prisma', 'migrate', 'deploy'], { cwd: process.cwd(), timeoutMs: 60000 });
+        console.log('[restore] migrate deploy (cwd) completed');
+      } catch (e2) {
+        console.warn('[restore] migrate deploy failed, will be retried on next restart', e2);
+      }
+    }
+    // Reconnect to pick up new schema. The pg_restore --clean drops and recreates
+    // tables, so existing pooled connections are stale. Disconnecting the pool
+    // and reconnecting is required, but it must not take down the worker that
+    // is currently handling the HTTP restore request — Caddy would see a reset
+    // and surface 502. Do it best-effort with a short pause and retry.
+    try {
+      await prisma.$disconnect();
+    } catch {
+      // ignore disconnect errors (pool may already be closed)
+    }
+    await new Promise((r) => setTimeout(r, 500));
+    try {
+      await prisma.$connect();
+    } catch (e) {
+      console.warn('[restore] reconnect failed, will retry on next query', e);
+      // One more attempt after a pause; if it still fails, the next query
+      // will establish a fresh connection anyway.
+      await new Promise((r) => setTimeout(r, 500));
+      try {
+        await prisma.$connect();
+      } catch {
+        // ignore
+      }
+    }
+
+    // Restore uploads if present
+    try {
+      const stat = await fs.stat(uploadsSrc).catch(() => null);
+      if (stat && stat.isDirectory()) {
+        // Ensure target exists
+        await fs.mkdir(env.UPLOAD_DIR, { recursive: true });
+        // Copy recursively — use copyTree logic
+        const entries = await fs.readdir(uploadsSrc, { withFileTypes: true }).catch(() => []);
+        for (const entry of entries) {
+          const src = path.join(uploadsSrc, entry.name);
+          const dst = path.join(env.UPLOAD_DIR, entry.name);
+          if (entry.isDirectory()) {
+            await fs.cp(src, dst, { recursive: true, force: true });
+          } else if (entry.isFile()) {
+            await fs.copyFile(src, dst);
+          }
+        }
+      }
+    } catch {
+      // uploads restore is best-effort
+    }
+
+    // Invalidate any cached settings after restore (DB now has old Setting rows)
+    try {
+      const { invalidateSettingsCache } = await import('./settings.js');
+      invalidateSettingsCache();
+    } catch {
+      // ignore
+    }
+
+    return { manifest, restoredAt: new Date().toISOString() };
+  } finally {
+    await fs.rm(workDir, { recursive: true, force: true }).catch(() => undefined);
+  }
 }

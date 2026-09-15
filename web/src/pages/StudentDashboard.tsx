@@ -55,8 +55,8 @@ export default function StudentDashboard() {
 
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <div>
-          <h1 className="text-lg font-semibold">Hello, {data.me.firstName}</h1>
-          <p className="text-xs text-ink-muted mt-0.5">
+          <h1 className="text-2xl font-semibold tracking-tight">Hello, {data.me.firstName}</h1>
+          <p className="text-sm text-ink-muted mt-1">
             Grade {data.me.grade} · Division {data.me.division} · Roll no. {data.me.rollNo} ·{' '}
             <span className="font-mono">{data.me.publicId}</span>
           </p>
@@ -208,39 +208,39 @@ function LiveTests({ tests }: { tests: LiveTest[] }) {
       ) : (
         <ul className="divide-y divide-line">
           {tests.map((test) => (
-            <li key={test.id} className="p-4 flex flex-wrap items-center justify-between gap-3">
+            <li key={test.id} className="p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2 flex-wrap">
-                  <h3 className="text-sm font-medium truncate">{test.title}</h3>
+                  <h3 className="text-base font-semibold truncate">{test.title}</h3>
                   {test.kind === 'PRACTICE' && <Badge tone="info">Practice</Badge>}
                   {test.inProgressAttemptId && <Badge tone="warn">In progress</Badge>}
                   {!test.isOpenNow && !test.inProgressAttemptId && <Badge tone="warn">Paused</Badge>}
                 </div>
-                <p className="text-xs text-ink-muted mt-1">
+                <p className="text-[13px] text-ink-muted mt-1.5">
                   {test.subject} · {test.questionCount} question{test.questionCount === 1 ? '' : 's'} ·{' '}
                   {test.totalMarks} mark{test.totalMarks === 1 ? '' : 's'} · {test.durationMinutes} min
                   {test.negativeMarks > 0 && ` · −${test.negativeMarks} per wrong answer`}
                 </p>
                 {test.endsAt && (
-                  <p className="text-[11px] text-ink-faint mt-0.5">Closes {formatDate(test.endsAt, true)}</p>
+                  <p className="text-xs text-ink-faint mt-1">Closes {formatDate(test.endsAt, true)}</p>
                 )}
                 {!test.isOpenNow && test.closedReason && (
-                  <p className="text-[11px] text-warn mt-1">{test.closedReason}</p>
+                  <p className="text-xs text-warn mt-1">{test.closedReason}</p>
                 )}
                 {test.isOpenNow && test.windowLabel && (
-                  <p className="text-[11px] text-ink-faint mt-0.5">Available {test.windowLabel}</p>
+                  <p className="text-xs text-ink-faint mt-1">Available {test.windowLabel}</p>
                 )}
               </div>
 
-              <div className="flex items-center gap-2 shrink-0">
+              <div className="flex items-center gap-2 shrink-0 w-full sm:w-auto">
                 {test.attemptsUsed > 0 && (
-                  <span className="text-xs text-ink-faint">
+                  <span className="text-xs text-ink-faint sm:ml-auto">
                     {test.attemptsUsed}/{test.maxAttempts} used
                   </span>
                 )}
                 <button
                   type="button"
-                  className="btn-primary btn-sm"
+                  className="btn-primary btn-sm w-full sm:w-auto"
                   disabled={(!test.canAttempt && !test.inProgressAttemptId) || starting === test.id}
                   onClick={() => start(test)}
                 >

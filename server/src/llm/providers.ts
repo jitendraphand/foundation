@@ -333,6 +333,9 @@ export interface ChatRequest {
    * defaults, vendor extensions and whether to stream all come from here.
    */
   tuning?: import('./tuning.js').ModelTuning;
+
+  /** When true, mark system prompt for prompt caching (Anthropic/Vertex). */
+  cacheSystemPrompt?: boolean;
 }
 
 export interface ChatResponse {
@@ -481,12 +484,20 @@ export async function buildChatRequest(req: ChatRequest): Promise<BuiltRequest> 
   // below overwrites them rather than the other way round. safeExtraBody has
   // already removed model, messages and stream; see llm/tuning.ts.
   const { safeExtraBody } = await import('./tuning.js');
+  let messages: unknown = req.messages;
+  if (req.cacheSystemPrompt && Array.isArray(req.messages) && req.messages[0]?.role === 'system') {
+    const sys = req.messages[0] as { role: string; content: string };
+    messages = [
+      { role: 'system', content: [{ type: 'text', text: sys.content, cache_control: { type: 'ephemeral' } }] },
+      ...req.messages.slice(1),
+    ];
+  }
   const body: Record<string, unknown> = {
     ...safeExtraBody(tuning.extraBody),
     // Azure ignores this - the deployment in the URL decides - but sending it
     // is harmless and keeps the request readable in a log.
     model: req.model,
-    messages: req.messages,
+    messages,
   };
 
   if (reasoning) {

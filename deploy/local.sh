@@ -58,11 +58,24 @@ gen() { openssl rand -base64 48 | tr -d '\n/+=' | head -c 48; }
 
 set_value() { sed -i "s|^$1=.*|$1=$2|" .env; }
 
+# Like set_value, but for keys .env.example ships commented out (the n8n
+# block): when nothing in .env actually defines the key, append it rather than
+# letting a sed against a "# KEY=" line quietly do nothing.
+append_value() {
+  grep -q "^$1=" .env || echo "$1=$2" >> .env
+  set_value "$1" "$2"
+}
+
+# Values generated or filled in this run, for the summary at the end. Secrets
+# that were already good are not listed - they belong to .env, and repeating
+# them would only suggest they are disposable.
+GENERATED=()
+
 # JWT_SECRET only signs login sessions, so replacing it costs nothing beyond
 # signing everyone out.
 if needs_value JWT_SECRET 16; then
   set_value JWT_SECRET "$(gen)"
-  info "Generated JWT_SECRET"
+  GENERATED+=("JWT_SECRET")
 else
   info "JWT_SECRET already set, leaving it alone"
 fi
@@ -72,6 +85,7 @@ fi
 # work at all, and said out loud when it happens.
 if needs_value ENCRYPTION_KEY 16; then
   set_value ENCRYPTION_KEY "$(gen)"
+  GENERATED+=("ENCRYPTION_KEY")
   warn "Generated a new ENCRYPTION_KEY - any LLM API keys saved before now must be entered again."
 else
   info "ENCRYPTION_KEY already set, leaving it alone"
@@ -85,7 +99,7 @@ fi
 # already has one keeps whatever was set in the app.
 if [ "$(sed -n 's|^ADMIN_PASSWORD=||p' .env | head -1)" = "foundation_123" ]; then
   set_value ADMIN_PASSWORD "$(openssl rand -base64 18 | tr -d '\n/+=' | head -c 16)"
-  info "Generated ADMIN_PASSWORD - it is printed at the end of this run"
+  GENERATED+=("ADMIN_PASSWORD")
 else
   info "ADMIN_PASSWORD already set, leaving it alone"
 fi
@@ -98,7 +112,7 @@ fi
 current_pg=$(sed -n 's|^POSTGRES_PASSWORD=||p' .env | head -1)
 if [ -z "$current_pg" ]; then
   set_value POSTGRES_PASSWORD "$(gen)"
-  info "Generated POSTGRES_PASSWORD"
+  GENERATED+=("POSTGRES_PASSWORD")
 else
   info "POSTGRES_PASSWORD already set, leaving it alone"
   case "$current_pg" in
@@ -113,6 +127,26 @@ fi
 set_value PUBLIC_HOST localhost
 grep -q '^COOKIE_SECURE=' .env || echo 'COOKIE_SECURE=false' >> .env
 set_value COOKIE_SECURE false
+
+# n8n ships with the stack now, so its login and encryption key are generated
+# here too. The key encrypts stored workflows; like ENCRYPTION_KEY it is only
+# ever set when no usable value exists, because replacing it later loses every
+# workflow the sidecar has saved.
+if needs_value N8N_PASS 12; then
+  append_value N8N_PASS "$(openssl rand -base64 18 | tr -d '\n/+=' | head -c 16)"
+  GENERATED+=("N8N_PASS (n8n editor login)")
+else
+  info "N8N_PASS already set, leaving it alone"
+fi
+
+# n8n's own default is change_me_n8n_key_32chars_min, so anything shorter than
+# 32 characters cannot be the real thing.
+if needs_value N8N_ENCRYPTION_KEY 32; then
+  append_value N8N_ENCRYPTION_KEY "$(gen)"
+  GENERATED+=("N8N_ENCRYPTION_KEY")
+else
+  info "N8N_ENCRYPTION_KEY already set, leaving it alone"
+fi
 
 # --- Up --------------------------------------------------------------------
 
@@ -135,10 +169,26 @@ fi
 
 ADMIN_USER=$(sed -n 's|^ADMIN_USERNAME=||p' .env | head -1)
 ADMIN_PASS=$(sed -n 's|^ADMIN_PASSWORD=||p' .env | head -1)
+N8N_PASS_VALUE=$(sed -n 's|^N8N_PASS=||p' .env | head -1)
 
 echo
 info "Foundation is running: http://localhost"
-info "Sign in as ${ADMIN_USER:-admin} / ${ADMIN_PASS} - write it down, then change it in the app."
+echo
+echo "  Sign in (admin):  ${ADMIN_USER:-admin} / ${ADMIN_PASS}"
+if [ ${#GENERATED[@]} -gt 0 ]; then
+  echo
+  echo "  Generated this run:"
+  for entry in "${GENERATED[@]}"; do
+    key="${entry%% *}"; suffix="${entry#"$key"}"
+    value="$(sed -n "s|^${key}=||p" .env | head -1)"
+    echo "      $key$suffix: $value"
+  done
+fi
+echo
+echo "  n8n editor:       http://n8n.localhost  (login: admin / ${N8N_PASS_VALUE})"
+echo
+echo "  Everything above also sits in .env on this machine (chmod 600)."
+echo "  Change the admin password in the app after your first sign-in."
 echo
 echo "  Other devices on the same Wi-Fi can join at:"
 for ip in $(hostname -I 2>/dev/null); do echo "      http://$ip"; done

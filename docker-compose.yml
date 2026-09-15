@@ -2,6 +2,7 @@ services:
   db:
     image: postgres:16-alpine
     restart: unless-stopped
+    shm_size: 512mb
     # Postgres ships tuned for a machine far smaller than any it is likely to
     # be run on: 128 MB of cache and 4 MB of working memory, whatever the host
     # has. The defaults below are the same conservative figures, so nothing
@@ -28,6 +29,16 @@ services:
       - effective_io_concurrency=200
       - -c
       - checkpoint_completion_target=0.9
+      - -c
+      - wal_compression=on
+      - -c
+      - wal_buffers=16MB
+      - -c
+      - synchronous_commit=off
+      - -c
+      - autovacuum_vacuum_scale_factor=0.05
+      - -c
+      - max_wal_size=2GB
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -69,8 +80,8 @@ services:
       # number configured here however many cores the machine has. Prisma's own
       # default is cpus*2+1, which a whole class starting a paper at once
       # queues behind and then fails with P2024.
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?schema=public&pool_timeout=20
-      DB_POOL_SIZE: ${DB_POOL_SIZE:-20}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?schema=public&pool_timeout=30
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-30}
       # API worker processes. 0 means one per core, capped at 8 - a single Node
       # process uses a single core, so this is what decides whether a large
       # machine is used or merely owned.
@@ -90,6 +101,11 @@ services:
       BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
       LLM_TIMEOUT_MS: ${LLM_TIMEOUT_MS:-180000}
       LLM_MAX_MS: ${LLM_MAX_MS:-900000}
+      # Used when Settings has no webhook URL stored: n8n's own container port,
+      # where its WhatsApp-reset workflow listens once it has been built there.
+      N8N_WHATSAPP_WEBHOOK_URL: ${N8N_WHATSAPP_WEBHOOK_URL:-http://n8n:5678/webhook/whatsapp-reset}
+      # Same for the email-reset workflow (Admin > Settings > n8n / WhatsApp).
+      N8N_EMAIL_WEBHOOK_URL: ${N8N_EMAIL_WEBHOOK_URL:-http://n8n:5678/webhook/email-reset}
       PUBLIC_HOST: ${PUBLIC_HOST}
       PGHOST: db
       PGUSER: ${POSTGRES_USER}
@@ -114,12 +130,32 @@ services:
     expose:
       - "80"
 
+  # n8n automation sidecar: builds and hosts the WhatsApp password-reset
+  # workflow. Editor at https://n8n.<PUBLIC_HOST> (basic auth from .env); the
+  # API calls its webhook directly over the compose network.
+  n8n:
+    image: n8nio/n8n:latest
+    restart: unless-stopped
+    expose: ["5678"]
+    environment:
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: ${N8N_USER:-admin}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_PASS:-change_me}
+      GENERIC_TIMEZONE: "Asia/Kolkata"
+      DB_TYPE: "sqlite"
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-change_me_n8n_key_32chars_min}
+      WEBHOOK_URL: https://${PUBLIC_HOST}/n8n/
+    volumes:
+      - n8n_data:/home/node/.n8n
+
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
     depends_on:
-      - api
-      - web
+      api:
+        condition: service_healthy
+      web:
+        condition: service_healthy
     environment:
       PUBLIC_HOST: ${PUBLIC_HOST}
       ACME_EMAIL: ${ACME_EMAIL}
@@ -137,3 +173,4 @@ volumes:
   backups:
   caddy_data:
   caddy_config:
+  n8n_data:

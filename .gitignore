@@ -3,12 +3,20 @@ dist/
 build/
 .env
 .env.local
+.env.dev
 *.log
 npm-debug.log*
 .DS_Store
 coverage/
 backups/
 uploads/
+# Backup archives and raw dumps contain password hashes and encrypted API
+# keys — never commit them. Download to Google Drive instead (see README).
+*.tar.gz
+*.tgz
+*.dump
+foundation-backup-*
+pre-restore-*
 server/prisma/dev.db
 .vite/
 *.tsbuildinfo

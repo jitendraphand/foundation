@@ -4,6 +4,8 @@ import type { Prisma } from '@prisma/client';
 import { prisma } from '../../db.js';
 import { audit, requirePermission } from '../../middleware/auth.js';
 import { ownedBy, type Actor } from '../../lib/ownership.js';
+import { inAudience } from '../../lib/audience.js';
+import { csvFile } from '../../lib/csv.js';
 
 const testFields = z.object({
   title: z.string().trim().min(1).max(200),
@@ -45,6 +47,15 @@ const testFields = z.object({
       requireFullscreen: z.boolean().default(true),
     })
     .optional(),
+
+  /**
+   * Whether each question's own time limit is enforced while the paper is sat.
+   * Stored in meta rather than a column because it is one switch on a minority
+   * of tests; see the schema note on the escape hatch. Off by default: a
+   * per-question cutoff punishes slow readers and breaks skip-and-return, so a
+   * school turns it on deliberately for papers that need pacing.
+   */
+  perQuestionTiming: z.boolean().optional(),
 });
 
 /** A window is only meaningful with both ends set, and they must differ. */
@@ -171,12 +182,17 @@ export default async function adminTestRoutes(app: FastifyInstance) {
     // out of the spread. Left in, Prisma rejects the whole create with "Unknown
     // argument `proctoring`" - which meant a test could never be created as
     // proctored at all, only created and then patched.
-    const { proctoring, ...fields } = body;
+    const { proctoring, perQuestionTiming, ...fields } = body;
 
     const test = await prisma.test.create({
       data: {
         ...fields,
-        ...(proctoring ? { meta: { proctoring } as unknown as Prisma.InputJsonValue } : {}),
+        ...(proctoring || perQuestionTiming !== undefined
+          ? { meta: {
+              ...(proctoring ? { proctoring } : {}),
+              ...(perQuestionTiming !== undefined ? { perQuestionTiming } : {}),
+            } as unknown as Prisma.InputJsonValue }
+          : {}),
         description: body.description ?? null,
         grade: body.grade ?? null,
         targetUserId: body.targetUserId ?? null,
@@ -220,13 +236,19 @@ export default async function adminTestRoutes(app: FastifyInstance) {
       }
     }
 
-    const { proctoring, ...fields } = body;
+    const { proctoring, perQuestionTiming, ...fields } = body;
 
     const test = await prisma.test.update({
       where: { id },
       data: {
         ...fields,
-        ...(proctoring ? { meta: { ...((existing.meta ?? {}) as object), proctoring } as unknown as Prisma.InputJsonValue } : {}),
+        ...(proctoring || perQuestionTiming !== undefined
+          ? { meta: {
+              ...((existing.meta ?? {}) as object),
+              ...(proctoring ? { proctoring } : {}),
+              ...(perQuestionTiming !== undefined ? { perQuestionTiming } : {}),
+            } as unknown as Prisma.InputJsonValue }
+          : {}),
         ...(body.startsAt !== undefined ? { startsAt: body.startsAt ? new Date(body.startsAt) : null } : {}),
         ...(body.endsAt !== undefined ? { endsAt: body.endsAt ? new Date(body.endsAt) : null } : {}),
       },
@@ -244,6 +266,8 @@ export default async function adminTestRoutes(app: FastifyInstance) {
         questionIds: z.array(z.string().uuid()).min(1),
         /** Per-question override; falls back to the test's marksPerQuestion. */
         marks: z.record(z.number().min(0.25).max(100)).optional(),
+        /** Per-question time limit in seconds; falls back to the question's estimatedSeconds. */
+        timeLimitSeconds: z.record(z.number().int().min(1)).optional(),
       })
       .parse(request.body);
 
@@ -256,7 +280,7 @@ export default async function adminTestRoutes(app: FastifyInstance) {
     // a colleague's bank cannot be pulled onto a paper.
     const found = await prisma.question.findMany({
       where: { id: { in: body.questionIds }, deletedAt: null, ...questionsVisibleTo(request) },
-      select: { id: true, status: true },
+      select: { id: true, status: true, estimatedSeconds: true },
     });
 
     const missing = body.questionIds.filter((qid) => !found.some((f) => f.id === qid));
@@ -277,6 +301,7 @@ export default async function adminTestRoutes(app: FastifyInstance) {
           questionId: qid,
           position: index,
           marks: body.marks?.[qid] ?? test.marksPerQuestion,
+          timeLimitSeconds: body.timeLimitSeconds?.[qid] ?? found.find((f) => f.id === qid)?.estimatedSeconds,
         })),
       }),
     ]);
@@ -468,14 +493,141 @@ export default async function adminTestRoutes(app: FastifyInstance) {
     const test = await prisma.test.findFirst({ where: { id, deletedAt: null, ...testsVisibleTo(request) }, include: { _count: { select: { attempts: true } } } });
     if (!test) return reply.code(404).send({ error: 'Test not found.' });
 
-    if (test._count.attempts > 0) {
-      await prisma.test.update({ where: { id }, data: { deletedAt: new Date(), status: 'CLOSED' } });
-      return { ok: true, mode: 'soft', message: 'This test has attempts, so it has been archived rather than deleted. Results are retained.' };
+    // Always hard-delete, even when the test has past attempts. The caller has
+    // confirmed they want the test and all its attempts/answers removed.
+    // We still collect the live difficulty counters so observedP stays correct.
+    const attempts = await prisma.attempt.findMany({ where: { testId: id }, select: { id: true } });
+    const attemptIds = attempts.map((a) => a.id);
+    const answers = attemptIds.length
+      ? await prisma.answer.findMany({
+          where: { attemptId: { in: attemptIds }, isCorrect: { not: null } },
+          select: { questionId: true, isCorrect: true },
+        })
+      : [];
+    const hitByQ = new Map<string, { served: number; correct: number }>();
+    for (const a of answers) {
+      const entry = hitByQ.get(a.questionId) ?? { served: 0, correct: 0 };
+      entry.served += 1;
+      if (a.isCorrect) entry.correct += 1;
+      hitByQ.set(a.questionId, entry);
     }
 
-    await prisma.test.delete({ where: { id } });
-    await audit(request.user!.sub, 'test.delete', { entity: 'Test', entityId: id, ip: request.ip });
+    await prisma.$transaction(async (tx) => {
+      for (const [qid, counts] of hitByQ) {
+        await tx.$executeRaw`
+          UPDATE "Question" SET "timesServed" = GREATEST(0, "timesServed" - ${counts.served}::int),
+            "timesCorrect" = GREATEST(0, "timesCorrect" - ${counts.correct}::int),
+            "observedP" = CASE WHEN "timesServed" <= ${counts.served}::int THEN 0 ELSE (("timesCorrect" - ${counts.correct}::int)::float / GREATEST(1, "timesServed" - ${counts.served}::int)) END
+          WHERE id = ${qid}
+        `;
+      }
+      await tx.test.delete({ where: { id } });
+    });
+    await audit(request.user!.sub, 'test.delete', { entity: 'Test', entityId: id, ip: request.ip, detail: { deletedAttempts: attemptIds.length } });
     return { ok: true, mode: 'hard' };
+  });
+
+  // --- Attempt deletion (admin) -------------------------------------------
+
+  /** Deletes a single attempt (e.g. to let a student retry or remove a mistaken submission). */
+  app.delete('/api/admin/attempts/:id', { preHandler: requirePermission('tests.manage') }, async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+
+    const attempt = await prisma.attempt.findUnique({
+      where: { id },
+      include: { answers: true, test: true },
+    });
+    if (!attempt) return reply.code(404).send({ error: 'Attempt not found.' });
+
+    // Ownership: must be able to see the test this attempt belongs to
+    const testVisible = await prisma.test.findFirst({ where: { id: attempt.testId, ...testsVisibleTo(request) } });
+    if (!testVisible) return reply.code(404).send({ error: 'Attempt not found.' });
+
+    // Adjust live difficulty counters if this attempt had been counted
+    const counted = attempt.status === 'SUBMITTED' || attempt.status === 'AUTO_SUBMITTED';
+    if (counted && attempt.answers.length > 0) {
+      const hitByQ = new Map<string, number>();
+      for (const a of attempt.answers) {
+        if (a.isCorrect === null || a.isCorrect === undefined) continue;
+        // Only counted answers contribute to timesServed
+        hitByQ.set(a.questionId, (hitByQ.get(a.questionId) ?? 0) + (a.isCorrect ? 1 : 0));
+      }
+      if (hitByQ.size > 0) {
+        await prisma.$transaction(async (tx) => {
+          // Delete answers first (FK)
+          await tx.answer.deleteMany({ where: { attemptId: id } });
+          await tx.attempt.delete({ where: { id } });
+          // Decrement live stats
+          for (const [qid, hit] of hitByQ) {
+            await tx.$executeRaw`
+              UPDATE "Question" SET "timesServed" = GREATEST(0, "timesServed" - 1),
+                "timesCorrect" = GREATEST(0, "timesCorrect" - ${hit}::int),
+                "observedP" = CASE WHEN "timesServed" <= 1 THEN 0 ELSE (("timesCorrect" - ${hit}::int)::float / (GREATEST(1, "timesServed" - 1))) END
+              WHERE id = ${qid}
+            `;
+          }
+        });
+      } else {
+        await prisma.$transaction([prisma.answer.deleteMany({ where: { attemptId: id } }), prisma.attempt.delete({ where: { id } })]);
+      }
+    } else {
+      await prisma.$transaction([prisma.answer.deleteMany({ where: { attemptId: id } }), prisma.attempt.delete({ where: { id } })]);
+    }
+
+    await audit(request.user!.sub, 'attempt.delete', { entity: 'Attempt', entityId: id, ip: request.ip, detail: { testId: attempt.testId, userId: attempt.userId, status: attempt.status } });
+    return { ok: true, message: 'Attempt deleted.' };
+  });
+
+  /** Deletes ALL attempts (and answers) for a given test — full purge of test data. */
+  app.delete('/api/admin/tests/:id/attempts', { preHandler: requirePermission('tests.manage') }, async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const body = z.object({ confirm: z.string().optional() }).parse(request.body ?? {});
+
+    // Require explicit confirmation to avoid accidental clicks
+    if (body.confirm !== 'DELETE') {
+      return reply.code(400).send({ error: 'Please confirm by sending { confirm: "DELETE" } in the request body.' });
+    }
+
+    const test = await prisma.test.findFirst({ where: { id, deletedAt: null, ...testsVisibleTo(request) } });
+    if (!test) return reply.code(404).send({ error: 'Test not found.' });
+
+    const attempts = await prisma.attempt.findMany({ where: { testId: id }, select: { id: true, status: true } });
+    if (attempts.length === 0) return { ok: true, deleted: 0, message: 'No attempts to delete for this test.' };
+
+    const inProgress = attempts.filter((a) => a.status === 'IN_PROGRESS').length;
+    if (inProgress > 0) {
+      return reply.code(409).send({ error: `Cannot purge: ${inProgress} student${inProgress === 1 ? '' : 's'} currently writing this test. Try again after they submit.` });
+    }
+
+    // Collect which questions were counted for live stats
+    const answers = await prisma.answer.findMany({
+      where: { attemptId: { in: attempts.map((a) => a.id) }, isCorrect: { not: null } },
+      select: { questionId: true, isCorrect: true },
+    });
+    const hitByQ = new Map<string, { served: number; correct: number }>();
+    for (const a of answers) {
+      const entry = hitByQ.get(a.questionId) ?? { served: 0, correct: 0 };
+      entry.served += 1;
+      if (a.isCorrect) entry.correct += 1;
+      hitByQ.set(a.questionId, entry);
+    }
+
+    const attemptIds = attempts.map((a) => a.id);
+    await prisma.$transaction(async (tx) => {
+      await tx.answer.deleteMany({ where: { attemptId: { in: attemptIds } } });
+      await tx.attempt.deleteMany({ where: { id: { in: attemptIds } } });
+      for (const [qid, counts] of hitByQ) {
+        await tx.$executeRaw`
+          UPDATE "Question" SET "timesServed" = GREATEST(0, "timesServed" - ${counts.served}::int),
+            "timesCorrect" = GREATEST(0, "timesCorrect" - ${counts.correct}::int),
+            "observedP" = CASE WHEN "timesServed" <= ${counts.served}::int THEN 0 ELSE (("timesCorrect" - ${counts.correct}::int)::float / GREATEST(1, "timesServed" - ${counts.served}::int)) END
+          WHERE id = ${qid}
+        `;
+      }
+    });
+
+    await audit(request.user!.sub, 'test.purge_attempts', { entity: 'Test', entityId: id, ip: request.ip, detail: { deletedAttempts: attempts.length } });
+    return { ok: true, deleted: attempts.length, message: `Deleted ${attempts.length} attempt${attempts.length === 1 ? '' : 's'} and all associated answers for this test.` };
   });
 
   /** Live results for one test, for the invigilator's view. */
@@ -526,5 +678,193 @@ export default async function adminTestRoutes(app: FastifyInstance) {
     }
 
     return { test, stats, attempts, questionStats };
+  });
+
+  // --- Per-test downloads ----------------------------------------------------
+  // Attempted / non-attempted rosters and the results table, as spreadsheets.
+  // Email and mobile are a System Administrator's fields (see users.ts), so
+  // they are only included for a caller holding admins.manage — the same rule
+  // the on-screen lists apply.
+
+  /** Whether this caller may see contact details in a download. */
+  function maySeeContacts(request: Actor): boolean {
+    return (request.user?.permissions ?? []).includes('admins.manage');
+  }
+
+  interface RosterStudent {
+    id: string;
+    publicId: string;
+    username: string;
+    firstName: string;
+    lastName: string;
+    grade: string;
+    division: string;
+    rollNo: string;
+    email: string | null;
+    mobile: string | null;
+    lastLoginAt: Date | null;
+  }
+
+  const ATTEMPT_RANK = { SUBMITTED: 3, AUTO_SUBMITTED: 3, IN_PROGRESS: 2, ABANDONED: 1 } as const;
+
+  /**
+   * The test, its audience and everyone's best attempt, shared by the three
+   * downloads. Best attempt per student: a submitted resit beats an abandoned
+   * first go, so nobody is counted as missing a paper they sat.
+   */
+  async function roster(request: Actor, testId: string) {
+    const test = await prisma.test.findFirst({ where: { id: testId, deletedAt: null, ...testsVisibleTo(request) } });
+    if (!test) return null;
+
+    const [students, attempts] = await Promise.all([
+      prisma.user.findMany({
+        where: { role: 'STUDENT', deletedAt: null, isActive: true },
+        orderBy: [{ grade: 'asc' }, { division: 'asc' }, { rollNo: 'asc' }],
+        select: {
+          id: true, publicId: true, username: true, firstName: true, lastName: true,
+          grade: true, division: true, divisions: true, rollNo: true, email: true, mobile: true, lastLoginAt: true,
+        },
+      }),
+      prisma.attempt.findMany({
+        where: { testId },
+        orderBy: { startedAt: 'asc' },
+        select: {
+          userId: true, status: true, score: true, maxScore: true, percentage: true,
+          correctCount: true, incorrectCount: true, unansweredCount: true,
+          startedAt: true, submittedAt: true,
+        },
+      }),
+    ]);
+
+    const best = new Map<string, (typeof attempts)[number]>();
+    for (const a of attempts) {
+      const held = best.get(a.userId);
+      if (!held || ATTEMPT_RANK[a.status] > ATTEMPT_RANK[held.status] || (ATTEMPT_RANK[a.status] === ATTEMPT_RANK[held.status] && a.percentage > held.percentage)) {
+        best.set(a.userId, a);
+      }
+    }
+
+    const audience = students
+      .filter((s) => inAudience(test, s))
+      .map((s) => ({
+        student: s as RosterStudent,
+        attempt: best.get(s.id) ?? null,
+      }));
+
+    return { test, audience };
+  }
+
+  function testFilename(test: { publicId: string }, kind: string): string {
+    return `${test.publicId}-${kind}.csv`;
+  }
+
+  function csvReply(reply: { header: (k: string, v: string) => unknown }, filename: string, body: string) {
+    reply.header('Content-Type', 'text/csv; charset=utf-8');
+    reply.header('Content-Disposition', `attachment; filename="${filename}"`);
+    return body;
+  }
+
+  /** Everyone in the audience who has at least one attempt on this test. */
+  app.get('/api/admin/tests/:id/attempts.csv', async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const data = await roster(request, id);
+    if (!data) return reply.code(404).send({ error: 'Test not found.' });
+
+    const contacts = maySeeContacts(request);
+    const rows = data.audience
+      .filter(({ attempt }) => attempt !== null)
+      .map(({ student, attempt }) => [
+        student.publicId,
+        `${student.firstName} ${student.lastName}`,
+        student.username,
+        `${student.grade}-${student.division}`,
+        student.rollNo,
+        contacts ? student.email ?? '' : '',
+        contacts ? student.mobile ?? '' : '',
+        attempt!.status.toLowerCase(),
+        attempt!.score,
+        attempt!.maxScore,
+        attempt!.percentage,
+        attempt!.correctCount,
+        attempt!.incorrectCount,
+        attempt!.unansweredCount,
+        attempt!.submittedAt ? attempt!.submittedAt.toISOString() : '',
+        attempt!.percentage >= data.test.passPercentage ? 'yes' : 'no',
+      ]);
+
+    return csvReply(
+      reply,
+      testFilename(data.test, 'attempted'),
+      csvFile(
+        ['user_id', 'name', 'username', 'class', 'roll_no', 'email', 'mobile', 'status', 'score', 'max_score', 'percentage', 'correct', 'wrong', 'skipped', 'submitted_at', 'passed'],
+        rows,
+      ),
+    );
+  });
+
+  /** Everyone in the audience with no attempt at all — the list to chase. */
+  app.get('/api/admin/tests/:id/non-attempts.csv', async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const data = await roster(request, id);
+    if (!data) return reply.code(404).send({ error: 'Test not found.' });
+
+    const contacts = maySeeContacts(request);
+    const rows = data.audience
+      .filter(({ attempt }) => attempt === null)
+      .map(({ student }) => [
+        student.publicId,
+        `${student.firstName} ${student.lastName}`,
+        student.username,
+        `${student.grade}-${student.division}`,
+        student.rollNo,
+        contacts ? student.email ?? '' : '',
+        contacts ? student.mobile ?? '' : '',
+        student.lastLoginAt ? student.lastLoginAt.toISOString() : '',
+      ]);
+
+    return csvReply(
+      reply,
+      testFilename(data.test, 'not-attempted'),
+      csvFile(['user_id', 'name', 'username', 'class', 'roll_no', 'email', 'mobile', 'last_login'], rows),
+    );
+  });
+
+  /** The results table as a spreadsheet: one row per student who sat it. */
+  app.get('/api/admin/tests/:id/results.csv', async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const data = await roster(request, id);
+    if (!data) return reply.code(404).send({ error: 'Test not found.' });
+
+    const contacts = maySeeContacts(request);
+    const rows = data.audience
+      .filter(({ attempt }) => attempt !== null)
+      .sort((a, b) => b.attempt!.percentage - a.attempt!.percentage)
+      .map(({ student, attempt }) => [
+        student.publicId,
+        `${student.firstName} ${student.lastName}`,
+        student.username,
+        `${student.grade}-${student.division}`,
+        student.rollNo,
+        contacts ? student.email ?? '' : '',
+        contacts ? student.mobile ?? '' : '',
+        attempt!.status.toLowerCase(),
+        attempt!.score,
+        attempt!.maxScore,
+        attempt!.percentage,
+        attempt!.correctCount,
+        attempt!.incorrectCount,
+        attempt!.unansweredCount,
+        attempt!.submittedAt ? attempt!.submittedAt.toISOString() : '',
+        attempt!.percentage >= data.test.passPercentage ? 'yes' : 'no',
+      ]);
+
+    return csvReply(
+      reply,
+      testFilename(data.test, 'results'),
+      csvFile(
+        ['user_id', 'name', 'username', 'class', 'roll_no', 'email', 'mobile', 'status', 'score', 'max_score', 'percentage', 'correct', 'wrong', 'skipped', 'submitted_at', 'passed'],
+        rows,
+      ),
+    );
   });
 }

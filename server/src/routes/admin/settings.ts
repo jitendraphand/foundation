@@ -17,7 +17,7 @@ import { modelTuningSchema, reservedKeysIn } from '../../llm/tuning.js';
 import { trialGeneration } from '../../llm/generate.js';
 import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_TEMPLATE } from '../../llm/prompts.js';
 import { COMMON_TIMEZONES, WINDOW_PRESETS, isValidTimezone, zonedNow, formatMinute } from '../../lib/availability.js';
-import { getSchoolTimezone, setSchoolTimezone } from '../../services/settings.js';
+import { getSchoolTimezone, setSchoolTimezone, getGenerationPipeline, setGenerationPipeline } from '../../services/settings.js';
 
 /**
  * Bedrock needs more than a key: a region, and a choice of how to authenticate.
@@ -305,6 +305,10 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
 
     const secret = bedrock?.secret ?? body.apiKey;
 
+    const initialMeta: Record<string, unknown> = {
+      ...(bedrock ? (bedrock.meta as object) : derivedMeta ? (derivedMeta as object) : {}),
+      visible: true,
+    };
     const credential = await prisma.apiCredential.create({
       data: {
         provider: body.provider,
@@ -315,7 +319,7 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
         // blob, so it still matches what they can see in the AWS console.
         keyHint: keyHint(body.apiKey),
         defaultModel: body.defaultModel ?? def?.suggestedModels[0] ?? null,
-        ...(bedrock ? { meta: bedrock.meta } : derivedMeta ? { meta: derivedMeta } : {}),
+        meta: initialMeta as never,
       },
       select: { id: true, provider: true, label: true, baseUrl: true, keyHint: true, defaultModel: true, isActive: true, meta: true },
     });
@@ -337,6 +341,8 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
         baseUrl: z.string().url().optional(),
         defaultModel: z.string().max(200).optional(),
         isActive: z.boolean().optional(),
+        /** Whether this credential is shown on the Set test screen. Null/true = visible. */
+        visible: z.boolean().optional(),
         /** Offer this credential when the chosen one will not answer. */
         useAsFallback: z.boolean().optional(),
         /**
@@ -393,6 +399,10 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
     const meta: Record<string, unknown> = { ...((existing.meta ?? {}) as object) };
     let metaChanged = false;
 
+    if (body.visible !== undefined) {
+      meta.visible = body.visible;
+      metaChanged = true;
+    }
     if (body.useAsFallback !== undefined) {
       meta.useAsFallback = body.useAsFallback;
       metaChanged = true;
@@ -680,6 +690,8 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
         model: z.string().max(200).optional(),
         /** Papers per student per school day. 0 removes the limit entirely. */
         dailyQuota: z.number().int().min(0).max(100).optional(),
+        /** Run the slow second conceptual-verification call before serving. */
+        verify: z.boolean().optional(),
       })
       .parse(request.body);
 
@@ -700,14 +712,14 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
     }
 
     const dailyQuota = body.dailyQuota ?? DEFAULT_STEP_UP_QUOTA;
-    await setStepUpConfig({ credentialId: credential.id, model, dailyQuota });
+    await setStepUpConfig({ credentialId: credential.id, model, dailyQuota, verify: body.verify });
     await audit(request.user!.sub, 'settings.step_up', {
-      ip: request.ip, detail: { credentialId: credential.id, model, dailyQuota },
+      ip: request.ip, detail: { credentialId: credential.id, model, dailyQuota, verify: body.verify },
     });
 
     return {
       ok: true,
-      config: { credentialId: credential.id, model, dailyQuota },
+      config: { credentialId: credential.id, model, dailyQuota, verify: body.verify },
       message:
         `Step-up tests will use ${credential.label} (${model}), ` +
         (dailyQuota > 0
@@ -1046,6 +1058,97 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
   });
 
   // --- Audit log -----------------------------------------------------------
+
+  // --- Generation pipeline (3 paths + cache) -----------------------------------
+
+  app.get('/api/admin/generation-pipeline', async () => {
+    const config = await getGenerationPipeline();
+    const credentials = await prisma.apiCredential.findMany({
+      where: { isActive: true },
+      orderBy: { createdAt: 'asc' },
+      select: { id: true, label: true, provider: true, defaultModel: true },
+    });
+    return { config, credentials };
+  });
+
+  app.put('/api/admin/generation-pipeline', async (request, reply) => {
+    const body = z
+      .object({
+        mode: z.enum(['single', 'external_external']),
+        cheapCredentialId: z.string().uuid().nullable().optional(),
+        cacheSystemPrompt: z.boolean().optional(),
+        tokensPerQuestion: z.number().int().min(200).max(5000).nullable().optional(),
+      })
+      .parse(request.body);
+
+    if (body.mode !== 'single' && body.cheapCredentialId) {
+      const cred = await prisma.apiCredential.findUnique({ where: { id: body.cheapCredentialId } });
+      if (!cred || !cred.isActive) return reply.code(400).send({ error: 'Cheap credential not found or inactive.' });
+    }
+
+    const config = await setGenerationPipeline({
+      mode: body.mode,
+      cheapCredentialId: body.cheapCredentialId ?? null,
+      cacheSystemPrompt: !!body.cacheSystemPrompt,
+      tokensPerQuestion: body.tokensPerQuestion ?? null,
+    });
+    await audit(request.user!.sub, 'settings.pipeline', { ip: request.ip, detail: config });
+    return { ok: true, config };
+  });
+
+  // --- n8n / WhatsApp --------------------------------------------------------
+
+  const N8N_WEBHOOK_KEY = 'n8n.whatsappWebhookUrl';
+  const N8N_EMAIL_WEBHOOK_KEY = 'n8n.emailWebhookUrl';
+  const N8N_URL_KEY = 'n8n.url';
+
+  app.get('/api/admin/n8n', async () => {
+    const [webhook, emailWebhook, url] = await Promise.all([
+      prisma.setting.findUnique({ where: { key: N8N_WEBHOOK_KEY } }).catch(() => null),
+      prisma.setting.findUnique({ where: { key: N8N_EMAIL_WEBHOOK_KEY } }).catch(() => null),
+      prisma.setting.findUnique({ where: { key: N8N_URL_KEY } }).catch(() => null),
+    ]);
+    return {
+      webhookUrl: typeof webhook?.value === 'string' ? webhook.value : '',
+      emailWebhookUrl: typeof emailWebhook?.value === 'string' ? emailWebhook.value : '',
+      n8nUrl: typeof url?.value === 'string' ? url.value : '',
+    };
+  });
+
+  app.put('/api/admin/n8n', async (request, reply) => {
+    const body = z
+      .object({
+        webhookUrl: z.string().url().max(500).nullable(),
+        emailWebhookUrl: z.string().url().max(500).nullable().optional(),
+        n8nUrl: z.string().url().max(500).nullable(),
+      })
+      .parse(request.body);
+
+    // The email webhook is only touched when the client sent it: an older UI
+    // that does not know the field must not wipe a configured value.
+    const pairs: Array<readonly [string, string | null]> = [
+      [N8N_WEBHOOK_KEY, body.webhookUrl],
+      [N8N_URL_KEY, body.n8nUrl],
+    ];
+    if (body.emailWebhookUrl !== undefined) pairs.push([N8N_EMAIL_WEBHOOK_KEY, body.emailWebhookUrl]);
+    for (const [key, value] of pairs) {
+      if (value === null) {
+        await prisma.setting.deleteMany({ where: { key } });
+      } else {
+        await prisma.setting.upsert({
+          where: { key },
+          update: { value },
+          create: { key, value },
+        });
+      }
+    }
+
+    await audit(request.user!.sub, 'settings.n8n', {
+      ip: request.ip,
+      detail: { configured: !!body.webhookUrl, emailConfigured: !!body.emailWebhookUrl },
+    });
+    return { ok: true, message: body.webhookUrl || body.emailWebhookUrl ? 'n8n saved. Password resets will be delivered through it.' : 'n8n cleared. Resets fall back to the server log.' };
+  });
 
   app.get('/api/admin/audit', async (request) => {
     const q = z

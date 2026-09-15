@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api, ApiError } from '../../lib/api';
-import { Alert, Badge, Card, EmptyState, Field, Modal, PageLoader, Spinner, humanizeTag } from '../../components/ui';
+import { Alert, Badge, Card, EmptyState, Field, Modal, PageLoader, Pagination, Spinner, humanizeTag } from '../../components/ui';
 import { ContentRenderer, BlocksRenderer } from '../../renderers/BlockRenderer';
 import type { BankQuestion, Block, ImagePrompt, Tag } from '../../lib/types';
 
@@ -62,20 +62,23 @@ export default function AdminQuestions() {
   const bucket = (params.get('bucket') ?? params.get('status') ?? 'DRAFT') as Bucket;
   const subject = params.get('subject') ?? '';
   const runId = params.get('generationRunId') ?? '';
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const query = new URLSearchParams({ pageSize: '50' });
+      const query = new URLSearchParams({ pageSize: '50', page: String(page) });
       if (bucket) query.set('bucket', bucket);
       if (subject) query.set('subject', subject);
       if (runId) query.set('generationRunId', runId);
 
-      const res = await api.get<{ questions: BankQuestion[]; counts: Record<Bucket, number> }>(
+      const res = await api.get<{ questions: BankQuestion[]; counts: Record<Bucket, number>; total: number }>(
         `/api/admin/questions?${query}`,
       );
       setQuestions(res.questions);
       setCounts(res.counts);
+      setTotal(res.total);
 
       const keep = carryOver.current;
       carryOver.current = null;
@@ -86,6 +89,11 @@ export default function AdminQuestions() {
     } finally {
       setLoading(false);
     }
+  }, [bucket, subject, runId, page]);
+
+  // A new filter starts from the first page.
+  useEffect(() => {
+    setPage(1);
   }, [bucket, subject, runId]);
 
   useEffect(() => {
@@ -332,6 +340,8 @@ export default function AdminQuestions() {
               />
             ))}
           </ul>
+
+          <Pagination page={page} pageSize={50} total={total} onChange={setPage} />
         </>
       )}
 

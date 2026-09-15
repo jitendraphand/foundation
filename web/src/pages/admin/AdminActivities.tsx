@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError } from '../../lib/api';
-import { Alert, Badge, Card, EmptyState, Field, Modal, PageLoader, formatDate } from '../../components/ui';
+import { Alert, Badge, Card, EmptyState, Field, Modal, PageLoader, Pagination, formatDate } from '../../components/ui';
 import { BlocksRenderer } from '../../renderers/BlockRenderer';
 import { CARD_ACCENTS, type CardAccent } from '../../lib/types';
 import type {
@@ -29,26 +29,34 @@ const KIND_LABEL: Record<ActivityKind, string> = {
 
 export default function AdminActivities() {
   const [activities, setActivities] = useState<AdminActivity[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [status, setStatus] = useState<ActivityStatus | ''>('');
+  const [page, setPage] = useState(1);
   const [editing, setEditing] = useState<AdminActivity | 'new' | null>(null);
   const [viewing, setViewing] = useState<AdminActivity | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const query = new URLSearchParams({ pageSize: '50' });
+      const query = new URLSearchParams({ pageSize: '50', page: String(page) });
       if (status) query.set('status', status);
-      const res = await api.get<{ activities: AdminActivity[] }>(`/api/admin/activities?${query}`);
+      const res = await api.get<{ activities: AdminActivity[]; total: number }>(`/api/admin/activities?${query}`);
       setActivities(res.activities);
+      setTotal(res.total);
       setError(null);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not load activities.');
     } finally {
       setLoading(false);
     }
+  }, [status, page]);
+
+  // A new filter starts from the first page.
+  useEffect(() => {
+    setPage(1);
   }, [status]);
 
   useEffect(() => {
@@ -199,6 +207,7 @@ export default function AdminActivities() {
               </tbody>
             </table>
           </div>
+          <Pagination page={page} pageSize={50} total={total} onChange={setPage} />
         </Card>
       )}
 

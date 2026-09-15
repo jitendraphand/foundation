@@ -8,6 +8,7 @@ import jwt from 'jsonwebtoken';
 import { env } from '../env.js';
 import { COOKIE_NAME, audit, authenticate, clearSessionCookie, setSessionCookie, signSession } from '../middleware/auth.js';
 import { createSession, revokeAllSessions, revokeSession } from '../services/sessions.js';
+import { maskEmail } from '../services/email.js';
 
 const MAX_FAILED = 8;
 const LOCK_MINUTES = 15;
@@ -219,9 +220,54 @@ export default async function authRoutes(app: FastifyInstance) {
       select: {
         id: true, publicId: true, username: true, firstName: true, lastName: true, grade: true, division: true,
         rollNo: true, dateOfBirth: true, role: true, permissions: true, mustChangePassword: true, lastLoginAt: true, createdAt: true,
+        // Your own address is yours to see; nobody else's is ever included.
+        email: true,
       },
     });
     return { user };
+  });
+
+  /**
+   * Update your own email address for password resets.
+   *
+   * A System Administrator can still set it for you without this step, but
+   * anything you set yourself costs proof it is really you: the current
+   * password, exactly as changing the password demands. Without that, anyone
+   * holding an unlocked device could redirect your resets to their own inbox.
+   */
+  app.patch('/api/auth/profile', { preHandler: authenticate }, async (request, reply) => {
+    const body = z
+      .object({
+        email: z.string().trim().toLowerCase().max(254).nullable(),
+        currentPassword: z.string().min(1),
+      })
+      .parse(request.body);
+
+    const normalized = body.email?.trim() ? body.email.trim().toLowerCase() : null;
+    if (normalized !== null && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(normalized)) {
+      return reply.code(400).send({ error: 'Use a valid email address, or clear the field to remove it.' });
+    }
+
+    const user = await prisma.user.findUniqueOrThrow({ where: { id: request.user!.sub } });
+
+    if (!(await verifyPassword(user.passwordHash, body.currentPassword))) {
+      return reply.code(401).send({ error: 'Your current password is not correct.' });
+    }
+
+    await prisma.user.update({ where: { id: user.id }, data: { email: normalized } });
+
+    await audit(user.id, 'auth.email_changed', {
+      entity: 'User', entityId: user.id, ip: request.ip,
+      detail: { email: normalized ? maskEmail(normalized) : null },
+    });
+
+    return {
+      ok: true,
+      email: normalized,
+      message: normalized
+        ? `Your email address is now ${maskEmail(normalized)}. Password resets will be sent there.`
+        : 'Your email address was removed. Password resets will only go by WhatsApp, if a mobile number is on file.',
+    };
   });
 
   app.post('/api/auth/change-password', { preHandler: authenticate }, async (request, reply) => {

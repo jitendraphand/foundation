@@ -19,6 +19,8 @@ interface Credential {
   baseUrl: string;
   keyHint: string;
   defaultModel: string | null;
+  effectiveMaxTokens?: number | null;
+  maxOutputTokens?: number | null;
 }
 
 interface Template {
@@ -39,6 +41,16 @@ interface Provider {
   supportsJsonMode: boolean;
 }
 
+interface CurriculumNode {
+  id: string;
+  parentId: string | null;
+  level: string;
+  code: string;
+  label: string;
+  path: string;
+  grade: string | null;
+}
+
 interface Context {
   tags: { difficulty: Tag[]; cognitive: Tag[]; skill: Tag[] };
   credentials: Credential[];
@@ -46,6 +58,7 @@ interface Context {
   providers: Provider[];
   defaults: { systemPrompt: string; userTemplate: string };
   formats: Array<{ code: string; label: string }>;
+  curriculum: CurriculumNode[];
 }
 
 interface Outcome {
@@ -107,8 +120,11 @@ export default function AdminGenerate() {
         const kind = practiceFor ? 'PRACTICE' : 'REGULAR';
         const template = data.templates.find((t) => t.isDefault && t.kind === kind) ?? data.templates[0];
         const credential = data.credentials[0];
+        const subjects = data.curriculum.filter((n) => n.level === 'SUBJECT');
+        const defaultSubject = seedSubject || subjects[0]?.label || '';
         setForm((f) => ({
           ...f,
+          subject: f.subject || defaultSubject,
           credentialId: credential?.id ?? '',
           model: credential?.defaultModel ?? '',
           templateId: template?.id ?? '',
@@ -116,10 +132,31 @@ export default function AdminGenerate() {
         setSystemPrompt(template?.systemPrompt ?? data.defaults.systemPrompt);
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : 'Could not load the generation settings.'));
-  }, [practiceFor]);
+  }, [practiceFor, seedSubject]);
 
   const credential = ctx?.credentials.find((c) => c.id === form.credentialId);
   const provider = ctx?.providers.find((p) => p.id === credential?.provider);
+
+  const [pipeline, setPipeline] = useState<{ mode: string; cheapCredentialId?: string | null; cacheSystemPrompt?: boolean; tokensPerQuestion?: number | null } | null>(null);
+  useEffect(() => {
+    api.get<{ config: { mode: string; cheapCredentialId?: string | null; cacheSystemPrompt?: boolean; tokensPerQuestion?: number | null } }>('/api/admin/generation-pipeline')
+      .then((res) => setPipeline(res.config))
+      .catch(() => undefined);
+  }, []);
+
+  // Turns/batches: derived from the selected credential's max output tokens.
+  // Uses pipeline tokensPerQuestion if configured, otherwise 1400 (adaptive on server may be lower, so hint is conservative).
+  const perCall = useMemo(() => {
+    const ceiling = (credential as Credential | undefined)?.effectiveMaxTokens ?? (credential as Credential | undefined)?.maxOutputTokens ?? null;
+    const tpq = pipeline?.tokensPerQuestion ?? 1400;
+    if (!ceiling || ceiling <= 0) return 10;
+    return Math.max(1, Math.min(10, Math.floor((ceiling * 0.9) / tpq)));
+  }, [credential, pipeline]);
+  const turnCount = useMemo(() => {
+    const base = Math.ceil(form.count / perCall);
+    if (pipeline?.mode && pipeline.mode !== 'single') return base * 2;
+    return base;
+  }, [form.count, perCall, pipeline]);
 
   const difficultyCodes = useMemo(() => ctx?.tags.difficulty.map((t) => t.code) ?? [], [ctx]);
 
@@ -233,7 +270,7 @@ export default function AdminGenerate() {
     return (
       <Card title="Set test">
         <Alert tone="warn">
-          No LLM provider is configured yet. Add an API key in <strong>Settings</strong> before generating questions.
+          No visible LLM provider is available. Add an API key in <strong>Settings → LLM providers</strong> and make sure at least one is marked <strong>Visible</strong> and enabled for Text.
         </Alert>
         <button type="button" className="btn-primary btn-sm mt-3" onClick={() => navigate('/admin/settings')}>
           Go to settings
@@ -353,7 +390,22 @@ export default function AdminGenerate() {
         <div className="space-y-4">
           <div className="grid sm:grid-cols-3 gap-4">
             <Field label="Subject" required>
-              <input className="input" value={form.subject} onChange={(e) => setForm((f) => ({ ...f, subject: e.target.value }))} placeholder="Mathematics" />
+              {(() => {
+                const subjects = ctx.curriculum.filter((n) => n.level === 'SUBJECT');
+                return subjects.length > 0 ? (
+                  <select className="input" value={form.subject} onChange={(e) => setForm((f) => ({ ...f, subject: e.target.value }))} required>
+                    <option value="">Select subject</option>
+                    {subjects.map((n) => (
+                      <option key={n.id} value={n.label}>{n.label}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <>
+                    <input className="input" value={form.subject} onChange={(e) => setForm((f) => ({ ...f, subject: e.target.value }))} placeholder="Mathematics" />
+                    <p className="text-[11px] text-ink-faint mt-1">No subjects configured. System administrator should add subjects in Settings.</p>
+                  </>
+                );
+              })()}
             </Field>
             <Field label="Topic">
               <input className="input" value={form.topic} onChange={(e) => setForm((f) => ({ ...f, topic: e.target.value }))} placeholder="Quadratic equations" />
@@ -370,7 +422,19 @@ export default function AdminGenerate() {
             <Field
               label="Number of questions"
               required
-              hint={form.count > 10 ? `Asked for in ${Math.ceil(form.count / 10)} calls — allow a few minutes.` : undefined}
+              hint={
+                (() => {
+                  const tpq = pipeline?.tokensPerQuestion ?? 1400;
+                  const base = turnCount > 1
+                    ? `Asked for in ${turnCount} turn${turnCount === 1 ? '' : 's'} of at most ${perCall} — allow a few minutes.${credential?.effectiveMaxTokens ? ` (limit ${credential.effectiveMaxTokens} tokens, ~${tpq} tok/Q → ${perCall}/turn)` : ''}`
+                    : perCall < 10
+                      ? `At most ${perCall} per turn due to the ${credential?.effectiveMaxTokens} token limit (~${tpq} tok/Q).`
+                      : undefined;
+                  const extra = !pipeline?.tokensPerQuestion ? ' Actual often 600–1000, adaptive after 3 runs will reduce turns.' : '';
+                  const pipe = pipeline?.mode && pipeline.mode !== 'single' ? ` Pipeline ${pipeline.mode} (2 calls per batch).` : '';
+                  return base ? base + extra + pipe : extra ? 'Actual often less than estimate — adaptive will optimize.' : undefined;
+                })()
+              }
             >
               <input
                 type="number" min={1} max={100} className="input"

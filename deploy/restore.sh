@@ -52,6 +52,38 @@ warn "This will REPLACE the current database. Everything in it now will be lost.
 read -r -p "Type RESTORE to continue: " CONFIRM
 [[ "$CONFIRM" == "RESTORE" ]] || fail "Cancelled."
 
+# --- 3a. Schema drift check --------------------------------------------------
+# Restoring an OLDER backup over a NEWER schema fails: pg_restore --clean
+# cannot drop tables that migrations added after the backup was taken have
+# foreign keys to, so the DROPs fail, the CREATEs fail with "already exists",
+# and the data is APPENDED — duplicated rows and failed unique indexes. When
+# the live database has tables this backup does not know about, offer to reset
+# the schema first: everything is dropped, the backup restores cleanly, and
+# the API re-adds the newer structures on its next startup.
+LIVE_TABLES=$(docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -t -A -c \
+  "SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename <> '_prisma_migrations';" 2>/dev/null | sort -u || true)
+DUMP_TABLES=$(docker compose exec -T db pg_restore -l < "$WORK/extract/db.dump" 2>/dev/null \
+  | awk '$0 ~ /; 1259 [0-9]+ TABLE / {print $(NF-1)}' | tr -d '"' | sort -u || true)
+BLOCKERS=$(comm -23 <(echo "$LIVE_TABLES") <(echo "$DUMP_TABLES") | grep -v '^$' || true)
+
+RESET_SCHEMA=no
+if [[ -n "$BLOCKERS" ]]; then
+  echo
+  warn "The current database has table(s) this backup does not contain:"
+  printf '   %s\n' "$BLOCKERS"
+  echo
+  warn "Restoring over them will fail: pg_restore cannot drop tables that newer"
+  warn "migrations added foreign keys to, so rows are appended (duplicated) and"
+  warn "unique indexes fail."
+  echo
+  info "You can reset the schema first — ALL current tables are dropped, the backup"
+  info "restores cleanly, and the API re-adds the newer structures on startup."
+  warn "Data added since the backup (question flags, email addresses, …) is lost;"
+  warn "it is preserved in the safety dump taken below."
+  read -r -p "Type SCHEMA-RESET to reset the schema first, or press Enter to attempt the restore as-is: " SCHEMA_CHOICE
+  [[ "$SCHEMA_CHOICE" == "SCHEMA-RESET" ]] && RESET_SCHEMA=yes
+fi
+
 # --- 3. Safety net ----------------------------------------------------------
 info "Taking a safety dump of the current database first"
 SAFETY="$REPO_DIR/pre-restore-$(date +%Y%m%d-%H%M%S).dump"
@@ -62,6 +94,14 @@ docker compose exec -T db pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format
 # --- 4. Restore -------------------------------------------------------------
 info "Stopping the API so nothing writes during the restore"
 docker compose stop api
+
+if [[ "$RESET_SCHEMA" == "yes" ]]; then
+  info "Resetting the schema (drop everything, then restore clean)"
+  docker compose exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c \
+    'DROP SCHEMA public CASCADE; CREATE SCHEMA public;' \
+    || fail "Could not reset the schema. Restore the safety dump with the command printed at the end."
+  ok "schema reset"
+fi
 
 info "Restoring the database"
 docker compose exec -T db pg_restore \

@@ -10,7 +10,8 @@ import { chatWithFallback, ProviderChainError } from './resilience.js';
 import { ceilingFromError, rememberCeiling, resolveCeiling } from './limits.js';
 import { capabilitiesOf } from './capabilities.js';
 import { extractJson, llmResponseSchema, llmQuestionSchema, describeIssues, type LlmQuestion } from './schema.js';
-import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_TEMPLATE, PRACTICE_SYSTEM_SUFFIX, renderTemplate } from './prompts.js';
+import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_TEMPLATE, PRACTICE_SYSTEM_SUFFIX, renderTemplate, DRAFT_SYSTEM_PROMPT, FORMATTER_SYSTEM_PROMPT } from './prompts.js';
+import { getGenerationPipeline } from '../services/settings.js';
 import type { TestKind, QuestionStatus } from '@prisma/client';
 
 export interface GenerateSpec {
@@ -714,7 +715,7 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
   // of the answer, so it needs a bigger budget for the same number of
   // questions. The administrator's setting decides when they have one; the
   // guess from the model name is only the fallback.
-  const tokensPerQuestion = emitsReasoning(opts.model, call.tuning?.thinking) ? 2600 : 1400;
+  let tokensPerQuestion = emitsReasoning(opts.model, call.tuning?.thinking) ? 2600 : 1400;
 
   // What this provider will actually accept decides the batch size, not the
   // other way round. Both can change mid-run: a refusal that names the real
@@ -722,7 +723,7 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
   // around it. See limits.ts.
   let ceiling = resolveCeiling(credential, opts.model);
   let perCall = questionsPerCall(tokensPerQuestion, ceiling);
-  const batches = planBatches(opts.spec.count, perCall);
+  let batches = planBatches(opts.spec.count, perCall);
 
   const run = await prisma.generationRun.create({
     data: {
@@ -746,6 +747,51 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
       `Asked for ${opts.spec.count} questions in ${batches.length} calls of at most ${perCall}, ` +
         'because one reply cannot hold that many.',
     );
+  }
+
+  // Pipeline selection (single | external_external) + cache toggle
+  const pipeline = await getGenerationPipeline().catch(() => ({ mode: 'single' as const, cheapCredentialId: null, cacheSystemPrompt: false, tokensPerQuestion: null } as never));
+  const isTwoStage = (pipeline as { mode: string }).mode !== 'single';
+  let cheapCred: Awaited<ReturnType<typeof prisma.apiCredential.findUnique>> | null = null;
+  if (isTwoStage && (pipeline as { cheapCredentialId?: string | null }).cheapCredentialId) {
+    cheapCred = await prisma.apiCredential.findUnique({ where: { id: (pipeline as { cheapCredentialId: string }).cheapCredentialId } }).catch(() => null);
+  }
+
+  // Configured or adaptive tokens per question: respect Setting, otherwise learn from history
+  const pipelineTokens = (pipeline as { tokensPerQuestion?: number | null }).tokensPerQuestion;
+  if (pipelineTokens && pipelineTokens >= 200 && pipelineTokens <= 5000) {
+    tokensPerQuestion = pipelineTokens;
+    perCall = questionsPerCall(tokensPerQuestion, ceiling);
+    batches = planBatches(opts.spec.count, perCall);
+    warnings.length = 0;
+    if (batches.length > 1) warnings.push(`Asked for ${opts.spec.count} questions in ${batches.length} calls of at most ${perCall} (configured ${tokensPerQuestion} tokens/Q).`);
+  } else {
+    try {
+      const recent = await prisma.generationRun.findMany({
+        where: { provider: credential.provider, model: opts.model, status: 'SUCCEEDED', completionTokens: { not: null }, questionsAccepted: { gt: 0 } },
+        orderBy: { createdAt: 'desc' },
+        take: 10,
+        select: { completionTokens: true, questionsAccepted: true },
+      });
+      if (recent.length >= 3) {
+        const totalTok = recent.reduce((s, r) => s + (r.completionTokens ?? 0), 0);
+        const totalQ = recent.reduce((s, r) => s + (r.questionsAccepted ?? 0), 0);
+        if (totalQ > 0) {
+          const avg = Math.round(totalTok / totalQ);
+          const adaptive = Math.max(400, Math.min(2600, Math.round(avg * 1.2)));
+          if (adaptive < tokensPerQuestion) {
+            tokensPerQuestion = adaptive;
+            perCall = questionsPerCall(tokensPerQuestion, ceiling);
+            batches = planBatches(opts.spec.count, perCall);
+            warnings.length = 0;
+            if (batches.length > 1) warnings.push(`Asked for ${opts.spec.count} questions in ${batches.length} calls of at most ${perCall} (adaptive ${adaptive} tokens/Q from last ${recent.length} runs, avg ${avg}).`);
+            else warnings.push(`Adaptive ${adaptive} tokens/Q from last ${recent.length} runs (avg ${avg}) — single turn.`);
+          }
+        }
+      }
+    } catch {
+      // ignore adaptive failure
+    }
   }
 
   try {
@@ -790,18 +836,55 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
         temperature: opts.temperature ?? 0.4,
         jsonMode: providerDef.supportsJsonMode,
         maxTokens: asked,
+        cacheSystemPrompt: !!pipeline.cacheSystemPrompt,
       };
 
-      let first;
+      let first: Awaited<ReturnType<typeof chatWithFallback>> | null = null;
       try {
-        first = await chatWithFallback(messages, {
-          candidates: candidates.map((c) => ({ ...c, call: { ...c.call, ...shared } })),
-          onRetry: (note) =>
-            warnings.push(
-              `${note.credentialLabel} was busy on batch ${batchIndex + 1} (${note.error.slice(0, 90)}). ` +
-                `Waiting ${Math.round((note.waitedMs ?? 0) / 1000)}s and trying again.`,
-            ),
-        });
+        if (isTwoStage) {
+          // Stage 1: draft loose via main credential (token-efficient, no JSON)
+          const draftMessages: ChatMessage[] = [
+            { role: 'system', content: DRAFT_SYSTEM_PROMPT },
+            { role: 'user', content: `Draft ${batchCount} questions for ${opts.spec.subject}${opts.spec.topic ? `, topic ${opts.spec.topic}` : ''}. Grade ${opts.spec.grade ?? 'unspecified'}.` },
+          ];
+          const draftRes = await chatWithFallback(draftMessages, {
+            candidates: candidates.map((c) => ({ ...c, call: { ...c.call, temperature: 0.7, maxTokens: batchCount * 600, jsonMode: false } })),
+            onRetry: (note) => warnings.push(`${note.credentialLabel} draft batch ${batchIndex + 1} retry`),
+          });
+          const draftText = draftRes.response.text;
+          // Count draft stage tokens
+          promptTokens += draftRes.response.promptTokens ?? 0;
+          completionTokens += draftRes.response.completionTokens ?? 0;
+          latencyMs += draftRes.response.latencyMs;
+          attempts++;
+
+          // Stage 2: format to strict JSON via the cheap external credential.
+          if (pipeline.mode === 'external_external' && cheapCred) {
+            const cheapCall = await callParamsFor(cheapCred);
+            const cheapModel = cheapCred.defaultModel ?? opts.model;
+            const fmtMessages: ChatMessage[] = [
+              { role: 'system', content: FORMATTER_SYSTEM_PROMPT },
+              { role: 'user', content: `Convert these drafts to strict JSON with ${batchCount} questions:\n${draftText.slice(0, 12000)}` },
+            ];
+            const fmtRes = await chatComplete({ ...cheapCall, model: cheapModel, messages: fmtMessages, temperature: 0, maxTokens: asked, jsonMode: true });
+            first = { response: fmtRes as never, usedLabel: `${credential.label}+${cheapCred.label}`, usedModel: cheapModel } as never;
+          } else {
+            // Fallback to single if cheap not configured
+            first = await chatWithFallback(messages, {
+              candidates: candidates.map((c) => ({ ...c, call: { ...c.call, ...shared } })),
+              onRetry: (note) => warnings.push(`${note.credentialLabel} was busy on batch ${batchIndex + 1}`),
+            });
+          }
+        } else {
+          first = await chatWithFallback(messages, {
+            candidates: candidates.map((c) => ({ ...c, call: { ...c.call, ...shared } })),
+            onRetry: (note) =>
+              warnings.push(
+                `${note.credentialLabel} was busy on batch ${batchIndex + 1} (${note.error.slice(0, 90)}). ` +
+                  `Waiting ${Math.round((note.waitedMs ?? 0) / 1000)}s and trying again.`,
+              ),
+          });
+        }
       } catch (err) {
         // "That completion is bigger than I allow" is the one failure worth
         // acting on rather than reporting: the provider has just told us the
@@ -826,9 +909,12 @@ export async function runGeneration(opts: GenerateOptions): Promise<GenerateOutc
         throw err;
       }
 
-      let response = first.response;
-      if (first.usedLabel !== credential.label) {
-        warnings.push(`Batch ${batchIndex + 1} fell back to ${first.usedLabel} (${first.usedModel}).`);
+      let response = first!.response;
+      if (isTwoStage) {
+        // Already warned per-stage above; just note pipeline use once
+        if (batchIndex === 0) warnings.push(`Pipeline ${pipeline.mode}: drafts via ${credential.label}${cheapCred ? ` → formatted via ${cheapCred.label}` : ''}.`);
+      } else if (first!.usedLabel !== credential.label) {
+        warnings.push(`Batch ${batchIndex + 1} fell back to ${first!.usedLabel} (${first!.usedModel}).`);
       }
 
       rawText = response.text;

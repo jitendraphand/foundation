@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError } from '../../lib/api';
-import { Alert, Badge, Card, EmptyState, Field, Modal, PageLoader, Spinner, Tabs, formatDate } from '../../components/ui';
+import { Alert, Badge, Card, EmptyState, Field, Modal, PageLoader, Pagination, Spinner, Tabs, formatDate } from '../../components/ui';
 import type { Tag } from '../../lib/types';
 
-type SettingsTab = 'school' | 'providers' | 'prompts' | 'tags' | 'classes' | 'audit';
+type SettingsTab = 'school' | 'providers' | 'prompts' | 'tags' | 'classes' | 'curriculum' | 'n8n' | 'audit';
 
 export default function AdminSettings() {
   const [tab, setTab] = useState<SettingsTab>('school');
@@ -19,6 +19,8 @@ export default function AdminSettings() {
           { id: 'prompts', label: 'Prompts' },
           { id: 'tags', label: 'Tags' },
           { id: 'classes', label: 'Grades & divisions' },
+          { id: 'curriculum', label: 'Subjects' },
+          { id: 'n8n', label: 'n8n / WhatsApp' },
           { id: 'audit', label: 'Activity log' },
         ]}
         active={tab}
@@ -30,6 +32,8 @@ export default function AdminSettings() {
       {tab === 'prompts' && <Prompts />}
       {tab === 'tags' && <Tags />}
       {tab === 'classes' && <Classes />}
+      {tab === 'curriculum' && <Curriculum />}
+      {tab === 'n8n' && <N8nSettings />}
       {tab === 'audit' && <AuditLog />}
     </div>
   );
@@ -147,6 +151,8 @@ interface Credential {
     projectId?: string;
     apiVersion?: string;
     useAsFallback?: boolean;
+    /** Hidden from the Set test screen when false. */
+    visible?: boolean;
     /** An administrator's explicit ceiling on one reply's length. */
     maxOutputTokens?: number;
     /** What each model was observed to refuse above, learned from a refusal. */
@@ -398,6 +404,17 @@ function Providers() {
     }
   };
 
+  const setVisible = async (credential: Credential, visible: boolean) => {
+    try {
+      await api.patch(`/api/admin/credentials/${credential.id}`, { visible });
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not change visibility.');
+    }
+  };
+
+  const [editing, setEditing] = useState<Credential | null>(null);
+
   /**
    * Fetch and show the real request body for one credential.
    *
@@ -473,6 +490,7 @@ function Providers() {
                   <th>Default model</th>
                   <th className="text-center">Used for</th>
                   <th className="text-center">Fallback</th>
+                  <th className="text-center">Visible</th>
                   <th>Reply limit</th>
                   <th>Added</th>
                   <th />
@@ -526,6 +544,16 @@ function Providers() {
                         aria-label={`Use ${credential.label} as a fallback`}
                       />
                     </td>
+                    <td className="text-center">
+                      <input
+                        type="checkbox"
+                        className="accent-series-1"
+                        checked={credential.meta?.visible !== false}
+                        onChange={(e) => void setVisible(credential, e.target.checked)}
+                        aria-label={`Show ${credential.label} on Set test screen`}
+                        title="When off, this credential is hidden from the Set test screen. Only visible LLMs are offered when generating questions."
+                      />
+                    </td>
                     <td>
                       <input
                         className="input w-24 text-xs tabular-nums"
@@ -548,11 +576,12 @@ function Providers() {
                           void setMaxOutputTokens(credential, next);
                         }}
                         aria-label={`Largest reply ${credential.label} accepts, in tokens`}
-                        title="Tokens per reply. Leave blank unless this endpoint refuses long replies without saying so."
+                        title="Tokens per reply. Leave blank unless this endpoint refuses long replies without saying so. Turns are recalculated from this."
                       />
                     </td>
                     <td className="text-xs text-ink-muted whitespace-nowrap">{formatDate(credential.createdAt)}</td>
                     <td className="text-right whitespace-nowrap">
+                      <button type="button" className="btn-ghost btn-sm" onClick={() => setEditing(credential)}>Edit</button>
                       <button type="button" className="btn-ghost btn-sm" onClick={() => test(credential)} disabled={testing === credential.id}>
                         {testing === credential.id ? 'Testing…' : 'Test connection'}
                       </button>
@@ -591,7 +620,7 @@ function Providers() {
                     if (trial) {
                       extras.push(
                         <tr key={`${credential.id}-trial`}>
-                          <td colSpan={9} className="bg-surface-sunken">
+                          <td colSpan={10} className="bg-surface-sunken">
                             <TrialReport result={trial} onDismiss={() => setTrials((p) => ({ ...p, [credential.id]: null }))} />
                           </td>
                         </tr>,
@@ -600,7 +629,7 @@ function Providers() {
                     if (tuningFor === credential.id) {
                       extras.push(
                         <tr key={`${credential.id}-tuning`}>
-                          <td colSpan={9} className="bg-surface-sunken">
+                          <td colSpan={10} className="bg-surface-sunken">
                             <ModelSettings
                               credential={credential}
                               onCancel={() => setTuningFor(null)}
@@ -613,7 +642,7 @@ function Providers() {
                     if (requestFor === credential.id) {
                       extras.push(
                         <tr key={`${credential.id}-request`}>
-                          <td colSpan={9} className="bg-surface-sunken">
+                          <td colSpan={10} className="bg-surface-sunken">
                             <RequestPreview preview={requests[credential.id] ?? null} />
                           </td>
                         </tr>,
@@ -660,6 +689,8 @@ function Providers() {
         )}
       </Card>
 
+      <PipelineSettings credentials={credentials} />
+
       <StepUpSettings credentials={credentials} />
       <ImageSettings />
 
@@ -683,6 +714,18 @@ function Providers() {
           onAdded={async (warning) => {
             setAdding(false);
             setNotice(warning ?? 'Credential saved. Use "Test connection" to check it works.');
+            await load();
+          }}
+        />
+      )}
+      {editing && (
+        <EditCredentialModal
+          credential={editing}
+          providers={providers}
+          onClose={() => setEditing(null)}
+          onSaved={async () => {
+            setEditing(null);
+            setNotice('Credential updated.');
             await load();
           }}
         />
@@ -982,6 +1025,161 @@ function AddCredentialModal({ providers, onClose, onAdded }: { providers: Provid
   );
 }
 
+function EditCredentialModal({ credential, providers, onClose, onSaved }: { credential: Credential; providers: ProviderDef[]; onClose: () => void; onSaved: () => void }) {
+  const [label, setLabel] = useState(credential.label);
+  const [baseUrl, setBaseUrl] = useState(credential.baseUrl);
+  const [defaultModel, setDefaultModel] = useState(credential.defaultModel ?? '');
+  const [isActive, setIsActive] = useState(credential.isActive);
+  const [apiKey, setApiKey] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const def = providers.find((p) => p.id === credential.provider);
+  const isCustomBase = !['bedrock', 'vertex', 'oci'].includes(credential.provider) && credential.provider !== 'azure';
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const payload: Record<string, unknown> = {
+        label: label.trim(),
+        defaultModel: defaultModel.trim() || null,
+        isActive,
+      };
+      if (isCustomBase && baseUrl.trim() && baseUrl.trim() !== credential.baseUrl) payload.baseUrl = baseUrl.trim();
+      if (apiKey.trim()) payload.apiKey = apiKey.trim();
+      await api.patch(`/api/admin/credentials/${credential.id}`, payload);
+      onSaved();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not save.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal open onClose={onClose} title={`Edit ${credential.label}`}>
+      <form onSubmit={submit} className="space-y-4">
+        {error && <Alert tone="error">{error}</Alert>}
+        <Field label="Provider">
+          <input className="input bg-surface-sunken" value={def?.label ?? credential.provider} disabled />
+        </Field>
+        <Field label="Label" required>
+          <input className="input" value={label} onChange={(e) => setLabel(e.target.value)} required />
+        </Field>
+        {isCustomBase && (
+          <Field label="Base URL" hint="Override the provider endpoint if needed.">
+            <input className="input font-mono text-xs" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder={def?.defaultBaseUrl ?? ''} />
+          </Field>
+        )}
+        <Field label="Default model" hint={def?.modelHint}>
+          <input className="input font-mono text-xs" value={defaultModel} onChange={(e) => setDefaultModel(e.target.value)} list="edit-provider-models" />
+          <datalist id="edit-provider-models">
+            {def?.suggestedModels.map((m) => <option key={m} value={m} />)}
+          </datalist>
+        </Field>
+        <Field label="API key" hint="Leave blank to keep the current key. Paste a new one to rotate.">
+          <input className="input font-mono text-xs" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="••••••••" autoComplete="off" />
+        </Field>
+        <label className="flex items-center gap-2 text-sm">
+          <input type="checkbox" className="accent-series-1" checked={isActive} onChange={(e) => setIsActive(e.target.checked)} />
+          <span>Active — credential can be used for generation</span>
+        </label>
+        <div className="flex justify-end gap-2">
+          <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
+          <button type="submit" className="btn-primary" disabled={busy}>{busy ? <Spinner label="Saving" /> : 'Save changes'}</button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function PipelineSettings({ credentials }: { credentials: Credential[] }) {
+  const [mode, setMode] = useState<'single' | 'external_external'>('single');
+  const [cheapId, setCheapId] = useState<string>('');
+  const [cache, setCache] = useState(false);
+  const [tokensPerQ, setTokensPerQ] = useState<string>('');
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api.get<{ config: { mode: string; cheapCredentialId?: string | null; cacheSystemPrompt?: boolean; tokensPerQuestion?: number | null } }>('/api/admin/generation-pipeline')
+      .then((res) => {
+        setMode(res.config.mode === 'external_external' ? 'external_external' : 'single');
+        setCheapId(res.config.cheapCredentialId ?? '');
+        setCache(!!res.config.cacheSystemPrompt);
+        setTokensPerQ(res.config.tokensPerQuestion ? String(res.config.tokensPerQuestion) : '');
+      })
+      .catch(() => undefined);
+  }, []);
+
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const parsed = tokensPerQ.trim() === '' ? null : Number(tokensPerQ);
+      if (parsed !== null && (!Number.isFinite(parsed) || parsed < 200 || parsed > 5000)) {
+        setError('Tokens per question must be between 200 and 5000, or blank for adaptive.');
+        setBusy(false);
+        return;
+      }
+      const res = await api.put<{ config: { mode: string } }>('/api/admin/generation-pipeline', {
+        mode,
+        cheapCredentialId: cheapId || null,
+        cacheSystemPrompt: cache,
+        tokensPerQuestion: parsed,
+      });
+      setNotice(`Pipeline saved: ${res.config.mode}${parsed ? `, ${parsed} tok/Q` : ' (adaptive)'}`);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not save pipeline.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Card title="Generation pipeline">
+      {error && <Alert tone="error" onDismiss={() => setError(null)}>{error}</Alert>}
+      {notice && <Alert tone="success" onDismiss={() => setNotice(null)}>{notice}</Alert>}
+      <p className="text-xs text-ink-muted mb-3">
+        Choose how questions are built. <strong>Single</strong> = one external call with JSON. <strong>External+Cheap</strong> = main drafts loose, cheap external formats to strict JSON (token-efficient).
+      </p>
+      <div className="grid sm:grid-cols-2 gap-4">
+        <Field label="Pipeline mode">
+          <select className="input" value={mode} onChange={(e) => setMode(e.target.value as 'single' | 'external_external')}>
+            <option value="single">External API — JSON enforced output</option>
+            <option value="external_external">External main + External cheap for JSON format</option>
+          </select>
+        </Field>
+        {mode !== 'single' && (
+          <Field label="Cheap credential for JSON format" hint="Cheap model that converts drafts to strict JSON">
+            <select className="input" value={cheapId} onChange={(e) => setCheapId(e.target.value)}>
+              <option value="">— Select cheap credential —</option>
+              {credentials.map((c) => <option key={c.id} value={c.id}>{c.label} ({c.provider})</option>)}
+            </select>
+          </Field>
+        )}
+      </div>
+      <div className="mt-3">
+        <Field label="Tokens per question (estimate)" hint="1400 is safe default. Actual is often 600–1000 for simple MCQs. Blank = adaptive: after 3 runs, average from history is used (e.g., 800 → 4096 tokens = 4/turn instead of 2). Lower = fewer turns, higher = safer JSON.">
+          <input className="input w-32" type="number" min={200} max={5000} step={100} placeholder="adaptive" value={tokensPerQ} onChange={(e) => setTokensPerQ(e.target.value)} />
+        </Field>
+        <p className="text-[11px] text-ink-faint mt-1">Actual tokens are often less than estimate. With 4096 limit, 1400 → 2/turn (20 turns for 40 Q), 800 → 4/turn (10 turns). Adaptive learns from last 10 runs.</p>
+      </div>
+      <label className="flex items-center gap-2 text-sm mt-3">
+        <input type="checkbox" className="accent-series-1" checked={cache} onChange={(e) => setCache(e.target.checked)} />
+        <span>Cache system prompt (Anthropic prompt caching — saves ~80% input tokens on multi-turn runs)</span>
+      </label>
+      <p className="text-[11px] text-ink-faint mt-1">Turns on Set test screen are recalculated from the formatter's max output tokens and this estimate when pipeline is two-stage.</p>
+      <div className="flex justify-end mt-3">
+        <button type="button" className="btn-primary btn-sm" onClick={() => void save()} disabled={busy}>{busy ? <Spinner label="Saving" /> : 'Save pipeline'}</button>
+      </div>
+    </Card>
+  );
+}
+
 /**
  * Which provider answers a student pressing "5 more like this".
  *
@@ -995,17 +1193,19 @@ function StepUpSettings({ credentials }: { credentials: Credential[] }) {
   const [credentialId, setCredentialId] = useState('');
   const [model, setModel] = useState('');
   const [dailyQuota, setDailyQuota] = useState('5');
+  const [verify, setVerify] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     api
-      .get<{ config: { credentialId: string; model?: string; dailyQuota?: number } | null }>('/api/admin/step-up')
+      .get<{ config: { credentialId: string; model?: string; dailyQuota?: number; verify?: boolean } | null }>('/api/admin/step-up')
       .then((res) => {
         setCredentialId(res.config?.credentialId ?? '');
         setModel(res.config?.model ?? '');
         setDailyQuota(String(res.config?.dailyQuota ?? 5));
+        setVerify(res.config?.verify ?? false);
       })
       .catch(() => undefined);
   }, []);
@@ -1018,6 +1218,7 @@ function StepUpSettings({ credentials }: { credentials: Credential[] }) {
         credentialId: credentialId || null,
         model: model.trim() || undefined,
         dailyQuota: Number(dailyQuota) || 0,
+        verify,
       });
       setNotice(res.message);
     } catch (err) {
@@ -1085,6 +1286,25 @@ function StepUpSettings({ credentials }: { credentials: Credential[] }) {
             </span>
           </div>
         </Field>
+      </div>
+
+      <div className="mt-4">
+        <label className="flex items-start gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            className="accent-series-1 mt-0.5"
+            checked={verify}
+            onChange={(e) => setVerify(e.target.checked)}
+            disabled={!credentialId}
+          />
+          <span className="text-sm">
+            <span className="font-medium">Verify questions before serving</span>
+            <span className="block text-xs text-ink-muted">
+              Runs a second, slower LLM pass to double-check the generated questions. Leave off for the fastest
+              response &mdash; students are waiting on this.
+            </span>
+          </span>
+        </label>
       </div>
 
       <div className="flex justify-end mt-3">
@@ -1825,15 +2045,18 @@ interface AuditEntry {
 
 function AuditLog() {
   const [entries, setEntries] = useState<AuditEntry[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
+    setLoading(true);
     api
-      .get<{ entries: AuditEntry[] }>('/api/admin/audit?pageSize=100')
-      .then((res) => setEntries(res.entries))
+      .get<{ entries: AuditEntry[]; total: number }>(`/api/admin/audit?pageSize=100&page=${page}`)
+      .then((res) => { setEntries(res.entries); setTotal(res.total); })
       .catch(() => undefined)
       .finally(() => setLoading(false));
-  }, []);
+  }, [page]);
 
   if (loading) return <PageLoader label="Loading" />;
 
@@ -1857,6 +2080,223 @@ function AuditLog() {
           </tbody>
         </table>
       </div>
+      <Pagination page={page} pageSize={100} total={total} onChange={setPage} />
     </Card>
+  );
+}
+
+// --- Subjects (curriculum) ---------------------------------------------------
+
+interface CurriculumNodeRow {
+  id: string;
+  parentId: string | null;
+  level: 'SUBJECT' | 'TOPIC' | 'SUBTOPIC';
+  code: string;
+  label: string;
+  path: string;
+  grade: string | null;
+  sortOrder: number;
+  isActive: boolean;
+}
+
+/**
+ * The subject list the "Set test" screen offers. Subjects are rows, not free
+ * text, so every question lands in the same bucket and the dropdown on the
+ * generation form is pre-populated from here.
+ */
+function Curriculum() {
+  const [nodes, setNodes] = useState<CurriculumNodeRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [label, setLabel] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const res = await api.get<{ nodes: CurriculumNodeRow[] }>('/api/admin/curriculum');
+      setNodes(res.nodes);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not load subjects.');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const subjects = nodes.filter((n) => n.level === 'SUBJECT');
+
+  const add = async () => {
+    const name = label.trim();
+    if (!name) return;
+    setBusy(true);
+    setError(null);
+    try {
+      // code is derived from the label: lowercase, underscores, unique-ish.
+      const code = name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 80) || `subject_${Date.now()}`;
+      await api.post('/api/admin/curriculum', { level: 'SUBJECT', code, label: name, sortOrder: subjects.length });
+      setLabel('');
+      setNotice(`Subject "${name}" added. It now appears in the Set test dropdown.`);
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not add the subject.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const retire = async (node: CurriculumNodeRow) => {
+    try {
+      await api.delete(`/api/admin/curriculum/${node.id}`);
+      setNotice(`"${node.label}" hidden from the dropdown. Existing questions keep their subject.`);
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not remove the subject.');
+    }
+  };
+
+  if (loading) return <PageLoader label="Loading subjects" />;
+
+  return (
+    <div className="space-y-4">
+      {error && <Alert tone="error" onDismiss={() => setError(null)}>{error}</Alert>}
+      {notice && <Alert tone="success" onDismiss={() => setNotice(null)}>{notice}</Alert>}
+
+      <Card title="Subjects">
+        <p className="text-xs text-ink-muted mb-3">
+          These populate the Subject dropdown on the Set test screen. Keep the list to the subjects the school
+          actually teaches — every generated question is filed under the one chosen.
+        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            className="input w-64"
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            placeholder="e.g. Mathematics"
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); void add(); } }}
+          />
+          <button type="button" className="btn-primary btn-sm" onClick={() => void add()} disabled={busy || !label.trim()}>
+            {busy ? <Spinner label="Adding" /> : 'Add subject'}
+          </button>
+        </div>
+
+        {subjects.length === 0 ? (
+          <p className="text-sm text-ink-muted mt-4">No subjects yet. The Set test screen falls back to a free-text box until one exists.</p>
+        ) : (
+          <ul className="mt-4 divide-y divide-line">
+            {subjects.map((s) => (
+              <li key={s.id} className="py-2 flex items-center justify-between gap-3">
+                <span className="text-sm font-medium">{s.label}</span>
+                <button type="button" className="btn-ghost btn-sm text-bad" onClick={() => void retire(s)}>Remove</button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+// --- n8n / WhatsApp + email ----------------------------------------------------
+
+/**
+ * Connection settings for the n8n sidecar and the password-reset flows.
+ * The webhook URLs are all the API needs; everything else lives in n8n itself.
+ */
+function N8nSettings() {
+  const [webhookUrl, setWebhookUrl] = useState('');
+  const [emailWebhookUrl, setEmailWebhookUrl] = useState('');
+  const [n8nUrl, setN8nUrl] = useState('');
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    api.get<{ webhookUrl: string; emailWebhookUrl?: string; n8nUrl: string }>('/api/admin/n8n')
+      .then((res) => { setWebhookUrl(res.webhookUrl ?? ''); setEmailWebhookUrl(res.emailWebhookUrl ?? ''); setN8nUrl(res.n8nUrl ?? ''); })
+      .catch(() => undefined);
+  }, []);
+
+  const save = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api.put<{ message: string }>('/api/admin/n8n', {
+        webhookUrl: webhookUrl.trim() || null,
+        emailWebhookUrl: emailWebhookUrl.trim() || null,
+        n8nUrl: n8nUrl.trim() || null,
+      });
+      setNotice(res.message);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not save n8n settings.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      {error && <Alert tone="error" onDismiss={() => setError(null)}>{error}</Alert>}
+      {notice && <Alert tone="success" onDismiss={() => setNotice(null)}>{notice}</Alert>}
+
+      <Card title="n8n automation">
+        <p className="text-xs text-ink-muted mb-3">
+          n8n runs as part of the stack (<code className="font-mono text-xs">docker compose up -d</code>). It handles
+          WhatsApp and email delivery for self-service password resets. Its editor lives at{' '}
+          <code className="font-mono text-xs">https://n8n.&lt;your-host&gt;</code>.
+        </p>
+
+        <div className="space-y-4">
+          <Field label="n8n editor URL" hint="Where the n8n dashboard lives, e.g. https://n8n.your-school.sslip.io. The Open n8n button uses this.">
+            <input className="input font-mono text-xs" value={n8nUrl} onChange={(e) => setN8nUrl(e.target.value)} placeholder="https://n8n.your-host" />
+          </Field>
+
+          <Field
+            label="WhatsApp webhook URL (production webhook in n8n)"
+            hint="Create a Webhook node in n8n, copy its Production URL here. The API POSTs { to, message } to it whenever a password reset should reach a phone."
+          >
+            <input className="input font-mono text-xs" value={webhookUrl} onChange={(e) => setWebhookUrl(e.target.value)} placeholder="https://n8n.your-host/webhook/whatsapp-reset" />
+          </Field>
+
+          <Field
+            label="Email webhook URL (production webhook in n8n)"
+            hint="A second Webhook node whose downstream EmailSend node delivers the reset. The API POSTs { to, subject, message } to it whenever a password reset should reach an inbox."
+          >
+            <input className="input font-mono text-xs" value={emailWebhookUrl} onChange={(e) => setEmailWebhookUrl(e.target.value)} placeholder="https://n8n.your-host/webhook/email-reset" />
+          </Field>
+
+          <div className="flex justify-end">
+            <button type="button" className="btn-primary btn-sm" onClick={() => void save()} disabled={busy}>
+              {busy ? <Spinner label="Saving" /> : 'Save n8n settings'}
+            </button>
+          </div>
+        </div>
+      </Card>
+
+      <Card title="Open n8n">
+        <p className="text-xs text-ink-muted mb-3">
+          Configure the WhatsApp workflow inside n8n: a Webhook node (paste its URL above), then a WhatsApp
+          Business Cloud node (or HTTP Request to the Graph API) that sends <code className="font-mono text-xs">{`{{ $json.body.message }}`}</code>{' '}
+          to <code className="font-mono text-xs">{`{{ $json.body.to }}`}</code>.
+        </p>
+        <p className="text-xs text-ink-muted mb-3">
+          For email resets, build a second workflow the same way: a Webhook node (paste its URL in the Email
+          field above), then an EmailSend node delivering <code className="font-mono text-xs">{`{{ $json.body.subject }}`}</code>{' '}
+          and <code className="font-mono text-xs">{`{{ $json.body.message }}`}</code> to{' '}
+          <code className="font-mono text-xs">{`{{ $json.body.to }}`}</code>.
+        </p>
+        {n8nUrl.trim() ? (
+          <a href={n8nUrl.trim()} target="_blank" rel="noreferrer" className="btn-primary btn-sm inline-flex">
+            Open n8n dashboard ↗
+          </a>
+        ) : (
+          <Alert tone="info">Set the n8n editor URL above to enable this button.</Alert>
+        )}
+      </Card>
+    </div>
   );
 }

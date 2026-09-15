@@ -17,6 +17,8 @@ export interface ExamRules {
   proctored: boolean;
   proctorAllowance: number;
   proctorFullscreen: boolean;
+  /** Enforce each question's own time limit (TestQuestion.timeLimitSeconds). */
+  perQuestionTiming: boolean;
 }
 
 export const DEFAULT_EXAM_RULES: ExamRules = {
@@ -26,6 +28,7 @@ export const DEFAULT_EXAM_RULES: ExamRules = {
   proctored: false,
   proctorAllowance: 3,
   proctorFullscreen: true,
+  perQuestionTiming: false,
 };
 
 /** The shape a test comes back from the API in, as far as this cares. */
@@ -33,7 +36,10 @@ export interface TestWithRules {
   shuffleQuestions: boolean;
   shuffleOptions: boolean;
   showAnswersAfter: boolean;
-  meta?: { proctoring?: { enabled?: boolean; allowance?: number; requireFullscreen?: boolean } } | null;
+  meta?: {
+    proctoring?: { enabled?: boolean; allowance?: number; requireFullscreen?: boolean };
+    perQuestionTiming?: boolean;
+  } | null;
 }
 
 export function rulesFromTest(test: TestWithRules): ExamRules {
@@ -45,6 +51,7 @@ export function rulesFromTest(test: TestWithRules): ExamRules {
     proctored: p?.enabled === true,
     proctorAllowance: p?.allowance ?? DEFAULT_EXAM_RULES.proctorAllowance,
     proctorFullscreen: p?.requireFullscreen ?? DEFAULT_EXAM_RULES.proctorFullscreen,
+    perQuestionTiming: test.meta?.perQuestionTiming === true,
   };
 }
 
@@ -54,6 +61,7 @@ export function rulesToBody(rules: ExamRules) {
     shuffleQuestions: rules.shuffleQuestions,
     shuffleOptions: rules.shuffleOptions,
     showAnswersAfter: rules.showAnswersAfter,
+    perQuestionTiming: rules.perQuestionTiming,
     proctoring: {
       enabled: rules.proctored,
       allowance: rules.proctorAllowance,
@@ -77,7 +85,9 @@ export function describeExamRules(rules: ExamRules): string {
 
   const answers = rules.showAnswersAfter ? 'Answers shown once released' : 'Answers never shown';
 
-  return `${shuffle}. ${proctor}. ${answers}.`;
+  const perQ = rules.perQuestionTiming ? 'Per-question time limits enforced' : 'Paper time limit only';
+
+  return `${shuffle}. ${proctor}. ${perQ}. ${answers}.`;
 }
 
 export function ExamRulesEditor({
@@ -112,6 +122,23 @@ export function ExamRulesEditor({
         Shuffling makes it harder to copy from the next desk. Turn it off for a paper whose questions build on each
         other, or one you want every student to sit in the same order.
       </p>
+
+      <div className="pt-3 border-t border-line space-y-2">
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            className="accent-series-1"
+            checked={value.perQuestionTiming}
+            onChange={(e) => set('perQuestionTiming', e.target.checked)}
+          />
+          <span>Enforce per-question time limits</span>
+        </label>
+        <p className="text-[11px] text-ink-faint pl-6">
+          Each question gets the time limit set in the builder (falling back to its estimate). The clock starts at the
+          student's first answer on that question, server-seen — after it runs out, further saves are refused but
+          whatever was saved in time still counts. The paper's own time limit keeps running regardless.
+        </p>
+      </div>
 
       <div className="pt-3 border-t border-line space-y-2">
         <label className="flex items-center gap-2 text-sm">

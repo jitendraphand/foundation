@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, ApiError } from '../../lib/api';
-import { Alert, Badge, Card, EmptyState, Field, Modal, PageLoader, formatDate } from '../../components/ui';
+import { Alert, Badge, Card, EmptyState, Field, Modal, PageLoader, Pagination, formatDate } from '../../components/ui';
 import { WindowEditor, describeWindowValue, type WindowPreset, type WindowValue } from '../../components/WindowEditor';
 import { DEFAULT_EXAM_RULES, ExamRulesEditor, rulesToBody, type ExamRules } from '../../components/ExamRules';
 
@@ -33,25 +33,32 @@ interface TestRow {
 
 export default function AdminTests() {
   const [tests, setTests] = useState<TestRow[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [kind, setKind] = useState<'REGULAR' | 'PRACTICE' | ''>('');
+  const [page, setPage] = useState(1);
   const [creating, setCreating] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const query = new URLSearchParams({ pageSize: '50' });
+      const query = new URLSearchParams({ pageSize: '50', page: String(page) });
       if (kind) query.set('kind', kind);
-      const res = await api.get<{ tests: TestRow[] }>(`/api/admin/tests?${query}`);
+      const res = await api.get<{ tests: TestRow[]; total: number }>(`/api/admin/tests?${query}`);
       setTests(res.tests);
+      setTotal(res.total);
       setError(null);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not load tests.');
     } finally {
       setLoading(false);
     }
+  }, [kind, page]);
+
+  useEffect(() => {
+    setPage(1);
   }, [kind]);
 
   useEffect(() => {
@@ -75,6 +82,17 @@ export default function AdminTests() {
       await load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not change the release state.');
+    }
+  };
+
+  const removeTest = async (test: TestRow) => {
+    if (!confirm(`Delete "${test.title}"? This will delete the test and all ${test._count.attempts} attempt(s) and answers permanently. This cannot be undone.`)) return;
+    try {
+      const res = await api.delete<{ message?: string }>(`/api/admin/tests/${test.id}`);
+      setNotice(res.message ?? 'Test deleted.');
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not delete test.');
     }
   };
 
@@ -198,12 +216,16 @@ export default function AdminTests() {
                           {test.resultsReleased ? 'Withdraw results' : 'Release results'}
                         </button>
                       )}
+                      <button type="button" className="btn-ghost btn-sm text-bad" onClick={() => void removeTest(test)}>
+                        Delete
+                      </button>
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
           </div>
+          <Pagination page={page} pageSize={50} total={total} onChange={setPage} />
         </Card>
       )}
 

@@ -281,19 +281,20 @@ function ResetAdminPasswordModal({
   onClose: () => void;
   onDone: (message: string) => void;
 }) {
-  const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // Shown once, after the reset: read it out or hand it over in person.
+  const [tempPassword, setTempPassword] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     setBusy(true);
     setError(null);
     try {
-      const res = await api.post<{ message: string }>(`/api/admin/users/${admin.id}/reset-password`, {
-        newPassword: password,
-      });
-      onDone(`${res.message} Temporary password: ${password}`);
+      const res = await api.post<{ message: string; newPassword?: string }>(`/api/admin/users/${admin.id}/reset-password`, {});
+      setTempPassword(res.newPassword ?? null);
+      onDone(res.message);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not reset that password.');
     } finally {
@@ -301,14 +302,47 @@ function ResetAdminPasswordModal({
     }
   };
 
+  const copy = async () => {
+    if (!tempPassword) return;
+    try {
+      await navigator.clipboard.writeText(tempPassword);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard refused; the password is still on screen to copy by hand.
+    }
+  };
+
+  if (tempPassword !== null) {
+    return (
+      <Modal open onClose={onClose} title={`Password reset for ${admin.username}`}>
+        <div className="space-y-4">
+          <Alert tone="info">{admin.username} has been signed out of every device and must choose a new password at
+            next sign-in.</Alert>
+          <Field label="Temporary password — hand this over in person" hint="It will not be shown again.">
+            <div className="flex gap-2">
+              <input className="input font-mono" value={tempPassword} readOnly onFocus={(e) => e.target.select()} />
+              <button type="button" className="btn-secondary btn-sm shrink-0" onClick={copy}>
+                {copied ? 'Copied' : 'Copy'}
+              </button>
+            </div>
+          </Field>
+          <div className="flex justify-end">
+            <button type="button" className="btn-primary" onClick={onClose}>Close</button>
+          </div>
+        </div>
+      </Modal>
+    );
+  }
+
   return (
     <Modal open onClose={onClose} title={`Reset password for ${admin.username}`}>
       <form onSubmit={submit} className="space-y-4">
         {error && <Alert tone="error">{error}</Alert>}
 
         <p className="text-sm text-ink-muted">
-          Set a temporary password and give it to {admin.firstName} in person. They will be asked to choose their own
-          the next time they sign in.
+          A temporary password is generated for {admin.firstName}. It is shown once after the reset so you can give
+          it to them in person; they will choose their own the next time they sign in.
         </p>
 
         <Alert tone="warn">
@@ -316,27 +350,9 @@ function ResetAdminPasswordModal({
           is the point if the account has been compromised.
         </Alert>
 
-        <Field label="Temporary password" required>
-          <div className="flex gap-2">
-            <input
-              className="input font-mono"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-              minLength={8}
-              autoFocus
-            />
-            <button type="button" className="btn-secondary btn-sm shrink-0" onClick={() => setPassword(suggestPassword())}>
-              Suggest
-            </button>
-          </div>
-        </Field>
-
         <div className="flex justify-end gap-2">
           <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
-          <button type="submit" className="btn-primary" disabled={busy}>
-            {busy ? <Spinner label="Resetting" /> : 'Reset password'}
-          </button>
+          <button type="submit" className="btn-primary" disabled={busy}>{busy ? 'Resetting…' : 'Reset password'}</button>
         </div>
       </form>
     </Modal>

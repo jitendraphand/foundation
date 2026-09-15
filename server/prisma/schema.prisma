@@ -78,6 +78,12 @@ enum AttemptStatus {
   ABANDONED
 }
 
+enum FlagStatus {
+  OPEN
+  RESOLVED
+  DISMISSED
+}
+
 enum GenerationStatus {
   PENDING
   RUNNING
@@ -150,6 +156,13 @@ model User {
 
   rollNo String
 
+  /// Mobile number for WhatsApp password reset. Only System Administrator (admins.manage) may set it.
+  mobile String?
+
+  /// Email address for email password reset. Same rule as mobile: only
+  /// System Administrator (admins.manage) may set it.
+  email String?
+
   dateOfBirth DateTime @db.Date
 
   passwordHash       String
@@ -190,7 +203,9 @@ model User {
   backups             BackupArchive[]
   activities          Activity[]           @relation("ActivityCreatedBy")
   targetedActivities  Activity[]           @relation("ActivityTarget")
-  activityCompletions ActivityCompletion[]
+   activityCompletions ActivityCompletion[]
+   flaggedQuestions    QuestionFlag[] @relation("FlaggedBy")
+   resolvedFlags       QuestionFlag[] @relation("FlagResolvedBy")
 
   // A roll number is unique inside a class, not globally.
   @@unique([grade, division, rollNo], name: "roll_in_class")
@@ -379,6 +394,7 @@ model Question {
   testQuestions TestQuestion[]
   answers       Answer[]
   assets        Asset[]
+  flags         QuestionFlag[]
 
   @@index([createdById, status])
   @@index([status, subject])
@@ -386,6 +402,7 @@ model Question {
   @@index([difficultyTag, cognitiveTag])
   @@index([subject, topic, subtopic])
   @@index([generationRunId])
+  @@index([curriculumNodeId])
   @@index([skillTags], type: Gin)
 }
 
@@ -492,6 +509,7 @@ model GenerationRun {
   @@index([status, createdAt])
   @@index([requestedById])
   @@index([targetUserId])
+  @@index([promptTemplateId])
 }
 
 /// LLM provider credentials. The key itself is AES-256-GCM encrypted at rest
@@ -596,10 +614,16 @@ model Test {
 
   questions TestQuestion[]
   attempts  Attempt[]
+  flags     QuestionFlag[]
 
   @@index([status, kind, startsAt])
   @@index([targetUserId])
   @@index([createdById])
+  @@index([releasedById])
+  /// Audience filters (has / hasSome) run on every student dashboard load;
+  /// without GIN each PUBLISHED test is a sequential scan.
+  @@index([targetGrades], type: Gin)
+  @@index([targetDivisions], type: Gin)
 }
 
 model TestQuestion {
@@ -611,6 +635,11 @@ model TestQuestion {
 
   position Int
   marks    Float // copied from the test, overridable per question
+
+  /// Per-question time limit override (seconds). Falls back to the question's
+  /// `estimatedSeconds` when not set, so existing tests keep working without
+  /// changes to the question bank.
+  timeLimitSeconds Int?
 
   @@unique([testId, questionId])
   @@index([testId, position])
@@ -658,6 +687,7 @@ model Attempt {
   meta      Json     @default("{}")
 
   answers Answer[]
+  flags   QuestionFlag[]
 
   @@unique([testId, userId, attemptNumber])
   @@index([userId, status])
@@ -667,6 +697,9 @@ model Attempt {
   /// the whole status index looking for the handful of papers still open - fine
   /// on a new install, linear in the school's entire history by year three.
   @@index([status, expiresAt])
+  /// Analytics read breakdown->axis->tag on every report; GIN turns those
+  /// JSONB lookups into index scans over the whole attempt history.
+  @@index([breakdown], type: Gin)
 }
 
 model Answer {
@@ -695,6 +728,52 @@ model Answer {
   @@index([questionId, isCorrect])
 }
 
+// --- Question flags --------------------------------------------------------
+// A student reports a question as inconsistent/incorrect. The flag is tied
+// to the test it appeared in so the test's creator can see it in context.
+// One flag per student per question per test prevents spam while still
+// letting many students flag the same bad question.
+model QuestionFlag {
+  id String @id @default(uuid())
+
+  questionId String
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  testId String
+  test   Test     @relation(fields: [testId], references: [id], onDelete: Cascade)
+
+  flaggedById String
+  flaggedBy   User   @relation("FlaggedBy", fields: [flaggedById], references: [id], onDelete: Cascade)
+
+  attemptId String?
+  attempt   Attempt? @relation(fields: [attemptId], references: [id], onDelete: SetNull)
+
+  /// Short category, e.g. WRONG_ANSWER | TYPO | UNCLEAR | OUT_OF_SYLLABUS | OTHER
+  category String? @db.VarChar(40)
+  /// Free-text reason, up to 2000 chars.
+  reason String? @db.Text
+
+  status FlagStatus @default(OPEN)
+
+  resolvedById String?
+  resolvedBy   User?   @relation("FlagResolvedBy", fields: [resolvedById], references: [id], onDelete: SetNull)
+  resolvedAt   DateTime?
+  resolutionNote String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  meta      Json     @default("{}")
+
+  @@unique([questionId, testId, flaggedById], name: "unique_flag_per_user_per_question_per_test")
+  @@index([testId, status])
+  @@index([questionId, status])
+  @@index([flaggedById])
+  @@index([attemptId])
+  @@index([resolvedById])
+  @@index([testId, questionId])
+  @@index([status, createdAt])
+}
+
 // --- Operations ------------------------------------------------------------
 
 model BackupArchive {
@@ -717,6 +796,7 @@ model BackupArchive {
   meta      Json      @default("{}")
 
   @@index([createdAt])
+  @@index([createdById])
 }
 
 model AuditLog {
@@ -733,6 +813,7 @@ model AuditLog {
 
   @@index([actorId, createdAt])
   @@index([action, createdAt])
+  @@index([entityId])
 }
 
 /// Loose key/value application settings, so a new toggle never needs a
@@ -802,6 +883,9 @@ model Activity {
   @@index([status, isMandatory])
   @@index([targetUserId])
   @@index([createdById])
+  /// Same audience-filter pattern as Test; see the note there.
+  @@index([targetGrades], type: Gin)
+  @@index([targetDivisions], type: Gin)
 }
 
 /// One student's progress through one activity. Created when they open it,
@@ -868,4 +952,7 @@ model Session {
 
   @@index([userId, revokedAt])
   @@index([expiresAt])
+  /// The nightly prune scans for stale sessions; a bare revokedAt index lets
+  /// the OR in that query use an index on each side.
+  @@index([revokedAt])
 }

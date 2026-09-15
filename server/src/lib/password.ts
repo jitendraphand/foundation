@@ -1,4 +1,5 @@
 import argon2 from 'argon2';
+import { randomInt } from 'node:crypto';
 
 /**
  * Moderate password policy, as specified:
@@ -54,6 +55,26 @@ export function checkPassword(pw: string, context: { username?: string; firstNam
   const score = points <= 2 ? 'weak' : points === 3 ? 'fair' : points === 4 ? 'good' : 'strong';
 
   return { ok: errors.length === 0, errors, score };
+}
+
+/**
+ * A temporary password the office reads out or hands over in person.
+ *
+ * Two short words and three digits: pronounceable across a desk, writable on a
+ * slip, typeable by a child from a note — and it satisfies the policy above
+ * (length, a letter, a digit) without being guessable from the username.
+ * Drawn with crypto.randomInt, not Math.random: this is a credential, so its
+ * randomness must not be predictable from anything an attacker can observe.
+ * Whoever receives it must still choose their own at first sign-in.
+ */
+const TEMP_WORDS = [
+  'sun', 'river', 'moon', 'hill', 'star', 'leaf', 'cloud', 'stone',
+  'bird', 'wave', 'tree', 'fire', 'rain', 'gold', 'lion', 'blue',
+];
+
+export function generateTempPassword(): string {
+  const pick = () => TEMP_WORDS[randomInt(TEMP_WORDS.length)];
+  return `${pick()}${pick()}${randomInt(0, 10)}${randomInt(0, 10)}${randomInt(0, 10)}`;
 }
 
 // Tuned for the 12 GB / 2 OCPU A1 shape: ~64 MB and 3 passes per hash keeps a

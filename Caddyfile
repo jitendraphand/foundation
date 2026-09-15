@@ -8,7 +8,18 @@
 	# The GitHub Pages landing button links here.  Everything under /api goes to
 	# the Node service; everything else is the React single-page app.
 	handle /api/* {
-		reverse_proxy api:4000
+		reverse_proxy api:4000 {
+			# LLM streaming (180s silence timeout + 15min max) must flush
+			# chunks immediately; buffered proxy would hide the stream.
+			flush_interval -1
+			# Backup restore can take >60s for large archives (pg_restore + migrate).
+			# Without explicit timeouts Caddy closes the connection → 502.
+			transport http {
+				dial_timeout 10s
+				read_timeout 300s
+				write_timeout 300s
+			}
+		}
 	}
 
 	handle /uploads/* {
@@ -39,4 +50,10 @@
 # student who types the bare IP still lands on the secure site.
 :80 {
 	redir https://{$PUBLIC_HOST}{uri} permanent
+}
+
+# n8n automation sidecar (part of docker-compose.yml). Basic auth is set
+# inside the n8n container itself.
+n8n.{$PUBLIC_HOST} {
+	reverse_proxy n8n:5678
 }

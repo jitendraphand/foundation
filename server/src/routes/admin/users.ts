@@ -2,11 +2,48 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { Prisma } from '@prisma/client';
 import { prisma } from '../../db.js';
-import { checkPassword, hashPassword } from '../../lib/password.js';
+import { checkPassword, generateTempPassword, hashPassword } from '../../lib/password.js';
 import { allocateUsername } from '../../lib/username.js';
 import { audit, requirePermission } from '../../middleware/auth.js';
 import { ALL_PERMISSIONS, PERMISSIONS, PRESETS, sanitizePermissions, type Permission } from '../../lib/permissions.js';
 import { revokeAllSessions } from '../../services/sessions.js';
+
+/**
+ * Mobile numbers are set only by a System Administrator (admins.manage).
+ * A 10-digit Indian number is stored bare; anything else is stored as dialled.
+ */
+const mobileSchema = z
+  .string()
+  .trim()
+  .regex(/^[0-9+\-\s]{10,15}$/, 'Use a 10-digit mobile number.')
+  .transform((v) => v.replace(/\D/g, ''))
+  .refine((v) => v.length === 10 || (v.length === 12 && v.startsWith('91')), 'Use a 10-digit mobile number.')
+  .nullable()
+  .optional();
+
+/** Whether the caller may read or write mobile numbers. */
+function mayManageMobile(request: FastifyRequest): boolean {
+  return (request.user?.permissions ?? []).includes('admins.manage');
+}
+
+/**
+ * Email addresses for email password reset. Same rule as mobile numbers:
+ * set only by a System Administrator, stored lowercase. Empty string clears.
+ */
+const emailSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .max(254)
+  .refine((v) => v === '' || /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v), 'Use a valid email address.')
+  .transform((v) => (v === '' ? null : v))
+  .nullable()
+  .optional();
+
+/** Same privilege as mobile: only a System Administrator reads or writes emails. */
+function mayManageEmail(request: FastifyRequest): boolean {
+  return (request.user?.permissions ?? []).includes('admins.manage');
+}
 
 /**
  * Turns whatever the admin sent into the pair of columns the database keeps.
@@ -122,12 +159,20 @@ export default async function adminUserRoutes(app: FastifyInstance) {
         select: {
           id: true, publicId: true, username: true, firstName: true, lastName: true, grade: true, division: true,
           divisions: true, rollNo: true, dateOfBirth: true, isActive: true, lastLoginAt: true, createdAt: true,
+          mobile: true, email: true,
           _count: { select: { attempts: true } },
         },
       }),
     ]);
 
-    return { total, page: q.page, pageSize: q.pageSize, users };
+    // Mobile numbers and email addresses are a System Administrator's field:
+    // stripped from the reply for anyone holding only users.manage. Both
+    // helpers check the same privilege today; they stay separate so the rule
+    // can diverge per field later without touching this call site.
+    const showContact = mayManageMobile(request);
+    const shaped = users.map((u) => (showContact ? u : { ...u, mobile: undefined, email: undefined }));
+
+    return { total, page: q.page, pageSize: q.pageSize, users: shaped };
   });
 
   /** One student, with their full performance profile. */
@@ -140,6 +185,9 @@ export default async function adminUserRoutes(app: FastifyInstance) {
         id: true, publicId: true, username: true, firstName: true, lastName: true, grade: true, division: true,
         divisions: true, rollNo: true, dateOfBirth: true, isActive: true, role: true, lastLoginAt: true,
         createdAt: true, mustChangePassword: true,
+        // Only a System Administrator sees the mobile number and email address.
+        ...(mayManageMobile(request) ? { mobile: true } : {}),
+        ...(mayManageEmail(request) ? { email: true } : {}),
       },
     });
     if (!user || (user.role === 'ADMIN' && !(request.user?.permissions ?? []).includes('admins.manage'))) {
@@ -187,6 +235,10 @@ export default async function adminUserRoutes(app: FastifyInstance) {
       .optional(),
     /** Re-derive the username from the (possibly new) name instead. */
     regenerateUsername: z.boolean().optional(),
+    /** System Administrator only; silently refused for anyone else. */
+    mobile: mobileSchema,
+    /** System Administrator only; silently refused for anyone else. */
+    email: emailSchema,
   });
 
   app.patch('/api/admin/users/:id', { preHandler: requirePermission('users.manage') }, async (request, reply) => {
@@ -195,6 +247,24 @@ export default async function adminUserRoutes(app: FastifyInstance) {
 
     const before = await accountToWrite(request, id);
     if (!before) return reply.code(404).send({ error: 'Account not found.' });
+
+    // Mobile and email are System Administrator fields. A holder of
+    // users.manage alone cannot set them, and the request is not an error:
+    // the fields simply are not theirs, and the UI does not offer them.
+    const mobileAllowed = mayManageMobile(request);
+    if (body.mobile !== undefined && !mobileAllowed) {
+      return reply.code(403).send({
+        error: 'Only a System Administrator can add or change mobile numbers.',
+        code: 'PERMISSION_DENIED',
+      });
+    }
+    const emailAllowed = mayManageEmail(request);
+    if (body.email !== undefined && !emailAllowed) {
+      return reply.code(403).send({
+        error: 'Only a System Administrator can add or change email addresses.',
+        code: 'PERMISSION_DENIED',
+      });
+    }
 
     if (body.grade) {
       const g = await prisma.schoolClass.findUnique({ where: { kind_code: { kind: 'GRADE', code: body.grade } } });
@@ -226,6 +296,14 @@ export default async function adminUserRoutes(app: FastifyInstance) {
       const dob = new Date(body.dateOfBirth);
       if (Number.isNaN(dob.getTime())) return reply.code(400).send({ error: 'Invalid date of birth.' });
       data.dateOfBirth = dob;
+    }
+
+    if (body.mobile !== undefined && mobileAllowed) {
+      data.mobile = body.mobile;
+    }
+
+    if (body.email !== undefined && emailAllowed) {
+      data.email = body.email;
     }
 
     // An explicit username wins over "re-derive it from the name".
@@ -351,7 +429,7 @@ export default async function adminUserRoutes(app: FastifyInstance) {
 
   app.post('/api/admin/users/:id/reset-password', { preHandler: requirePermission('users.manage') }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
-    const body = z.object({ newPassword: z.string().min(1).max(200) }).parse(request.body);
+    const body = z.object({ newPassword: z.string().min(1).max(200).optional() }).parse(request.body);
 
     // Resetting your own would sign you out of the session you are doing it
     // from and then demand you choose the password again at the door. Changing
@@ -363,7 +441,18 @@ export default async function adminUserRoutes(app: FastifyInstance) {
     const user = await accountToWrite(request, id);
     if (!user) return reply.code(404).send({ error: 'Account not found.' });
 
-    const policy = checkPassword(body.newPassword, {
+    /**
+     * The temporary password is generated here, shown once in the reply, and
+     * handed over in person. It never travels to a phone or a messaging
+     * sidecar: the person standing in front of the administrator is the only
+     * channel, which also means the credential cannot sit in a webhook's logs.
+     * An explicit newPassword is still accepted for the rare case the office
+     * wants to choose it themselves.
+     */
+    const generated = !body.newPassword;
+    const newPassword = body.newPassword ?? generateTempPassword();
+
+    const policy = checkPassword(newPassword, {
       username: user.username, firstName: user.firstName, lastName: user.lastName,
     });
     if (!policy.ok) return reply.code(400).send({ error: policy.errors.join(' ') });
@@ -371,7 +460,7 @@ export default async function adminUserRoutes(app: FastifyInstance) {
     await prisma.user.update({
       where: { id },
       data: {
-        passwordHash: await hashPassword(body.newPassword),
+        passwordHash: await hashPassword(newPassword),
         // They must pick their own on next sign-in.
         mustChangePassword: true,
         failedLogins: 0,
@@ -385,7 +474,8 @@ export default async function adminUserRoutes(app: FastifyInstance) {
     const endedSessions = await revokeAllSessions(id, 'password_changed');
 
     await audit(request.user!.sub, 'user.password_reset', {
-      entity: 'User', entityId: id, ip: request.ip, detail: { endedSessions },
+      entity: 'User', entityId: id, ip: request.ip,
+      detail: { endedSessions, generated },
     });
 
     return {
@@ -393,6 +483,9 @@ export default async function adminUserRoutes(app: FastifyInstance) {
       message:
         `Temporary password set for ${user.username}. They will be asked to choose a new one when they sign in.` +
         (endedSessions > 0 ? ' They have been signed out of every device.' : ''),
+      // Only echoed back when this server chose it — the caller needs it to
+      // hand over; one the caller supplied they already have.
+      ...(generated ? { newPassword } : {}),
     };
   });
 
@@ -497,11 +590,29 @@ export default async function adminUserRoutes(app: FastifyInstance) {
           .string().trim().toLowerCase().min(3).max(40)
           .regex(/^[a-z][a-z0-9]*$/, 'A username must start with a letter and contain only lowercase letters and numbers.')
           .optional(),
+        /** System Administrator only. Required for WhatsApp password reset. */
+        mobile: mobileSchema,
+        /** System Administrator only. Required for email password reset. */
+        email: emailSchema,
       })
       .parse(request.body);
 
     const isAdmin = body.role === 'ADMIN';
     const permissions: Permission[] = isAdmin ? sanitizePermissions(body.permissions) : [];
+
+    // Mobile and email are set only by a System Administrator, for students and staff alike.
+    if (body.mobile !== undefined && body.mobile !== null && !mayManageMobile(request)) {
+      return reply.code(403).send({
+        error: 'Only a System Administrator can add mobile numbers.',
+        code: 'PERMISSION_DENIED',
+      });
+    }
+    if (body.email !== undefined && body.email !== null && !mayManageEmail(request)) {
+      return reply.code(403).send({
+        error: 'Only a System Administrator can add email addresses.',
+        code: 'PERMISSION_DENIED',
+      });
+    }
 
     if (!isAdmin && !request.user!.permissions.includes('users.manage')) {
       return reply.code(403).send({
@@ -568,6 +679,8 @@ export default async function adminUserRoutes(app: FastifyInstance) {
             ...setDivisions(division!, isAdmin ? [] : body.divisions),
             rollNo: rollNo!,
             dateOfBirth: dob,
+            ...(body.mobile ? { mobile: body.mobile } : {}),
+            ...(body.email ? { email: body.email } : {}),
             passwordHash,
             role: body.role,
             permissions,

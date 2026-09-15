@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api, ApiError } from '../lib/api';
 import { useAuth } from '../lib/auth';
-import { Alert, Field, Spinner } from '../components/ui';
+import { Alert, Field, Modal, Spinner } from '../components/ui';
 import type { Me } from '../lib/types';
 
 /**
@@ -23,12 +23,12 @@ export default function Landing() {
   return (
     <main className="min-h-full flex flex-col items-center justify-center px-4 py-12">
       <div className="w-full max-w-md">
-        <header className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-11 h-11 rounded-xl bg-series-1 text-white font-semibold text-lg mb-3">
+        <header className="text-center mb-10">
+          <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-series-1 text-white font-semibold text-2xl mb-4 shadow-pop">
             F
           </div>
-          <h1 className="text-xl font-semibold">Foundation</h1>
-          <p className="text-sm text-ink-muted mt-1">Online examinations</p>
+          <h1 className="text-2xl font-semibold tracking-tight">Foundation</h1>
+          <p className="text-sm text-ink-muted mt-1.5">Online examinations</p>
         </header>
 
         {/* Why they are back here, when they did not ask to be. */}
@@ -39,11 +39,11 @@ export default function Landing() {
         )}
 
         {mode === 'choose' && (
-          <div className="card p-6 space-y-3">
-            <button type="button" className="btn-primary w-full py-2.5" onClick={() => setMode('login')}>
+          <div className="card p-6 sm:p-8 space-y-3">
+            <button type="button" className="btn-primary w-full py-3 text-base" onClick={() => setMode('login')}>
               Sign in
             </button>
-            <button type="button" className="btn-secondary w-full py-2.5" onClick={() => setMode('signup')}>
+            <button type="button" className="btn-secondary w-full py-3 text-base" onClick={() => setMode('signup')}>
               Create an account
             </button>
           </div>
@@ -69,6 +69,7 @@ function LoginForm({ onBack, onSignup }: { onBack: () => void; onSignup: () => v
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [resetting, setResetting] = useState(false);
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -126,7 +127,134 @@ function LoginForm({ onBack, onSignup }: { onBack: () => void; onSignup: () => v
           Create an account
         </button>
       </div>
+      <button type="button" className="text-xs text-ink-muted hover:text-ink w-full text-center" onClick={() => setResetting(true)}>
+        Forgot password?
+      </button>
+
+      {resetting && <ForgotPasswordModal onClose={() => setResetting(false)} />}
     </form>
+  );
+}
+
+// --- Forgot password (WhatsApp / email reset) --------------------------------
+
+/**
+ * Self-service reset: a student proves who they are with username, birthday
+ * and roll number; staff with username alone. The new password is never shown
+ * here — it travels by WhatsApp to the registered mobile, or by email to the
+ * registered address, whichever channel the student picks among the ones the
+ * school configured.
+ */
+function ForgotPasswordModal({ onClose }: { onClose: () => void }) {
+  const [role, setRole] = useState<'STUDENT' | 'STAFF'>('STUDENT');
+  const [username, setUsername] = useState('');
+  const [dob, setDob] = useState('');
+  const [rollNo, setRollNo] = useState('');
+  const [channel, setChannel] = useState<'whatsapp' | 'email'>('whatsapp');
+  const [channels, setChannels] = useState<{ whatsapp: boolean; email: boolean } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // Which delivery legs the school actually configured, so the choice offered
+  // here never promises a channel that cannot deliver.
+  useEffect(() => {
+    api
+      .get<{ offered: boolean; channelConfigured: boolean; channels?: { whatsapp: boolean; email: boolean } }>('/api/reset/availability')
+      .then((res) => {
+        const c = res.channels ?? { whatsapp: res.channelConfigured, email: false };
+        setChannels(c);
+        if (!c.whatsapp && c.email) setChannel('email');
+      })
+      .catch(() => undefined);
+  }, []);
+
+  const bothOffered = !channels || (channels.whatsapp && channels.email);
+  const channelLabel = channel === 'email' ? 'email' : 'WhatsApp';
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await api.post<{ message: string }>('/api/reset/request', {
+        username: username.trim(),
+        role,
+        channel,
+        ...(role === 'STUDENT' ? { dateOfBirth: dob, rollNo: rollNo.trim() } : {}),
+      });
+      setDone(res.message);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not reset the password.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal open onClose={onClose} title="Reset your password">
+      {done ? (
+        <div className="space-y-4">
+          <Alert tone="success">{done}</Alert>
+          <div className="flex justify-end">
+            <button type="button" className="btn-primary btn-sm" onClick={onClose}>Done</button>
+          </div>
+        </div>
+      ) : (
+        <form onSubmit={submit} className="space-y-4">
+          {error && <Alert tone="error">{error}</Alert>}
+          <Alert tone="info">
+            A new password will be sent by {bothOffered ? 'WhatsApp or email' : channelLabel} to the{' '}
+            {bothOffered ? 'mobile number or email address' : channel === 'email' ? 'email address' : 'mobile number'}{' '}
+            registered for this account.
+          </Alert>
+
+          <Field label="I am a">
+            <select className="input" value={role} onChange={(e) => setRole(e.target.value as 'STUDENT' | 'STAFF')}>
+              <option value="STUDENT">Student</option>
+              <option value="STAFF">Teacher / staff</option>
+            </select>
+          </Field>
+
+          {bothOffered && (
+            <Field label="Send the new password by">
+              <div className="flex gap-4">
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="radio" checked={channel === 'whatsapp'} onChange={() => setChannel('whatsapp')} />
+                  WhatsApp
+                </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="radio" checked={channel === 'email'} onChange={() => setChannel('email')} />
+                  Email
+                </label>
+              </div>
+            </Field>
+          )}
+
+          <Field label="Username" required>
+            <input className="input" value={username} onChange={(e) => setUsername(e.target.value)} autoCapitalize="none" required />
+          </Field>
+
+          {role === 'STUDENT' && (
+            <>
+              <Field label="Date of birth" required>
+                <input className="input" type="date" value={dob} onChange={(e) => setDob(e.target.value)} required />
+              </Field>
+              <Field label="Roll number" required>
+                <input className="input" value={rollNo} onChange={(e) => setRollNo(e.target.value)} required />
+              </Field>
+            </>
+          )}
+
+          <div className="flex justify-end gap-2">
+            <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
+            <button type="submit" className="btn-primary" disabled={busy}>
+              {busy ? <Spinner label="Sending" /> : `Send new password by ${channelLabel}`}
+            </button>
+          </div>
+        </form>
+      )}
+    </Modal>
   );
 }
 

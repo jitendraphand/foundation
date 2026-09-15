@@ -130,6 +130,13 @@ else
   sed -i "s|^JWT_SECRET=.*|JWT_SECRET=${JWT}|" .env
   sed -i "s|^ENCRYPTION_KEY=.*|ENCRYPTION_KEY=${ENC}|" .env
   sed -i "s|^ADMIN_PASSWORD=.*|ADMIN_PASSWORD=${ADMIN_PASS}|" .env
+
+  # n8n ships in the compose stack now, so it gets credentials from the same
+  # hand. Its keys are commented out in .env.example, so they are appended
+  # rather than substituted.
+  echo "N8N_PASS=$(openssl rand -base64 18 | tr -d '\n/+=' | head -c 16)" >> .env
+  echo "N8N_ENCRYPTION_KEY=$(gen)" >> .env
+
   chmod 600 .env
   ok ".env created, with a generated administrator password"
 fi
@@ -162,8 +169,18 @@ echo "  URL:      https://${PUBLIC_HOST_VALUE}"
 echo "  Admin:    $(grep '^ADMIN_USERNAME=' .env | cut -d= -f2)"
 echo "  Password: $(grep '^ADMIN_PASSWORD=' .env | cut -d= -f2)"
 echo
-echo "  Write that password down now - it is shown here and nowhere else."
-echo "  It also sits in .env on this machine (chmod 600)."
+echo "  n8n editor: https://n8n.${PUBLIC_HOST_VALUE}"
+echo "  n8n login:  admin / $(grep '^N8N_PASS=' .env | cut -d= -f2)"
+echo
+echo "  Other generated secrets (database password, JWT_SECRET,"
+echo "  ENCRYPTION_KEY, N8N_ENCRYPTION_KEY) are in .env (chmod 600):"
+echo "      POSTGRES_PASSWORD  $(grep '^POSTGRES_PASSWORD=' .env | cut -d= -f2)"
+echo "      JWT_SECRET         $(grep '^JWT_SECRET=' .env | cut -d= -f2)"
+echo "      ENCRYPTION_KEY     $(grep '^ENCRYPTION_KEY=' .env | cut -d= -f2)"
+echo "      N8N_ENCRYPTION_KEY $(grep '^N8N_ENCRYPTION_KEY=' .env | cut -d= -f2)"
+echo
+echo "  Write the passwords down now - they are shown here and nowhere"
+echo "  else except .env on this machine."
 echo
 echo "Next steps:"
 echo "  1. Open Oracle Cloud console > Networking > VCN > Security List and"

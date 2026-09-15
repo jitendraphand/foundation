@@ -29,6 +29,10 @@ export default function AdminBackups() {
   const [notice, setNotice] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [showRestore, setShowRestore] = useState(false);
+  const [restoring, setRestoring] = useState<string | null>(null);
+  const [restoreConfirm, setRestoreConfirm] = useState('');
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [showUploadRestore, setShowUploadRestore] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -71,6 +75,63 @@ export default function AdminBackups() {
       await load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not delete that archive.');
+    }
+  };
+
+  const restoreExisting = async (backup: Backup) => {
+    if (restoreConfirm !== 'RESTORE') {
+      setError('Type RESTORE to confirm this will overwrite the live database.');
+      return;
+    }
+    setRestoring(backup.id);
+    setError(null);
+    try {
+      const res = await api.post<{ message: string }>('/api/admin/backups/restore', { backupId: backup.id, confirm: 'RESTORE' });
+      setNotice(res.message);
+      setRestoreConfirm('');
+      await load();
+    } catch (err) {
+      if (err instanceof ApiError && (err.status === 502 || err.status === 504)) {
+        setNotice('Restore is still running in the background — this backup can take a minute. Please wait 30 seconds, refresh, and verify.');
+        setError(null);
+      } else {
+        setError(err instanceof ApiError ? err.message : 'Restore failed.');
+      }
+    } finally {
+      setRestoring(null);
+    }
+  };
+
+  const restoreUploaded = async () => {
+    if (!uploadFile) {
+      setError('Choose a .tar.gz file first.');
+      return;
+    }
+    if (restoreConfirm !== 'RESTORE') {
+      setError('Type RESTORE to confirm this will overwrite the live database.');
+      return;
+    }
+    setRestoring('upload');
+    setError(null);
+    try {
+      const form = new FormData();
+      form.append('confirm', 'RESTORE');
+      form.append('file', uploadFile);
+      const res = await api.upload<{ message: string }>('/api/admin/backups/restore', form);
+      setNotice(res.message);
+      setUploadFile(null);
+      setRestoreConfirm('');
+      setShowUploadRestore(false);
+      await load();
+    } catch (err) {
+      if (err instanceof ApiError && (err.status === 502 || err.status === 504)) {
+        setNotice('Restore is still running in the background — this large backup can take a minute. Please wait 30 seconds, refresh the page, and check that users/tests have appeared. If the page still shows old data, try the SSH method: ./deploy/restore.sh ~/file.tar.gz');
+        setError(null);
+      } else {
+        setError(err instanceof ApiError ? err.message : 'Restore failed.');
+      }
+    } finally {
+      setRestoring(null);
     }
   };
 
@@ -151,7 +212,18 @@ export default function AdminBackups() {
                       <td className="font-mono text-xs">{backup.createdBy?.username ?? '—'}</td>
                       <td className="text-right whitespace-nowrap">
                         {backup.fileExists ? (
-                          <a href={`/api/admin/backups/${backup.id}/download`} className="btn-secondary btn-sm">Download</a>
+                          <>
+                            <a href={`/api/admin/backups/${backup.id}/download`} className="btn-secondary btn-sm">Download</a>
+                            <button
+                              type="button"
+                              className="btn-ghost btn-sm"
+                              disabled={restoring === backup.id}
+                              onClick={() => restoreExisting(backup)}
+                              title="Restore this backup — overwrites the live database"
+                            >
+                              {restoring === backup.id ? 'Restoring…' : 'Restore'}
+                            </button>
+                          </>
                         ) : (
                           <Badge>pruned</Badge>
                         )}
@@ -165,6 +237,43 @@ export default function AdminBackups() {
           </div>
         </Card>
       )}
+
+      <Card title="Restore">
+        <div className="space-y-3">
+          <Alert tone="warn">Restoring overwrites the live database and uploads. Type RESTORE to confirm any restore action.</Alert>
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              className="input w-40 font-mono text-sm"
+              placeholder="Type RESTORE"
+              value={restoreConfirm}
+              onChange={(e) => setRestoreConfirm(e.target.value)}
+            />
+            <span className="text-xs text-ink-muted">required to enable Restore buttons above and the upload below</span>
+          </div>
+
+          <div className="pt-3 border-t border-line">
+            <h3 className="text-sm font-medium">Restore from uploaded file</h3>
+            <p className="text-xs text-ink-muted mt-1">Choose a .tar.gz backup from your computer — e.g. one you downloaded to Google Drive.</p>
+            <div className="flex flex-wrap items-center gap-2 mt-2">
+              <input
+                type="file"
+                accept=".tar.gz,.tgz,application/gzip,application/x-gzip"
+                onChange={(e) => setUploadFile(e.target.files?.[0] ?? null)}
+                className="text-xs"
+              />
+              <button
+                type="button"
+                className="btn-primary btn-sm"
+                disabled={restoring === 'upload' || !uploadFile}
+                onClick={() => void restoreUploaded()}
+              >
+                {restoring === 'upload' ? 'Restoring…' : 'Restore uploaded file'}
+              </button>
+              {uploadFile && <span className="text-xs text-ink-muted">{uploadFile.name} · {(uploadFile.size / (1024 * 1024)).toFixed(1)} MB</span>}
+            </div>
+          </div>
+        </div>
+      </Card>
 
       <Modal open={showRestore} onClose={() => setShowRestore(false)} title="Restoring from a backup" wide>
         <div className="space-y-4 text-sm">

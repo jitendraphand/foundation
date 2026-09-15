@@ -31,16 +31,28 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     sourcemap: false,
+    // Mermaid is 679 kB and only needed when a diagram actually renders.
+    // Vite would otherwise emit a modulepreload link for it in index.html —
+    // eagerly downloading the whole library on every page load, including
+    // student phones on school Wi-Fi. Stripped from HTML preloads; the dynamic
+    // import in BlockRenderer still preloads it at the moment it is needed.
+    modulePreload: {
+      resolveDependencies(filename, deps, { hostType }) {
+        return hostType === 'html' ? deps.filter((d) => !d.includes('mermaid')) : deps;
+      },
+    },
     rollupOptions: {
       output: {
-        // Mermaid is large and only needed by questions that contain a flow
-        // diagram, so it is split out and loaded on demand.
+        // Mermaid and KaTeX are large and only needed when rendering
+        // maths/diagrams — split so dashboard first paint stays small on
+        // school Wi-Fi.
         manualChunks: {
           react: ['react', 'react-dom', 'react-router-dom'],
           katex: ['katex'],
+          mermaid: ['mermaid'],
         },
       },
     },
-    chunkSizeWarningLimit: 900,
+    chunkSizeWarningLimit: 600,
   },
 });

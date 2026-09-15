@@ -5,14 +5,17 @@ import { useActivityGate } from './lib/activityGate';
 import { PageLoader } from './components/ui';
 import Landing from './pages/Landing';
 import StudentDashboard from './pages/StudentDashboard';
-import TakeTest from './pages/TakeTest';
-import ResultView from './pages/ResultView';
 import ChangePassword from './pages/ChangePassword';
-import ActivityRunner from './pages/ActivityRunner';
 import AppShell from './pages/AppShell';
 
 // The admin bundle is only ever loaded for an admin, keeping the student's
 // first paint small - which matters on a school Wi-Fi connection.
+// TakeTest + ResultView are heavy (BlockRenderer + charts + mermaid) and are
+// only needed when a paper is open or a result is viewed — lazy so the
+// dashboard first paint stays small on school Wi-Fi.
+const TakeTest = lazy(() => import('./pages/TakeTest'));
+const ResultView = lazy(() => import('./pages/ResultView'));
+const ActivityRunner = lazy(() => import('./pages/ActivityRunner'));
 const AdminShell = lazy(() => import('./pages/admin/AdminShell'));
 
 function RequireAuth({ children, adminOnly = false }: { children: React.ReactNode; adminOnly?: boolean }) {
@@ -77,12 +80,14 @@ export default function App() {
       />
 
       {/* Also outside the shell: while a required activity is open there is
-          nowhere else to navigate to. */}
+           nowhere else to navigate to. */}
       <Route
         path="/activity/:activityId"
         element={
           <RequireAuth>
-            <ActivityRunner />
+            <Suspense fallback={<PageLoader label="Loading activity" />}>
+              <ActivityRunner />
+            </Suspense>
           </RequireAuth>
         }
       />
@@ -92,7 +97,9 @@ export default function App() {
         path="/attempt/:attemptId"
         element={
           <RequireAuth>
-            <TakeTest />
+            <Suspense fallback={<PageLoader label="Loading test" />}>
+              <TakeTest />
+            </Suspense>
           </RequireAuth>
         }
       />
@@ -105,7 +112,14 @@ export default function App() {
         }
       >
         <Route path="/dashboard" element={<StudentDashboard />} />
-        <Route path="/result/:attemptId" element={<ResultView />} />
+        <Route
+          path="/result/:attemptId"
+          element={
+            <Suspense fallback={<PageLoader label="Loading result" />}>
+              <ResultView />
+            </Suspense>
+          }
+        />
       </Route>
 
       <Route

@@ -438,16 +438,26 @@ export default async function studentRoutes(app: FastifyInstance) {
     const layout = attempt.layout as { questionIds?: string[]; optionOrder?: Record<string, string[]> };
     const order = layout?.questionIds ?? testQuestions.map((tq) => tq.questionId);
     const answerByQuestion = new Map(attempt.answers.map((a) => [a.questionId, a]));
+    const perQuestionTiming = (attempt.test.meta as { perQuestionTiming?: boolean } | null)?.perQuestionTiming === true;
 
     const questions = order
       .map((qid) => testQuestions.find((tq) => tq.questionId === qid))
       .filter((tq): tq is NonNullable<typeof tq> => !!tq)
       .map((tq) => {
         const answer = answerByQuestion.get(tq.questionId);
+        const meta = (answer?.meta ?? {}) as { firstSeenAt?: string };
         return {
           ...publicQuestion(tq.question, tq.marks, layout?.optionOrder?.[tq.questionId], false),
           yourResponse: answer?.response ?? null,
           isMarkedForReview: answer?.isMarkedForReview ?? false,
+          // Only sent when the test enforces per-question limits, so a client
+          // cannot read the pacing of a paper that has none.
+          ...(perQuestionTiming && tq.timeLimitSeconds != null
+            ? {
+                timeLimitSeconds: tq.timeLimitSeconds,
+                firstSeenAt: meta.firstSeenAt ?? null,
+              }
+            : {}),
         };
       });
 
@@ -469,6 +479,7 @@ export default async function studentRoutes(app: FastifyInstance) {
         durationMinutes: attempt.test.durationMinutes,
         negativeMarks: attempt.test.negativeMarks,
         totalMarks: attempt.maxScore,
+        perQuestionTiming,
         // The paper says whether it is proctored; the client cannot opt out,
         // because the server counts the events either way.
         proctoring: proctoringFor(attempt.test),
@@ -496,7 +507,7 @@ export default async function studentRoutes(app: FastifyInstance) {
 
     const attempt = await prisma.attempt.findFirst({
       where: { id, userId: request.user!.sub },
-      select: { id: true, status: true, expiresAt: true, testId: true },
+      select: { id: true, status: true, expiresAt: true, testId: true, test: { select: { meta: true } } },
     });
     if (!attempt) return reply.code(404).send({ error: 'Attempt not found.' });
     if (attempt.status !== 'IN_PROGRESS') return reply.code(409).send({ error: 'This attempt has already been submitted.' });
@@ -511,6 +522,30 @@ export default async function studentRoutes(app: FastifyInstance) {
       include: { question: { select: { format: true, options: true } } },
     });
     if (!tq) return reply.code(400).send({ error: 'That question is not part of this test.' });
+
+    // Per-question timing, when the test opts in. The clock starts at the
+    // student's first save on that question — server-seen, not client-claimed —
+    // and after it runs out, further saves are refused. Whatever was saved in
+    // time still counts; the paper's own deadline is unaffected.
+    const existingAnswer = await prisma.answer.findUnique({
+      where: { attemptId_questionId: { attemptId: attempt.id, questionId: body.questionId } },
+      select: { meta: true },
+    });
+    const answerMeta = (existingAnswer?.meta ?? {}) as { firstSeenAt?: string };
+    const limitSeconds =
+      (attempt.test.meta as { perQuestionTiming?: boolean } | null)?.perQuestionTiming === true
+        ? tq.timeLimitSeconds
+        : null;
+    const now = new Date();
+    let firstSeenAt = answerMeta.firstSeenAt ? new Date(answerMeta.firstSeenAt) : null;
+    const expired =
+      limitSeconds !== null && firstSeenAt !== null && now.getTime() - firstSeenAt.getTime() > limitSeconds * 1000;
+    if (expired) {
+      return reply.code(409).send({
+        error: 'Time for this question has run out. Your saved answer still counts.',
+        code: 'QUESTION_TIME_UP',
+      });
+    }
 
     // Validate shape, and that a chosen option actually exists.
     let response: unknown = null;
@@ -533,6 +568,9 @@ export default async function studentRoutes(app: FastifyInstance) {
     // A cleared answer must become SQL NULL, which Prisma spells Prisma.DbNull.
     const storedResponse = response === null ? Prisma.DbNull : (response as Prisma.InputJsonValue);
 
+    // First save on this question starts its clock.
+    const newFirstSeen = firstSeenAt ? undefined : now.toISOString();
+
     await prisma.answer.upsert({
       where: { attemptId_questionId: { attemptId: attempt.id, questionId: body.questionId } },
       create: {
@@ -543,6 +581,7 @@ export default async function studentRoutes(app: FastifyInstance) {
         isMarkedForReview: body.isMarkedForReview ?? false,
         answeredAt: response ? new Date() : null,
         visitCount: 1,
+        meta: { firstSeenAt: now.toISOString() },
       },
       update: {
         response: storedResponse,
@@ -550,6 +589,7 @@ export default async function studentRoutes(app: FastifyInstance) {
         ...(body.isMarkedForReview !== undefined ? { isMarkedForReview: body.isMarkedForReview } : {}),
         answeredAt: response ? new Date() : null,
         visitCount: { increment: 1 },
+        ...(newFirstSeen ? { meta: { ...answerMeta, firstSeenAt: newFirstSeen } } : {}),
       },
     });
 
@@ -709,6 +749,102 @@ export default async function studentRoutes(app: FastifyInstance) {
    */
   app.get('/api/step-up/allowance', async (request) => {
     return { allowance: await stepUpAllowanceFor(request.user!.sub) };
+  });
+
+  // --- Flagging a question for inconsistency -------------------------------
+
+  /**
+   * A student reports a question as inconsistent / incorrect.
+   *
+   * The flag is tied to the test it appeared in so the test's creator can
+   * see it in context. One flag per student per question per test prevents
+   * spam while still letting many students flag the same bad question.
+   */
+  app.post('/api/student/flags', async (request, reply) => {
+    const body = z
+      .object({
+        questionId: z.string().uuid(),
+        testId: z.string().uuid(),
+        attemptId: z.string().uuid().optional().nullable(),
+        category: z.enum(['WRONG_ANSWER', 'TYPO', 'UNCLEAR', 'OUT_OF_SYLLABUS', 'OTHER']).optional(),
+        reason: z.string().trim().max(2000).optional(),
+      })
+      .parse(request.body);
+
+    const userId = request.user!.sub;
+
+    // Must belong to a test the student was actually given, and the question
+    // must be part of that test. This prevents guessing questionIds.
+    const testQuestion = await prisma.testQuestion.findFirst({
+      where: { testId: body.testId, questionId: body.questionId },
+      select: { testId: true },
+    });
+    if (!testQuestion) return reply.code(404).send({ error: 'That question is not part of that test.' });
+
+    // Student must have at least one attempt for this test (they saw it).
+    const attemptExists = await prisma.attempt.findFirst({
+      where: { testId: body.testId, userId },
+      select: { id: true },
+    });
+    if (!attemptExists) return reply.code(403).send({ error: 'You can only flag questions from tests you have been given.' });
+
+    // If attemptId is provided, verify it belongs to the student and test.
+    if (body.attemptId) {
+      const attempt = await prisma.attempt.findFirst({
+        where: { id: body.attemptId, userId, testId: body.testId },
+        select: { id: true },
+      });
+      if (!attempt) return reply.code(400).send({ error: 'That attempt does not belong to you for this test.' });
+    }
+
+    try {
+      const flag = await prisma.questionFlag.create({
+        data: {
+          questionId: body.questionId,
+          testId: body.testId,
+          flaggedById: userId,
+          attemptId: body.attemptId ?? null,
+          category: body.category ?? null,
+          reason: body.reason?.trim() ? body.reason.trim() : null,
+        },
+      });
+      return reply.code(201).send({ ok: true, flag });
+    } catch (err: unknown) {
+      // Unique constraint violation -> already flagged
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
+        return reply.code(409).send({ error: 'You have already flagged this question for this test.' });
+      }
+      throw err;
+    }
+  });
+
+  app.get('/api/student/flags', async (request) => {
+    const q = z
+      .object({
+        testId: z.string().uuid().optional(),
+        questionId: z.string().uuid().optional(),
+      })
+      .parse(request.query);
+    const where: Record<string, unknown> = { flaggedById: request.user!.sub };
+    if (q.testId) where.testId = q.testId;
+    if (q.questionId) where.questionId = q.questionId;
+    const flags = await prisma.questionFlag.findMany({
+      where: where as never,
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, questionId: true, testId: true, category: true, reason: true, status: true, createdAt: true },
+    });
+    return { flags };
+  });
+
+  app.delete('/api/student/flags/:id', async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const flag = await prisma.questionFlag.findFirst({
+      where: { id, flaggedById: request.user!.sub },
+    });
+    if (!flag) return reply.code(404).send({ error: 'Flag not found.' });
+    if (flag.status !== 'OPEN') return reply.code(409).send({ error: 'Only open flags can be retracted.' });
+    await prisma.questionFlag.delete({ where: { id } });
+    return { ok: true };
   });
 }
 

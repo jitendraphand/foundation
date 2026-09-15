@@ -16,6 +16,8 @@ export interface Me {
   rollNo?: string;
   dateOfBirth?: string;
   role: Role;
+  /** Your own address for password resets; nobody else's is ever included. */
+  email?: string | null;
   /** Which admin areas this account may use. Empty for a student. */
   permissions: string[];
   mustChangePassword?: boolean;
@@ -152,6 +154,9 @@ export interface PaperQuestion {
   answerKey?: AnswerKey;
   explanation?: Content;
   imageRequired?: boolean;
+  /** Only present when the test enforces per-question limits. */
+  timeLimitSeconds?: number;
+  firstSeenAt?: string | null;
   imagePrompt?: ImagePrompt | null;
   imageFulfilled?: boolean;
 }

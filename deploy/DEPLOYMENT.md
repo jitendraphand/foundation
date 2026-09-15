@@ -58,8 +58,10 @@ cd foundation
 ```
 
 That is the whole thing. `local.sh` creates `.env` if it is missing, generates
-the two secrets, points the hostname at localhost, builds, starts, and waits
-until the API answers before telling you it is ready.
+every secret the stack needs — database password, `JWT_SECRET`,
+`ENCRYPTION_KEY`, the administrator's password and n8n's login and workflow
+key — points the hostname at localhost, builds, starts, and waits until the
+API answers before printing all of it in the terminal.
 
 **Do not paste secrets by hand for a trial.** `JWT_SECRET` and
 `ENCRYPTION_KEY` must each be at least 16 characters; anything shorter fails
@@ -69,8 +71,9 @@ healthy. `local.sh` exists so that cannot happen.
 
 It is safe to re-run, and it will not overwrite anything that already works —
 in particular it leaves an existing `ENCRYPTION_KEY` alone (replacing it makes
-saved LLM API keys unreadable) and never rotates `POSTGRES_PASSWORD`, which
-Postgres bakes into the data volume the first time it starts.
+saved LLM API keys unreadable), never rotates `POSTGRES_PASSWORD`, which
+Postgres bakes into the data volume the first time it starts, and leaves the
+n8n encryption key alone once set (replacing it loses stored workflows).
 
 <details>
 <summary>Doing it by hand instead</summary>
@@ -84,9 +87,10 @@ sudo docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --bu
 </details>
 
 The first build takes a few minutes. Then open **http://localhost** and sign in
-as `admin` with the `ADMIN_PASSWORD` you put in `.env`. Left at the example
-value it is `foundation_123`, which is fine for a laptop trial and must never be
-what a server on the internet is running.
+as `admin` with the generated password printed when the script finished (it is
+also in `.env`). For development with hot reload instead of containers,
+`./deploy/dev.sh` generates its own secrets into `.env.dev`, runs migrations,
+seeds, and serves the API on :4000 and the frontend on :5173.
 
 To let other devices join the trial — a phone or a second laptop on the same
 Wi-Fi, which is the only way to really try the student side — find your address
@@ -331,7 +335,7 @@ mixed-content block.
 | Google Gemini | `https://generativelanguage.googleapis.com/v1beta/openai` | <https://aistudio.google.com/apikey> | `gemini-2.5-pro` |
 | Google Vertex AI | derived from project + region | service-account JSON, see below | `google/gemini-2.5-pro` |
 | Oracle Cloud | derived from the region | OCI console → API keys, see below | `meta.llama-3.3-70b-instruct` |
-| Other | anything OpenAI-compatible | Groq, Together, a local Ollama, … | whatever it expects |
+| Other | anything OpenAI-compatible | Groq, Together, a self-hosted model server, … | whatever it expects |
 
 OpenAI's reasoning models (`o1`/`o3`/`o4`/`gpt-5` lines) are detected
 automatically and sent `max_completion_tokens` with no `temperature`, which is
@@ -487,6 +491,28 @@ flexible option:
 So: the request body is data, and you can change all of it. The code that signs
 and sends it is not, and a school server is exactly the kind of machine where
 that distinction should be kept.
+
+### Generation pipeline: splitting drafting from formatting
+
+**Admin → Settings → LLM providers → Generation pipeline.**
+
+By default each batch is one call: the main model writes strict JSON. The
+alternative splits the work so a cheap model does the formatting:
+
+- **External + Cheap** — the main credential drafts loosely (no JSON, higher
+  temperature), then a cheap credential you nominate converts the drafts to
+  strict JSON. Token-efficient when the main model is expensive. Without a
+  cheap credential nominated, the run falls back to a single call.
+
+A **tokens-per-question** estimate (200–5000, blank for adaptive) controls how
+many questions go in each call; left blank, the server learns it from the last
+ten successful runs on that model. **Cache system prompt** reuses the prompt
+prefix where the provider supports it. The Set test screen shows which pipeline
+is active and recalculates its turns estimate from it.
+
+Each credential row also has a **Visible** tick: unticked credentials are
+hidden from the Set test screen, so only the models you trust for papers are
+offered there.
 
 ### Amazon Bedrock
 
@@ -719,6 +745,17 @@ An install configured before this existed takes the default of five rather than
 "unlimited", so upgrading tightens rather than loosens. Deleting a Step-up paper
 does not refund it: the call was still made.
 
+**Speed: verification is off by default.** After generating the five questions,
+Step-up can run a second model pass that re-checks each one for conceptual
+correctness — and that second call roughly doubles the time a student waits at
+the button. It is off unless ticked (**Settings → Step-up → Verify questions
+before serving**); the fast programmatic check of option structure and answer
+keys always runs either way. Replies are also capped at 7,000 tokens, which is
+plenty for five questions with explanations and removes the tail of very slow
+replies from reasoning models. Step-up always runs on the configured external
+credential with JSON enforced, because students trigger these calls and need
+the fastest path.
+
 A student can only build on a question from a paper they actually sat whose
 results have been released — otherwise this would be a way to read questions out
 of the bank by guessing ids. There is still a hard limit of six an hour on top,
@@ -821,6 +858,160 @@ the second, use **Try 2 questions** (see [Checking a model before you rely on
 it](#checking-a-model-before-you-rely-on-it)).
 
 ---
+
+## 5b. The sidecar: n8n
+
+n8n ships as part of the stack: plain `docker compose up -d` starts it
+alongside the API, database and web app. To run everything including the local
+trial overrides:
+
+```bash
+sudo docker compose \
+  -f docker-compose.yml \
+  -f docker-compose.local.yml \
+  up -d --build
+```
+
+### n8n (WhatsApp + email password resets)
+
+n8n is deployed with everything else. Set `N8N_USER`, `N8N_PASS` and
+`N8N_ENCRYPTION_KEY` in `.env` first (defaults exist, but change them). Caddy
+serves it at `https://n8n.<your-host>` with its own certificate (on a laptop
+trial: `http://n8n.localhost`). Then:
+
+1. Open the n8n URL and sign in with `N8N_USER` / `N8N_PASS`.
+2. Build the delivery workflows, node by node (see below), and **activate**
+   them — an inactive workflow answers nothing.
+3. Open **Admin → Settings → n8n / WhatsApp** and fill in:
+   - **n8n editor URL** — where the dashboard lives; enables the *Open n8n*
+     button.
+   - **WhatsApp webhook URL** — the Production URL from the Webhook node.
+   - **Email webhook URL** — the Production URL of the second workflow.
+   Save.
+4. Add each person's mobile in **Admin → Students → Edit → Mobile (WhatsApp)**
+   and/or email in **Edit → Email** (System Administrators only — both fields
+   are hidden from other roles). A reset over a channel with nothing on file
+   politely refuses and says to contact the office.
+
+#### Creating the WhatsApp workflow, node by node
+
+New workflow, name it `whatsapp-reset`, two nodes:
+
+**Node 1 — Webhook.** This is the inbox the API POSTs to whenever a reset
+should reach a phone.
+
+| Setting | Value |
+|---|---|
+| HTTP Method | `POST` |
+| Path | `whatsapp-reset` |
+| Response Mode | **Immediately** — anything else makes the API wait |
+
+**Node 2 — WhatsApp Business Cloud** (or HTTP Request to the Graph API). It
+receives `{ to, message, from }`:
+
+| Field | Value |
+|---|---|
+| Text | `{{ $json.body.message }}` |
+| To | `{{ $json.body.to }}` — digits only, e.g. `919876543210` |
+
+The WhatsApp credential (Meta token + phone number ID) is created inside n8n
+and never reaches Foundation.
+
+#### Creating the email workflow, node by node
+
+A second, independent workflow — name it `email-reset`, same shape:
+
+**Node 1 — Webhook.** Method `POST`, path `email-reset`, Response Mode
+**Immediately**. It receives `{ to, subject, message, from }`.
+
+**Node 2 — Email Send** (or Gmail / SMTP / SES / HTTP Request — any email
+node):
+
+| Field | Value |
+|---|---|
+| From | `no-reply@your-school.com` — verified with your email provider |
+| To | `{{ $json.body.to }}` |
+| Subject | `{{ $json.body.subject }}` |
+| Text | `{{ $json.body.message }}` — plain text, carries the temporary password |
+
+The SMTP or OAuth credentials live in n8n only. Hostinger/cPanel:
+`smtp.hostinger.com:465 (SSL)` or `:587 (TLS)`. Gmail: an App Password (2FA on)
+or the Gmail node with OAuth2 — the account's regular password is refused with
+535. AWS SES: `email-smtp.<region>.amazonaws.com:587`.
+
+#### Activating them, and which URL to paste where
+
+A webhook exists at two addresses, and only one works:
+
+- **Test URL** (`/webhook-test/...`) answers only while somebody is watching
+  with *Execute workflow* running in the editor. Useless to the API.
+- **Production URL** (`/webhook/...`) answers once the workflow is **active**
+  (toggle top-right). This is the one to paste into Foundation's Settings.
+
+Where the URL points matters more than it looks: it is called **from the API
+container**, not from your browser. On a server, `https://n8n.<your-host>` —
+which Caddy serves — works. On a laptop trial, `https://localhost/...` fails:
+`localhost` inside the API container is the API itself, not n8n and not Caddy.
+The compose-internal address is the honest one:
+
+```
+http://n8n:5678/webhook/whatsapp-reset
+http://n8n:5678/webhook/email-reset
+```
+
+These are also the compose defaults, so leaving Settings empty on a trial
+works. Check reachability from the API's own point of view:
+
+```bash
+docker compose exec api node -e "fetch('http://n8n:5678/webhook/email-reset',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(r=>console.log(r.status)).catch(e=>console.log(e.message))"
+```
+
+`404` with an empty body is the healthy answer when the workflow is not
+configured in n8n yet; connection refused means the container name is wrong.
+
+#### How a reset flows
+
+"Forgot password?" on the sign-in screen verifies a student by username +
+date of birth + roll number (staff by username alone), offers WhatsApp and/or
+email according to which delivery legs are configured, and sends the temporary
+password to the registered number or address. The password is
+never shown in the browser, the student must choose a new one at next
+sign-in, and attempts are rate limited to 5 per 15 minutes. The reply names
+only a masked destination (`j***@example.com`), never the full address.
+
+Students can keep their own email current from the Change password page
+(`PATCH /api/auth/profile`): setting, changing or clearing it requires typing
+the current password, exactly as changing the password does, and the change is
+audited. Mobile numbers stay System-Administrator-only.
+
+> **Trialling on localhost:** Meta's Cloud API needs a publicly reachable
+> webhook, so real delivery will not fire on `localhost`. Use a tunnel
+> (ngrok/cloudflared) pointed at n8n and set that as the webhook URL, or just
+> verify the flow — the reset itself works end to end and the message is
+> logged.
+
+#### When a reset does not arrive
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| API log says `n8n 404` | Workflow not active, or the Test URL was pasted | Activate the workflow; paste the Production URL |
+| API log says `n8n ECONNREFUSED` / cannot reach | Wrong host in the URL — e.g. `localhost` pasted on a trial | Use `http://n8n:5678/webhook/...` |
+| API says the reset succeeded but nothing arrives | n8n ran, the email node failed | Open n8n → Executions: a red run shows the SMTP error |
+| Gmail returns 535 | Regular password instead of an App Password | Enable 2FA, create an App Password, use that |
+| `Too many requests` at the Foundation side | Reset is rate limited to 5 per 15 minutes per IP | Wait, or `docker compose restart api` to clear |
+
+The reset itself is never lost to a delivery failure: the password has already
+been changed and the old one no longer works. Without n8n the reset still
+works but delivery is logged on the server (`[whatsapp] to 91…` or `[email] to
+…` in the API logs) and the office sets passwords in person as before.
+
+#### Step-up tests
+
+In the same Settings tab, Step-up is deliberately **external-only** (students
+trigger it, so it needs the fastest JSON-enforced path). Pick a cheap
+credential — a free OpenRouter or NVIDIA key is the intended use — keep the
+daily quota at 5 per student, and Save. Off means students see no Step-up
+buttons.
 
 ## 6. Day-to-day operations
 
@@ -1118,6 +1309,40 @@ Taking a question off a paper, or deleting the paper, returns it to Approved by
 itself. Nothing is stored to say "on a test" — it is worked out from the links,
 so there is nothing to get out of step.
 
+Each question row in the builder shows its options with the correct answer
+badged, and a per-question **time limit in seconds** (falling back to the
+question's own estimate). Deleting a test from its builder page or the tests
+list always removes it completely — attempts, answers and all, with the live
+difficulty counters adjusted — after confirming the attempt count. Deleting a
+single attempt is likewise one click from the results table, the student's
+page or a report, e.g. to let a mistaken submission retake; purging every
+attempt on a test needs a typed `DELETE` and is refused while anyone is still
+writing.
+
+Student-reported problems land on a **Flagged** tab in the same builder: who
+reported which question, the category and their note, with **Mark resolved** /
+**Dismiss** (optional note) per flag. Flags follow the same authorship rule as
+papers — a creator sees flags on their own tests, holders of `content.viewAll`
+see everything.
+
+#### Per-test downloads
+
+The results tab has a **Downloads** card with three spreadsheets, each named
+after the test's own ID (`TST-0001-attempted.csv` and so on):
+
+- **Attempted students** — everyone in the paper's audience with at least one
+  attempt, with their status (submitted, writing, abandoned), score,
+  percentage and when they submitted.
+- **Non-attempted students** — the audience minus the attempts: the children
+  to chase. This is built from the audience, not from the attempts, so a
+  draft never accuses anyone and a child in a second division is not missed.
+- **Results** — the marks table, highest first, with pass/fail per student.
+
+Email and mobile are included in the attempted and non-attempted lists —
+that is the point of a list of children to chase — but only for a System
+Administrator: a creator holding `tests.manage` alone gets the columns
+blanked, exactly as the on-screen lists hide those fields from them.
+
 ### What happens when a test goes live
 
 Publishing a test freezes it. From that moment, and for as long as it is
@@ -1250,6 +1475,9 @@ Each row shows which papers the figure came from, so a surprising number can be
 traced back to the paper that produced it. **Download the list** gives the same
 CSV treatment.
 
+The Correct / Wrong / Skipped counts on a student's rows open a per-attempt
+drill-down: each question with the student's response against the key.
+
 ### Backups
 
 From the UI: **Admin → Backups → Generate backup**, then download the archive
@@ -1305,6 +1533,21 @@ cd ~/foundation
 The script takes a safety dump of the current database before overwriting
 anything, and tells you how to roll back.
 
+**Restoring an older backup into a newer schema.** If the live database has
+tables the backup predates — `QuestionFlag` or a column added since — the
+script detects the drift and offers to **reset the schema first** (type
+`SCHEMA-RESET`). Without it, `pg_restore --clean` fails: it cannot drop tables
+that newer migrations added foreign keys to, so the rows are *appended* —
+duplicated records and failed unique indexes. With the reset, everything is
+dropped, the backup restores cleanly with no errors, and the API re-adds the
+newer structures (empty `QuestionFlag` table, `email` column) on its next
+startup. Data added since the backup is lost from the live database but stays
+in the safety dump the script takes first.
+
+The same applies to the Backups-tab restore over HTTP: the API re-runs
+migrations after the data lands, so an older backup restores into the current
+schema automatically.
+
 ---
 
 ## 7. Data persistence
@@ -1315,11 +1558,47 @@ anything, and tells you how to roll back.
 | Uploaded images | `uploads` volume | ✅ | ✅ | ❌ |
 | Backup archives | `backups` volume | ✅ | ✅ | ❌ |
 | HTTPS certificates | `caddy_data` volume | ✅ | ✅ | ❌ |
+| n8n workflows (if enabled) | `n8n_data` volume | ✅ | ✅ | ❌ |
 | **Downloaded backups** | your Google Drive | ✅ | ✅ | ✅ |
 
 Docker volumes live on the instance's block-storage boot volume, so stopping
 and restarting the instance is completely safe. Terminating it is not — which
 is exactly what the backup feature is for. Download an archive regularly.
+
+### Restoring from the Backups tab
+
+Backups can be restored without SSH. **Admin → Backups**, type `RESTORE` into
+the confirmation box, then either click **Restore** beside an archive that is
+still on the server or upload a `.tar.gz` you downloaded earlier. The restore
+replaces the database and the uploaded images, then brings the schema up to
+the running version — so a backup taken on an older release restores cleanly
+into a newer one. A restore over HTTP requires the `backups.manage`
+privilege, is fully audited, and asks for the typed confirmation because it
+overwrites everything. The SSH path (`deploy/restore.sh`) still works and
+remains the right tool when the API itself will not start.
+
+Uploads up to 50 MB are accepted (`bodyLimit` 100 MB, nginx
+`client_max_body_size 100M`), and the reverse proxy allows 300 s for
+`pg_restore` plus the post-restore migration, so a few-thousand-answer archive
+no longer dies as a 502 mid-restore. If the browser still reports 502/504 on a
+very large file, the restore is usually still running server-side: wait
+~30 seconds, refresh, and check that users and tests have appeared — the page
+now says so instead of just "Restore failed". Question flags (`QuestionFlag`)
+are part of the backup like any other table.
+
+If a restore leaves the API restarting with a migration error — typically
+`column "mobile" ... already exists` or `type "FlagStatus" already exists`,
+meaning the archive's migration history disagrees with tables already present
+— mark the already-applied migration as done and restart the API:
+
+```bash
+docker compose run --rm --entrypoint "" api npx prisma migrate resolve --applied 20260818120000_add_question_flags
+docker compose up -d --no-build api
+```
+
+Use the migration name from the API log's `P3009`/`P3018` error. `docker compose
+down -v && docker compose up -d --build` is the alternative when the data does
+not matter.
 
 ---
 
@@ -1347,6 +1626,12 @@ past:
 ```bash
 docker compose build api
 ```
+
+**502 right after a restore** almost always means the database and its
+migration history disagree (see *Restoring from the Backups tab* above):
+`docker compose logs api --tail=50` will show a framed `P3009`/`P3018` error
+naming the migration. Resolve it with `prisma migrate resolve --applied
+<migration>` as shown there — the site answers 502 until the API can start.
 
 **The site does not load at all**
 

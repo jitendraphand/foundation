@@ -3,10 +3,12 @@ import { z } from 'zod';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
+import { createWriteStream } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
 import { env } from '../../env.js';
 import { prisma } from '../../db.js';
 import { audit } from '../../middleware/auth.js';
-import { createBackup, pruneBackups } from '../../services/backup.js';
+import { createBackup, pruneBackups, restoreFromArchive } from '../../services/backup.js';
 
 export default async function adminBackupRoutes(app: FastifyInstance) {
   app.get('/api/admin/backups', async () => {
@@ -107,6 +109,103 @@ export default async function adminBackupRoutes(app: FastifyInstance) {
     const removed = await pruneBackups();
     await audit(request.user!.sub, 'backup.prune', { ip: request.ip, detail: { removed } });
     return { ok: true, removed };
+  });
+
+  /**
+   * Restores from an existing backup on the server or an uploaded archive.
+   * Accepts either JSON { backupId, confirm: "RESTORE" } or multipart file upload with field "file" and "confirm".
+   * Requires backups.manage — this overwrites the live database.
+   */
+  app.post('/api/admin/backups/restore', { config: { requestTimeout: 300000 } } as never, async (request, reply) => {
+    // Detect multipart: if request.isMultipart() true, handle file upload
+    let archivePath: string | null = null;
+    let cleanup: (() => Promise<void>) | null = null;
+    let confirm: string | undefined;
+
+    const contentType = request.headers['content-type'] ?? '';
+    const isMultipart = contentType.includes('multipart/form-data');
+
+    if (isMultipart) {
+      // Use parts() to handle fields in any order — request.file() returns on
+      // first file and would miss a confirm field that comes after the file.
+      // Iterating all parts is robust and also lets us stream the file to disk
+      // instead of buffering the whole archive in memory.
+      let filename = 'upload.tar.gz';
+      let filePart: { file: NodeJS.ReadableStream; filename: string } | null = null;
+      let confirmValue = '';
+
+      for await (const part of (request as unknown as { parts: () => AsyncIterable<{ type: string; fieldname: string; value?: string; file?: NodeJS.ReadableStream; filename?: string }> }).parts()) {
+        if (part.type === 'file' && part.fieldname === 'file') {
+          filePart = part as unknown as { file: NodeJS.ReadableStream; filename: string };
+          filename = (part as unknown as { filename: string }).filename ?? filename;
+        } else if (part.type === 'field' && part.fieldname === 'confirm') {
+          confirmValue = (part as unknown as { value: string }).value ?? '';
+        }
+      }
+
+      if (!filePart) return reply.code(400).send({ error: 'No file uploaded. Attach field "file" with a .tar.gz archive.' });
+      confirm = confirmValue;
+      if (confirm !== 'RESTORE') {
+        return reply.code(400).send({ error: 'Please confirm by sending confirm=RESTORE.' });
+      }
+      const tmpPath = path.join('/tmp', `upload-restore-${Date.now()}-${filename.replace(/[^a-zA-Z0-9._-]/g, '_')}`);
+      // Stream to disk to avoid buffering large archives in memory and to avoid
+      // holding the event loop during the upload. A timeout here surfaces as
+      // 500 rather than a dropped connection (502).
+      try {
+        await pipeline(filePart.file as unknown as NodeJS.ReadableStream, createWriteStream(tmpPath));
+      } catch (err) {
+        await fsp.rm(tmpPath, { force: true }).catch(() => undefined);
+        throw err;
+      }
+      const stat = await fsp.stat(tmpPath).catch(() => null);
+      if (!stat || stat.size === 0) {
+        await fsp.rm(tmpPath, { force: true }).catch(() => undefined);
+        return reply.code(400).send({ error: 'Uploaded file is empty.' });
+      }
+      archivePath = tmpPath;
+      cleanup = async () => { await fsp.rm(tmpPath, { force: true }).catch(() => undefined); };
+    } else {
+      const body = z.object({ backupId: z.string().uuid().optional(), confirm: z.string().optional() }).parse(request.body ?? {});
+      confirm = body.confirm;
+      if (confirm !== 'RESTORE') {
+        return reply.code(400).send({ error: 'Please confirm by sending { confirm: "RESTORE" }. This will overwrite the live database.' });
+      }
+      if (!body.backupId) {
+        return reply.code(400).send({ error: 'Provide backupId for an existing backup, or upload a file via multipart.' });
+      }
+      const archive = await prisma.backupArchive.findUnique({ where: { id: body.backupId } });
+      if (!archive) return reply.code(404).send({ error: 'Backup not found.' });
+      const safeName = path.basename(archive.filename);
+      const filePath = path.join(env.BACKUP_DIR, safeName);
+      if (!filePath.startsWith(path.resolve(env.BACKUP_DIR))) return reply.code(400).send({ error: 'Invalid backup path.' });
+      try {
+        await fsp.access(filePath);
+      } catch {
+        return reply.code(410).send({ error: 'That archive is no longer on the server. It may have been pruned.' });
+      }
+      archivePath = filePath;
+    }
+
+    if (!archivePath) return reply.code(400).send({ error: 'No archive to restore from.' });
+
+    try {
+      request.log.info({ archivePath }, 'restore starting');
+      const result = await restoreFromArchive(archivePath!);
+      try {
+        await audit(request.user!.sub, 'backup.restore', { entity: 'BackupArchive', ip: request.ip, detail: { archivePath, manifest: result.manifest } });
+      } catch {
+        // audit is best-effort; a stale connection right after pg_restore
+        // should not turn a successful restore into a 500/502.
+      }
+      request.log.info({ archivePath }, 'restore completed');
+      return { ok: true, message: 'Restore completed. Please refresh and verify users, tests and results. LLM keys only work if ENCRYPTION_KEY is unchanged.', manifest: result.manifest };
+    } catch (err) {
+      request.log.error({ err }, 'restore failed');
+      return reply.code(500).send({ error: `Restore failed: ${err instanceof Error ? err.message : String(err)}` });
+    } finally {
+      if (cleanup) await cleanup().catch(() => undefined);
+    }
   });
 
   /**

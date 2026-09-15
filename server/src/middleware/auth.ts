@@ -52,6 +52,13 @@ export function clearSessionCookie(reply: FastifyReply) {
  * trusted from the token, so deactivating or deleting a user takes effect
  * immediately instead of when their token happens to expire.
  */
+// Per-worker micro-cache for user rows: tick/answer heartbeats would otherwise
+// hit the user table twice per request (touchSession + findUnique) at 10 req/s
+// during an exam. 5s TTL is safe — deactivation/privilege changes take effect
+// within one tick, well before the student can start another paper.
+const userCache = new Map<string, { data: { id: string; username: string; role: Role; isActive: boolean; deletedAt: Date | null; mustChangePassword: boolean; permissions: string[] }; expiresAt: number }>();
+const USER_CACHE_TTL_MS = 5_000;
+
 export async function authenticate(request: FastifyRequest, reply: FastifyReply) {
   const token = request.cookies?.[COOKIE_NAME];
   if (!token) return reply.code(401).send({ error: 'Not signed in.' });
@@ -80,13 +87,21 @@ export async function authenticate(request: FastifyRequest, reply: FastifyReply)
 
   // Privileges are read from the row on every request, never from the token,
   // so revoking one takes effect immediately rather than when it expires.
-  const user = await prisma.user.findUnique({
-    where: { id: claims.sub },
-    select: {
-      id: true, username: true, role: true, isActive: true,
-      deletedAt: true, mustChangePassword: true, permissions: true,
-    },
-  });
+  // Cached for 5s to avoid 20 qps of identical PK lookups during an exam burst;
+  // the TTL is short enough that deactivation still lands before the next paper.
+  const now = Date.now();
+  const cached = userCache.get(claims.sub);
+  let user = cached && cached.expiresAt > now ? cached.data : null;
+  if (!user) {
+    user = await prisma.user.findUnique({
+      where: { id: claims.sub },
+      select: {
+        id: true, username: true, role: true, isActive: true,
+        deletedAt: true, mustChangePassword: true, permissions: true,
+      },
+    }) as typeof user;
+    if (user) userCache.set(claims.sub, { data: user, expiresAt: now + USER_CACHE_TTL_MS });
+  }
 
   if (!user || user.deletedAt) {
     clearSessionCookie(reply);

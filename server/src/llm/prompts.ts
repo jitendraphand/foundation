@@ -260,6 +260,10 @@ Return {"questions": [...]} with exactly {{count}} questions in the schema above
 Every question must be multiple choice with exactly one correct answer, and must carry a worked explanation - the explanation is the point of the exercise, so make it teach rather than assert.
 Do NOT produce any question needing a photograph. Draw any visual as SVG, and set "imageRequired": false.`;
 
+export const DRAFT_SYSTEM_PROMPT = `You are a question drafter. Produce ideas as a simple bullet list, NOT JSON. For each question give: stem, 4 options a-d, correct answer, 1-sentence explanation, difficulty/skill. Keep concise. Strict JSON will be done locally.`;
+
+export const FORMATTER_SYSTEM_PROMPT = `You are a strict JSON formatter. Convert loose drafts to the exact JSON contract {"questions":[Question]} following the full output contract. Return only JSON.`;
+
 /** Fills {{placeholders}}; unknown ones become an empty string. */
 export function renderTemplate(
   template: string,

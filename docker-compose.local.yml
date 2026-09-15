@@ -20,3 +20,11 @@ services:
   caddy:
     volumes:
       - ./Caddyfile.local:/etc/caddy/Caddyfile:ro
+
+  # Same reason as COOKIE_SECURE above, one layer down: n8n marks its own
+  # login cookie Secure by default, and a browser will not send a Secure
+  # cookie over http://n8n.localhost, so the editor would refuse its own
+  # sign-in page. The production stack stays on HTTPS and keeps the default.
+  n8n:
+    environment:
+      N8N_SECURE_COOKIE: "false"

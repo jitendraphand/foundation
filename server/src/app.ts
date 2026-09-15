@@ -14,6 +14,7 @@ import type { Permission } from './lib/permissions.js';
 import authRoutes from './routes/auth.js';
 import studentRoutes from './routes/student.js';
 import activityRoutes from './routes/activity.js';
+import resetRoutes from './routes/reset.js';
 import adminUserRoutes from './routes/admin/users.js';
 import adminQuestionRoutes from './routes/admin/questions.js';
 import adminTestRoutes from './routes/admin/tests.js';
@@ -22,6 +23,7 @@ import adminSettingsRoutes from './routes/admin/settings.js';
 import adminBackupRoutes from './routes/admin/backup.js';
 import adminAssetRoutes, { assetReadRoutes } from './routes/admin/assets.js';
 import adminActivityRoutes from './routes/admin/activities.js';
+import adminFlagRoutes from './routes/admin/flags.js';
 
 /**
  * The API, assembled but not listening.
@@ -66,11 +68,14 @@ export async function buildApp(options: BuildOptions = {}): Promise<FastifyInsta
     // Caddy is the only thing in front of us, so its X-Forwarded-For is
     // trustworthy and gives real client IPs for rate limiting.
     trustProxy: true,
-    bodyLimit: 8 * 1024 * 1024,
+    bodyLimit: 100 * 1024 * 1024,
+    connectionTimeout: 0,
+    keepAliveTimeout: 72000,
+    requestTimeout: 300000,
   });
 
   await app.register(cookie, { secret: env.JWT_SECRET });
-  await app.register(multipart, { limits: { fileSize: 4 * 1024 * 1024, files: 1 } });
+  await app.register(multipart, { limits: { fileSize: 50 * 1024 * 1024, files: 1 } });
 
   /**
    * Rate limits under clustering.
@@ -129,6 +134,8 @@ export async function buildApp(options: BuildOptions = {}): Promise<FastifyInsta
 
   await app.register(authRoutes);
   await app.register(studentRoutes);
+  // Public self-service password reset (rate limited, verifies identity).
+  await app.register(resetRoutes);
   // Registered outside the student gate: these are the routes used to clear it.
   await app.register(activityRoutes);
   await app.register(assetReadRoutes);
@@ -162,6 +169,7 @@ export async function buildApp(options: BuildOptions = {}): Promise<FastifyInsta
   // Images are attached to questions and to activity cards alike.
   await adminArea(['questions.review', 'activities.manage'], adminAssetRoutes);
   await adminArea('activities.manage', adminActivityRoutes);
+  await adminArea('tests.manage', adminFlagRoutes);
 
   return app;
 }

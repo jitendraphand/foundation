@@ -20,6 +20,13 @@ x86-64 alike.
   username is generated as `firstnamelastname` — Ajay Sharma becomes
   `ajaysharma`, and a second Ajay Sharma becomes `ajaysharma1`, then
   `ajaysharma2`.
+- **Forgot password?** on the sign-in screen: a student proves who they are
+  with username, date of birth and roll number (staff with username alone),
+  picks WhatsApp or email, and a new password arrives on the registered mobile
+  or email address. The password is never shown in the browser. A System
+  Administrator can store contact details for anyone; students can also keep
+  their own email address up to date from Change password, by proving the
+  current password first.
 - Every account also gets a permanent user ID (`USR-00001`). Names, spellings
   and even usernames can be corrected later; the user ID never changes, so
   results stay attached to the right person.
@@ -39,6 +46,11 @@ x86-64 alike.
   appear only once the teacher releases them (practice tests excepted).
 - Result view with score, per-axis breakdown charts, and (if the test allows)
   correct answers with worked explanations.
+- **Flag a question as inconsistent** — from the paper or the result review, a
+  student can report a question (wrong answer key, typo, unclear wording, out
+  of syllabus) with an optional note. One flag per student per question per
+  test, retractable while still open, and always visible to the teacher who set
+  the test.
 - **Activities** — a flashcard stack and/or a video the teacher has set. While
   one is outstanding the student is taken straight to it: no dashboard, no
   tests, nothing else until it has been read.
@@ -60,7 +72,11 @@ x86-64 alike.
   spot: add them to an existing paper, or create one there and then and land in
   its builder.
 - **Tests** — choose the final questions, set marks, negative marking, duration,
-  shuffling, and audience; publish when ready.
+  shuffling, and audience; publish when ready. Each question shows its options
+  with the correct answer badged, and can carry its own time limit (falling
+  back to the question's estimate). Deleting a test always removes it
+  completely — attempts, answers and all, with the live difficulty counters
+  adjusted — after a typed confirmation naming the attempt count.
 - **Proctoring (optional, per test)** — records when a student leaves the paper:
   another tab, another app, or leaving fullscreen. Warns, then submits
   automatically once the allowance is spent, and keeps the list for the
@@ -84,24 +100,49 @@ x86-64 alike.
   started, with a one-click "make them do it again".
 - **Analytics** — score distribution, trend over time, per-class and per-subject
   comparison, cohort-wide tag mastery, and a weakest-first student ranking.
+  Correct / Wrong / Skipped counts open a per-attempt drill-down showing each
+  question, the student's response and the key.
+- **Flagged questions** — every student flag lands on a **Flagged** tab inside
+  the test builder, with the question, the category, the student's note and who
+  reported it. The test's creator resolves or dismisses each flag with an
+  optional note; colleagues see only flags on their own papers unless they hold
+  `content.viewAll`. Like tests and questions, flags follow authorship:
+  administrators see their own work, invigilators see everything.
+- **Delete an attempt** — from a test's results, a student's detail page or a
+  report, remove one student's attempt (e.g. a mistaken submission so they can
+  retake), or purge every attempt on a test at once with a typed `DELETE`
+  confirmation. A purge is refused while anyone is still writing; the live
+  difficulty counters are decremented so `observedP` stays honest.
 - **Step-up tests** — reviewing a result, a student can ask any question for
   five more like it, or five that build up to it easiest-first. The paper is
   written on the spot, opens in a new tab, and is marked the moment it is
   submitted. An administrator chooses which provider answers these (usually a
-  cheap one, since students trigger them) or leaves it off entirely.
+  cheap one, since students trigger them) or leaves it off entirely. A second
+  verification pass over the generated questions is **off by default** — it
+  roughly doubles the wait, and a student is standing at the button — and can
+  be switched on under Settings; replies are also capped at 7,000 tokens to cut
+  the slow tail.
 - **Per-student analysis** — mastery grid across all four tag axes, and one
   button to generate a practice test aimed at exactly the cells they are
   failing. Practice data stays segregated from class-test data everywhere.
 - **User management** — add students by hand, activate, deactivate, edit any
   detail, change the username, set a new password to hand over in person, and
-  delete (soft by default so historical results survive).
+  delete (soft by default so historical results survive). A System
+  Administrator can also store each person's mobile number and email address —
+  the two fields other administrators cannot see or change — which is what the
+  WhatsApp and email password resets deliver to. Students may additionally set
+  their own email from Change password (current password required); mobiles
+  stay System-Administrator-only.
 - **Administrators with granular privileges** — create colleagues with exactly
   the ten privileges you tick, or start from a preset (Teacher, Question
   setter, Invigilator, Office). Someone who writes papers never has to hold the
   API keys or the backups.
 - Every test carries a permanent test ID (`TST-0001`) alongside its title.
 - **Backups** — one click produces a `.tar.gz` containing everything, ready to
-  store on Google Drive.
+  store on Google Drive — and restoring is one click too, from the same tab,
+  with a typed confirmation. A backup taken on an older release restores
+  cleanly into a newer one: the schema is brought up to date automatically
+  after the data lands.
 
 ---
 
@@ -434,25 +475,37 @@ later.
 
 ## Running it on your own machine
 
-Two ways, depending on what you want.
+Two ways, depending on what you want. Both generate every secret for you and
+print them — admin login included — in the terminal when the stack is up.
 
 **A trial that behaves exactly like the server** — same containers, same
 database, same migrations, over plain HTTP with no domain name:
 
 ```bash
-cp .env.example .env      # set PUBLIC_HOST=localhost and the two secrets
-sudo docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build
+./deploy/local.sh
 ```
 
 Then open http://localhost. Other devices on the same Wi-Fi can join at
 `http://<your-ip>` — `hostname -I` will tell you the address. Full walkthrough
 in [deploy/DEPLOYMENT.md](deploy/DEPLOYMENT.md#0-trying-it-on-your-own-machine-first).
 
-The override serves plain HTTP and turns off the Secure cookie flag, because
-neither can work without a certificate. That is fine on your own machine and on
-a school LAN, and must never be used on a public server.
+The local override serves plain HTTP and turns off the Secure cookie flag,
+because neither can work without a certificate. That is fine on your own
+machine and on a school LAN, and must never be used on a public server.
 
 **Development, with hot reload:**
+
+```bash
+./deploy/dev.sh
+```
+
+One command: generates secrets into a git-ignored `.env.dev`, starts a local
+PostgreSQL container, applies migrations and seeds once, then runs the API on
+:4000 and the frontend on :5173 with hot reload, printing URLs, the admin
+login and every generated secret when both are up. Ctrl-C stops the servers;
+the database keeps its data for next time.
+
+Prefer to drive it by hand? The equivalent manual steps are:
 
 ```bash
 # 1. PostgreSQL
@@ -477,13 +530,16 @@ npm install
 npm run dev
 ```
 
-Sign in as `admin` with the `ADMIN_PASSWORD` from your `.env`. On a real
-server `deploy/bootstrap.sh` generates one for you and prints it; the example
-value `foundation_123` is for a laptop trial only.
+Sign in as `admin`. Under `deploy/local.sh` and `deploy/dev.sh` the password is
+generated and printed at the end of the run; under `docker-compose.local.yml`
+it comes from `ADMIN_PASSWORD` in your `.env`. On a real server
+`deploy/bootstrap.sh` generates one for you and prints it; the example value
+`foundation_123` exists only as a placeholder that those scripts replace.
 
-Change it from **Change password** in the admin header. That value in `.env` is
-read once, when the first administrator is created on an empty database, so
-editing it later has no effect.
+That value in `.env` is read once, when the first administrator is created on
+an empty database, so editing it later has no effect.
+
+Change it from **Change password** in the admin header.
 
 ---
 
@@ -497,14 +553,19 @@ server/          Fastify API
                  bedrock.ts + aws-sigv4.ts, oci.ts + oci-signer.ts: the two
                  providers with their own protocol and their own signing
                  google-auth.ts: service-account JWT exchange for Vertex
-  src/routes/    auth, student, admin/*
+                 twoStage.ts + verify.ts: draft→format pipelines and the
+                 correctness verifier for questions served without review
+  src/routes/    auth, reset (WhatsApp/email self-service), student, admin/*
   src/services/  attempt lifecycle, backup/restore
 web/             React frontend
   src/renderers/ the block renderers (text, math, svg, mermaid, chart, …)
   src/components/charts.tsx   hand-rolled SVG charts
-  src/pages/     landing, dashboard, test runner, result, admin/*
+  src/pages/     landing (with WhatsApp/email reset), dashboard, test runner,
+                 result, admin/*
 docs/            GitHub Pages landing page (the "Enter" button)
 deploy/          bootstrap.sh, backup.sh, restore.sh, DEPLOYMENT.md
+docker-compose.yml        includes the n8n sidecar (WhatsApp/email delivery)
+                          alongside api, db, web and caddy
 ```
 
 ---
@@ -552,3 +613,15 @@ screens are usable on a phone even though they are meant for a desk.
 - Server-authoritative exam timer — the client clock is never trusted
 - Answer keys are stripped from every student-facing payload
 - Full audit log of administrative actions
+- Self-service WhatsApp/email password reset verifies a student by username, date of
+  birth and roll number (staff by username) and sends the new password only to
+  the mobile number or email address a System Administrator stored; it is never
+  shown in the browser. Contact details themselves are editable only with the
+  "Manage administrators" privilege and are stripped from every reply to
+  anyone else.
+- Step-up questions — the one path where a generated question reaches a
+  student without an administrator reading it first — always pass a fast
+  programmatic check that the options are well-formed and the answer key names
+  a real option. A second verification model for conceptual correctness is
+  available under Settings but off by default, because it roughly doubles the
+  time a waiting student spends at the button.

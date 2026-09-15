@@ -39,9 +39,10 @@ export default function ChangePassword() {
 
   return (
     <main className="min-h-full flex items-center justify-center px-4 py-12">
+      <div className="w-full max-w-md space-y-4">
       <form onSubmit={submit} className="card p-6 w-full max-w-md space-y-4">
-        <div>
-          <h1 className="text-sm font-semibold">Change your password</h1>
+      <div>
+        <h1 className="text-lg font-semibold tracking-tight">Change your password</h1>
           {forced && (
             <p className="text-xs text-ink-muted mt-1">
               Your password was reset by an administrator. Please choose a new one to continue.
@@ -95,6 +96,84 @@ export default function ChangePassword() {
           </button>
         )}
       </form>
+      <EmailCard />
+      </div>
     </main>
+  );
+}
+
+/**
+ * Your own email address for password resets. A System Administrator can set
+ * it for you, but anything you type here costs your current password first —
+ * otherwise anyone holding your unlocked device could redirect your resets.
+ */
+function EmailCard() {
+  const { user, refresh } = useAuth();
+  const [email, setEmail] = useState(user?.email ?? '');
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const save = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await api.patch<{ message: string; email: string | null }>('/api/auth/profile', {
+        email: email.trim() === '' ? null : email.trim(),
+        currentPassword,
+      });
+      setNotice(res.message);
+      setCurrentPassword('');
+      await refresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not save your email address.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form onSubmit={save} className="card p-6 w-full max-w-md space-y-4">
+      <div>
+        <h2 className="text-sm font-semibold">Email for password resets</h2>
+        <p className="text-xs text-ink-muted mt-1">
+          {user?.email
+            ? `Resets currently go to ${user.email}.`
+            : 'No email on file — resets can only go by WhatsApp, if a mobile number is on file.'}
+        </p>
+      </div>
+
+      {notice && <Alert tone="success">{notice}</Alert>}
+      {error && <Alert tone="error">{error}</Alert>}
+
+      <Field label="Email address" hint="Clear it to remove. Takes effect for the next reset.">
+        <input
+          className="input"
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          autoComplete="email"
+          placeholder="name@example.com"
+        />
+      </Field>
+
+      <Field label="Current password" required hint="Proof it is really you making this change.">
+        <input
+          className="input"
+          type="password"
+          value={currentPassword}
+          onChange={(e) => setCurrentPassword(e.target.value)}
+          autoComplete="current-password"
+          required
+        />
+      </Field>
+
+      <button type="submit" className="btn-primary w-full" disabled={busy}>
+        {busy ? <Spinner label="Saving" /> : 'Save email address'}
+      </button>
+    </form>
   );
 }

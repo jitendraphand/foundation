@@ -37,6 +37,8 @@ export interface AttemptFilter {
    * unreleased mark cannot leak through a weak-areas summary.
    */
   releasedOnly?: boolean;
+  /** Only attempts for tests created by this admin. Null means all (System Admin). */
+  createdById?: string;
 }
 
 /** The WHERE shared by every query below, as bind parameters. */
@@ -52,6 +54,7 @@ function conditions(f: AttemptFilter): Prisma.Sql[] {
   if (f.division) parts.push(Prisma.sql`${f.division} = ANY(u."divisions")`);
   if (f.userId) parts.push(Prisma.sql`a."userId" = ${f.userId}`);
   if (f.releasedOnly) parts.push(Prisma.sql`(t."kind"::text = 'PRACTICE' OR t."resultsReleased")`);
+  if (f.createdById) parts.push(Prisma.sql`t."createdById" = ${f.createdById}`);
   return parts;
 }
 

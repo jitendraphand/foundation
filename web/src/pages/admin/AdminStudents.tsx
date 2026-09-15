@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, ApiError } from '../../lib/api';
 import { suggestPassword } from '../../lib/passwords';
-import { Alert, Badge, Card, EmptyState, Field, Modal, PageLoader, formatDate, humanizeTag } from '../../components/ui';
+import { Alert, Badge, Card, EmptyState, Field, Modal, PageLoader, Pagination, formatDate, humanizeTag } from '../../components/ui';
 import { AccuracyMeter } from '../../components/charts';
 import { useAuth } from '../../lib/auth';
 import type { WeakArea } from '../../lib/types';
@@ -38,6 +38,10 @@ interface UserRow {
   divisions: string[];
   rollNo: string;
   dateOfBirth: string;
+  /** Set only by a System Administrator; used for WhatsApp password reset. */
+  mobile?: string | null;
+  /** Set only by a System Administrator; used for email password reset. */
+  email?: string | null;
   isActive: boolean;
   lastLoginAt: string | null;
   createdAt: string;
@@ -128,6 +132,7 @@ function ManageStudents() {
   const [notice, setNotice] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [status, setStatus] = useState<'all' | 'active' | 'inactive'>('all');
+  const [page, setPage] = useState(1);
   const [editing, setEditing] = useState<UserRow | null>(null);
   const [resetting, setResetting] = useState<UserRow | null>(null);
   const [deleting, setDeleting] = useState<UserRow | null>(null);
@@ -136,7 +141,7 @@ function ManageStudents() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const query = new URLSearchParams({ pageSize: '100', status });
+      const query = new URLSearchParams({ pageSize: '100', status, page: String(page) });
       if (search.trim()) query.set('search', search.trim());
       const res = await api.get<{ users: UserRow[]; total: number }>(`/api/admin/users?${query}`);
       setUsers(res.users);
@@ -147,12 +152,18 @@ function ManageStudents() {
     } finally {
       setLoading(false);
     }
-  }, [search, status]);
+  }, [search, status, page]);
 
   useEffect(() => {
     const timer = setTimeout(() => void load(), 250);
     return () => clearTimeout(timer);
   }, [load]);
+
+  // A new search or filter starts from the first page — page 4 of a filter
+  // that matches nothing is a screen that looks broken.
+  useEffect(() => {
+    setPage(1);
+  }, [search, status]);
 
   const toggleActive = async (user: UserRow) => {
     try {
@@ -247,9 +258,7 @@ function ManageStudents() {
               </tbody>
             </table>
           </div>
-          <p className="px-4 py-2 text-xs text-ink-faint border-t border-line">
-            Showing {users.length} of {total}
-          </p>
+          <Pagination page={page} pageSize={100} total={total} onChange={setPage} />
         </Card>
       )}
 
@@ -362,6 +371,11 @@ function CreateStudentModal({ onClose, onCreated }: { onClose: () => void; onCre
 }
 
 function EditUserModal({ user, onClose, onSaved }: { user: UserRow; onClose: () => void; onSaved: (message?: string) => void }) {
+  const { can } = useAuth();
+  // Only a System Administrator sees or edits the mobile number and email
+  // address; the server refuses them for anyone else regardless.
+  const mayEditMobile = can('admins.manage');
+  const mayEditEmail = can('admins.manage');
   const [form, setForm] = useState({
     firstName: user.firstName,
     lastName: user.lastName,
@@ -369,6 +383,8 @@ function EditUserModal({ user, onClose, onSaved }: { user: UserRow; onClose: () 
     division: user.division,
     rollNo: user.rollNo,
     dateOfBirth: user.dateOfBirth.slice(0, 10),
+    mobile: user.mobile ?? '',
+    email: user.email ?? '',
   });
   const [extraDivisions, setExtraDivisions] = useState<string[]>(
     () => (user.divisions ?? []).filter((d) => d !== user.division),
@@ -411,6 +427,9 @@ function EditUserModal({ user, onClose, onSaved }: { user: UserRow; onClose: () 
         // Always the whole set, never a delta - see the note on the edit
         // schema for why.
         divisions: extraDivisions.filter((d) => d !== form.division),
+        // Mobile and email are System Administrator fields; only sent when they may be changed.
+        ...(mayEditMobile ? { mobile: form.mobile.trim() === '' ? null : form.mobile.trim() } : { mobile: undefined }),
+        ...(mayEditEmail ? { email: form.email.trim() === '' ? null : form.email.trim() } : { email: undefined }),
         ...(usernameMode === 'set' && username !== user.username ? { username } : {}),
         ...(usernameMode === 'regenerate' ? { regenerateUsername: true } : {}),
       });
@@ -456,6 +475,37 @@ function EditUserModal({ user, onClose, onSaved }: { user: UserRow; onClose: () 
         <Field label="Date of birth">
           <input type="date" className="input" value={form.dateOfBirth} onChange={(e) => setForm((f) => ({ ...f, dateOfBirth: e.target.value }))} />
         </Field>
+
+        {mayEditMobile && (
+          <Field
+            label="Mobile (WhatsApp)"
+            hint="System Administrator only. Used to deliver self-service password resets. 10 digits."
+          >
+            <input
+              className="input"
+              value={form.mobile}
+              onChange={(e) => setForm((f) => ({ ...f, mobile: e.target.value }))}
+              inputMode="tel"
+              placeholder="10-digit number"
+            />
+          </Field>
+        )}
+
+        {mayEditEmail && (
+          <Field
+            label="Email"
+            hint="System Administrator only. Used to deliver self-service password resets."
+          >
+            <input
+              className="input"
+              type="email"
+              value={form.email}
+              onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
+              inputMode="email"
+              placeholder="name@example.com"
+            />
+          </Field>
+        )}
 
         <fieldset className="rounded-lg border border-line p-3 space-y-2">
           <legend className="px-1 text-xs font-medium text-ink-muted">Username</legend>
@@ -522,19 +572,20 @@ function EditUserModal({ user, onClose, onSaved }: { user: UserRow; onClose: () 
 }
 
 function ResetPasswordModal({ user, onClose, onDone }: { user: UserRow; onClose: () => void; onDone: (message: string) => void }) {
-  const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-
-  const suggest = () => setPassword(suggestPassword());
+  // Shown once, after the reset: the office reads it out or hands it over.
+  const [tempPassword, setTempPassword] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
     setBusy(true);
     setError(null);
     try {
-      const res = await api.post<{ message: string }>(`/api/admin/users/${user.id}/reset-password`, { newPassword: password });
-      onDone(`${res.message} Temporary password: ${password}`);
+      const res = await api.post<{ message: string; newPassword?: string }>(`/api/admin/users/${user.id}/reset-password`, {});
+      setTempPassword(res.newPassword ?? null);
+      onDone(res.message);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not reset the password.');
     } finally {
@@ -542,22 +593,54 @@ function ResetPasswordModal({ user, onClose, onDone }: { user: UserRow; onClose:
     }
   };
 
+  const copy = async () => {
+    if (!tempPassword) return;
+    try {
+      await navigator.clipboard.writeText(tempPassword);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // Clipboard refused (insecure origin or denied permission); the password
+      // is still on screen to copy by hand.
+    }
+  };
+
+  if (tempPassword !== null) {
+    return (
+      <Modal open onClose={onClose} title={`Password reset for ${user.username}`}>
+        <div className="space-y-4">
+          <Alert tone="info">{user.username} has been signed out of every device and must choose a new password at
+            next sign-in.</Alert>
+          <Field label="Temporary password — hand this over in person" hint="It will not be shown again.">
+            <div className="flex gap-2">
+              <input className="input font-mono" value={tempPassword} readOnly onFocus={(e) => e.target.select()} />
+              <button type="button" className="btn-secondary btn-sm shrink-0" onClick={copy}>
+                {copied ? 'Copied' : 'Copy'}
+              </button>
+            </div>
+          </Field>
+          <div className="flex justify-end">
+            <button type="button" className="btn-primary" onClick={onClose}>Close</button>
+          </div>
+        </div>
+      </Modal>
+    );
+  }
+
   return (
     <Modal open onClose={onClose} title={`Reset password for ${user.username}`}>
       <form onSubmit={submit} className="space-y-4">
         {error && <Alert tone="error">{error}</Alert>}
 
         <p className="text-sm text-ink-muted">
-          Set a temporary password and give it to the student. They will be asked to choose their own the next time
-          they sign in.
+          A temporary password is generated for {user.username}. It is shown once after the reset so you can give it
+          to them in person; they will choose their own the next time they sign in.
         </p>
 
-        <Field label="Temporary password" required>
-          <div className="flex gap-2">
-            <input className="input font-mono" value={password} onChange={(e) => setPassword(e.target.value)} required minLength={8} />
-            <button type="button" className="btn-secondary btn-sm shrink-0" onClick={suggest}>Suggest</button>
-          </div>
-        </Field>
+        <Alert tone="warn">
+          This signs {user.firstName ?? user.username} out everywhere immediately. Anyone holding the old password
+          loses access, which is the point if the account has been compromised.
+        </Alert>
 
         <div className="flex justify-end gap-2">
           <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>

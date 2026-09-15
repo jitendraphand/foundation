@@ -137,6 +137,13 @@ export interface StepUpConfig {
   model?: string;
   /** Papers per student per school day. 0 means no limit at all. */
   dailyQuota?: number;
+  /**
+   * Whether to run the second conceptual-verification LLM call before serving.
+   * Off by default for speed: a student pressing "more like this" is waiting,
+   * and the verification pass roughly doubles the latency. The fast
+   * programmatic option-structure check always runs regardless.
+   */
+  verify?: boolean;
 }
 
 export async function getStepUpConfig(): Promise<StepUpConfig | null> {
@@ -150,6 +157,10 @@ export async function getStepUpConfig(): Promise<StepUpConfig | null> {
     // applies rather than "unlimited", which would leave exactly the installs
     // that never chose a number with no limit at all.
     dailyQuota: typeof value.dailyQuota === 'number' ? value.dailyQuota : DEFAULT_STEP_UP_QUOTA,
+    // Verification is the slow second call; a config that never chose keeps
+    // the fast default (off) rather than surprising an existing install with
+    // the latency it had already decided it did not want.
+    verify: typeof value.verify === 'boolean' ? value.verify : false,
   };
 }
 
@@ -162,6 +173,7 @@ export async function setStepUpConfig(config: StepUpConfig | null): Promise<void
     credentialId: config.credentialId,
     ...(config.model ? { model: config.model } : {}),
     dailyQuota: config.dailyQuota ?? DEFAULT_STEP_UP_QUOTA,
+    ...(typeof config.verify === 'boolean' ? { verify: config.verify } : {}),
   };
   await prisma.setting.upsert({
     where: { key: STEP_UP_SETTING },
@@ -277,8 +289,14 @@ export async function generateStepUp(args: {
   // think first - but never more than this provider and model will accept. See
   // limits.ts: the ceiling may have been set by an admin, learned from an
   // earlier refusal, or come from the provider's own default.
+  //
+  // The 12,000-token ceiling used to let a reasoning model write an essay the
+  // student then had to wait for. Five questions with explanations fit well
+  // within 7,000 tokens, and capping there removes the tail of very slow
+  // replies.
   const ceiling = resolveCeiling(credential, model);
-  const maxTokens = Math.min(12_000, ceiling ?? 12_000);
+  const MAX_STEP_UP_TOKENS = 7_000;
+  const maxTokens = Math.min(MAX_STEP_UP_TOKENS, ceiling ?? MAX_STEP_UP_TOKENS);
 
   const messages = [
     { role: 'system' as const, content: prompts.systemPrompt },
@@ -291,7 +309,13 @@ export async function generateStepUp(args: {
         {
           label: credential.label,
           model,
-          call: { ...call, temperature: 0.5, jsonMode: providerDef.supportsJsonMode, maxTokens: budget },
+          call: {
+            ...call,
+            temperature: 0.2,
+            jsonMode: true,
+            maxTokens: budget,
+            tuning: { ...(call.tuning ?? {}), jsonMode: 'on', thinking: 'no', stream: false },
+          },
         },
       ],
     });
@@ -315,6 +339,37 @@ export async function generateStepUp(args: {
     parsed = llmResponseSchema.parse(extractJson(response.text));
   } catch {
     throw new LlmError('The model did not return usable questions. Try again in a moment.');
+  }
+
+  // For auto-served step-up, optionally verify conceptual correctness before
+  // serving. This is a second LLM call that roughly doubles the latency, so it
+  // is off unless an administrator explicitly enables it (Settings > Step-up).
+  // The fast programmatic option-structure check runs regardless, below.
+  if (config.verify === true) {
+    try {
+      const { verifyQuestions } = await import('./verify.js');
+      const verifications = await verifyQuestions(
+        parsed.questions.slice(0, STEP_UP_COUNT).map((q) => ({ content: q.content, options: q.options, answerKey: q.answerKey, subject: q.subject })),
+        { mode: 'strict' },
+      );
+      const invalid = verifications.filter((v) => !v.isValid || v.confidence < 0.7);
+      if (invalid.length > 0) {
+        console.warn('[step-up] conceptual verification flagged', invalid);
+        const validIndices = new Set(verifications.filter((v) => v.isValid && v.confidence >= 0.7).map((v) => v.questionIndex));
+        const filtered = parsed.questions.filter((_, i) => validIndices.has(i));
+        if (filtered.length >= 3) {
+          // Keep only verified valid; if at least 3 remain, proceed (student still gets a useful set)
+          parsed.questions = filtered;
+        } else if (filtered.length === 0) {
+          throw new LlmError(`Generated questions failed conceptual verification (${invalid.map((x) => x.reason).join('; ').slice(0, 300)}). Please try again.`);
+        } else {
+          parsed.questions = filtered;
+        }
+      }
+    } catch (e) {
+      if (e instanceof LlmError) throw e;
+      console.warn('[step-up] verification skipped', e);
+    }
   }
 
   const validTags = await loadTagVocabulary();

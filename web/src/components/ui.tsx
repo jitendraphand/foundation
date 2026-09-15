@@ -272,6 +272,90 @@ export function Tabs<T extends string>({
   );
 }
 
+/**
+ * Page controls for any list the server returns in pages.
+ *
+ * The endpoints have always accepted `page` and `pageSize` and answered with
+ * `total` — the screens just never asked for page two. Rendered counts read
+ * "1–100 of 138", so the missing rows are visible rather than merely absent.
+ * Hidden entirely when everything fits on one page.
+ */
+export function Pagination({
+  page,
+  pageSize,
+  total,
+  onChange,
+}: {
+  page: number;
+  pageSize: number;
+  total: number;
+  onChange: (page: number) => void;
+}) {
+  const pages = Math.max(1, Math.ceil(total / pageSize));
+  if (pages <= 1) return null;
+
+  const from = (page - 1) * pageSize + 1;
+  const to = Math.min(total, page * pageSize);
+
+  // A window around the current page, always including first and last, with
+  // ellipses where the gap is too wide to number.
+  const items: Array<number | null> = [];
+  for (let p = 1; p <= pages; p++) {
+    if (p === 1 || p === pages || Math.abs(p - page) <= 1) {
+      if (items.length && p - (items[items.length - 1] as number) > 1) items.push(null);
+      items.push(p);
+    }
+  }
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 px-1 pt-3">
+      <p className="text-xs text-ink-muted tabular-nums">
+        {from}&ndash;{to} of {total}
+      </p>
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          className="btn-ghost btn-sm"
+          disabled={page <= 1}
+          onClick={() => onChange(page - 1)}
+          aria-label="Previous page"
+        >
+          &larr; Prev
+        </button>
+        {items.map((p, i) =>
+          p === null ? (
+            <span key={`gap-${i}`} className="px-1 text-xs text-ink-faint" aria-hidden>
+              &hellip;
+            </span>
+          ) : (
+            <button
+              key={p}
+              type="button"
+              onClick={() => onChange(p)}
+              aria-label={`Page ${p}`}
+              aria-current={p === page ? 'page' : undefined}
+              className={`min-w-9 rounded-lg px-2.5 py-1.5 text-sm tabular-nums transition-colors ${
+                p === page ? 'bg-surface-sunken text-ink font-medium' : 'text-ink-muted hover:bg-surface-sunken'
+              }`}
+            >
+              {p}
+            </button>
+          ),
+        )}
+        <button
+          type="button"
+          className="btn-ghost btn-sm"
+          disabled={page >= pages}
+          onClick={() => onChange(page + 1)}
+          aria-label="Next page"
+        >
+          Next &rarr;
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function formatDate(value: string | Date | null | undefined, withTime = false): string {
   if (!value) return '—';
   const d = typeof value === 'string' ? new Date(value) : value;

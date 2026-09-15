@@ -88,6 +88,7 @@ const schema = z.object({
     .enum(['true', 'false'])
     .optional()
     .transform((v) => (v === undefined ? undefined : v === 'true')),
+
 });
 
 const parsed = schema.safeParse(process.env);

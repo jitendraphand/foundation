@@ -19,7 +19,13 @@
 	# Same routing as production: /api and /uploads to the Node service,
 	# everything else to the React single-page app.
 	handle /api/* {
-		reverse_proxy api:4000
+		reverse_proxy api:4000 {
+			transport http {
+				dial_timeout 10s
+				read_timeout 300s
+				write_timeout 300s
+			}
+		}
 	}
 
 	handle /uploads/* {
@@ -36,4 +42,12 @@
 		Referrer-Policy "strict-origin-when-cross-origin"
 		-Server
 	}
+}
+
+# n8n sidecar (part of docker-compose.yml), plain HTTP on the LAN.
+# The http:// prefix matters: a bare hostname would be placed on :443 by
+# default, where nothing is listening in this trial - so http:// requests
+# would fall through to the app instead of n8n.
+http://n8n.localhost {
+	reverse_proxy n8n:5678
 }

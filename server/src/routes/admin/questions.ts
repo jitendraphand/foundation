@@ -12,6 +12,7 @@ import { importQuestions, runGeneration, buildUserPrompt, sweepAbandonedRuns } f
 import { IMPORT_TEMPLATE } from '../../llm/import-template.js';
 import { LlmError, PROVIDERS } from '../../llm/providers.js';
 import { capabilitiesOf } from '../../llm/capabilities.js';
+import { resolveCeiling } from '../../llm/limits.js';
 import { ownedBy, seesEverything, type Actor } from '../../lib/ownership.js';
 import { generateImage, pictureRequestFor } from '../../llm/images.js';
 import { redrawFigure } from '../../llm/redraw.js';
@@ -183,9 +184,19 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
 
     // A credential kept only for drawing pictures has no business in the
     // "which model writes the questions" dropdown; see llm/capabilities.ts.
+    // Visibility is controlled in Settings > LLM providers — only credentials
+    // marked visible are offered on the Set test screen.
     const credentials = allCredentials
       .filter((c) => capabilitiesOf(c).text)
-      .map(({ meta, ...rest }) => { void meta; return rest; });
+      .filter((c) => (c.meta as { visible?: boolean } | null)?.visible !== false)
+      .map(({ meta, ...rest }) => {
+        const m = meta as { maxOutputTokens?: number; tokenCeilings?: Record<string, number> } | null;
+        const model = (rest as { defaultModel: string | null }).defaultModel ?? '';
+        const ceiling = resolveCeiling({ provider: rest.provider, meta: meta as never }, model)
+          ?? (m?.maxOutputTokens && m.maxOutputTokens > 0 ? m.maxOutputTokens : undefined)
+          ?? PROVIDERS[rest.provider]?.maxOutputTokens;
+        return { ...rest, effectiveMaxTokens: ceiling ?? null, maxOutputTokens: m?.maxOutputTokens ?? null };
+      });
 
     return {
       tags: {

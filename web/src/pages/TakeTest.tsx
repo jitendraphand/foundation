@@ -10,6 +10,7 @@ interface Paper {
   test: {
     id: string; title: string; subject: string; kind: string; durationMinutes: number;
     negativeMarks: number; totalMarks: number;
+    perQuestionTiming?: boolean;
     proctoring?: { enabled: boolean; allowance: number; requireFullscreen: boolean };
   };
   proctorCount?: number;
@@ -25,6 +26,12 @@ export default function TakeTest() {
   const [paper, setPaper] = useState<Paper | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [index, setIndex] = useState(0);
+  // Ticks every second so a per-question countdown can read against it.
+  const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
+  useEffect(() => {
+    const t = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000);
+    return () => clearInterval(t);
+  }, []);
   const [answers, setAnswers] = useState<Record<string, AnswerResponse>>({});
   const [flags, setFlags] = useState<Record<string, boolean>>({});
   const [remainingMs, setRemainingMs] = useState(0);
@@ -33,10 +40,35 @@ export default function TakeTest() {
   const [confirmSubmit, setConfirmSubmit] = useState(false);
   const [paneOpen, setPaneOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [flagging, setFlagging] = useState(false);
+  const [flagReason, setFlagReason] = useState('');
+  const [flagCategory, setFlagCategory] = useState('WRONG_ANSWER');
+  const [flagged, setFlagged] = useState<Set<string>>(new Set());
+  const [flagNotice, setFlagNotice] = useState<string | null>(null);
+  const [flagFormOpen, setFlagFormOpen] = useState(false);
+  // Questions whose per-question time the server has cut off. Only ever
+  // populated when the test enforces per-question limits.
+  const [perQTimeUp, setPerQTimeUp] = useState<Set<string>>(new Set());
 
   // Time spent per question, so the analytics can show where a student stalls.
   const questionEnteredAt = useRef<number>(Date.now());
   const timeSpent = useRef<Record<string, number>>({});
+
+  // Reset flag form when navigating questions
+  useEffect(() => {
+    setFlagFormOpen(false);
+    setFlagReason('');
+    setFlagNotice(null);
+  }, [index]);
+
+  // Load already-flagged questions for this test
+  useEffect(() => {
+    if (!paper) return;
+    api
+      .get<{ flags: Array<{ questionId: string }> }>(`/api/student/flags?testId=${paper.test.id}`)
+      .then((res) => setFlagged(new Set(res.flags.map((f) => f.questionId))))
+      .catch(() => undefined);
+  }, [paper]);
 
   useEffect(() => {
     if (!attemptId) return;
@@ -143,11 +175,24 @@ export default function TakeTest() {
           ...(markedForReview !== undefined ? { isMarkedForReview: markedForReview } : {}),
         });
         setRemainingMs(res.remainingMs);
+        setPerQTimeUp((prev) => {
+          if (!prev.has(questionId)) return prev;
+          const next = new Set(prev);
+          next.delete(questionId);
+          return next;
+        });
         setSaveState('saved');
         setTimeout(() => setSaveState((s) => (s === 'saved' ? 'idle' : s)), 1500);
       } catch (err) {
         if (err instanceof ApiError && (err.body?.submitted as boolean)) {
           navigate(`/result/${attemptId}`, { replace: true });
+          return;
+        }
+        // The server cut this question's time off. Whatever was saved in time
+        // still counts; the input goes quiet rather than saving into the void.
+        if (err instanceof ApiError && err.body?.code === 'QUESTION_TIME_UP') {
+          setPerQTimeUp((prev) => new Set(prev).add(questionId));
+          setSaveState('idle');
           return;
         }
         setSaveState('error');
@@ -165,6 +210,32 @@ export default function TakeTest() {
     const next = !flags[questionId];
     setFlags((prev) => ({ ...prev, [questionId]: next }));
     void saveAnswer(questionId, answers[questionId] ?? null, next);
+  };
+
+  const flagQuestion = async () => {
+    if (!paper) return;
+    const q = paper.questions[index];
+    if (!q) return;
+    setFlagging(true);
+    try {
+      await api.post('/api/student/flags', {
+        questionId: q.id,
+        testId: paper.test.id,
+        attemptId: paper.attempt.id,
+        category: flagCategory,
+        reason: flagReason.trim() || undefined,
+      });
+      setFlagged((prev) => new Set(prev).add(q.id));
+      setFlagNotice('Flagged — your teacher will review this question.');
+      setFlagReason('');
+      setFlagFormOpen(false);
+      setTimeout(() => setFlagNotice(null), 3000);
+    } catch (err) {
+      setFlagNotice(err instanceof ApiError ? err.message : 'Could not flag this question.');
+      setTimeout(() => setFlagNotice(null), 4000);
+    } finally {
+      setFlagging(false);
+    }
   };
 
   const goTo = (next: number) => {
@@ -200,6 +271,21 @@ export default function TakeTest() {
   const question = paper.questions[index];
   const lowTime = remainingMs < 60_000;
   const proctored = paper.test.proctoring?.enabled === true;
+
+  // Per-question countdown, only when the test enforces it. The clock reads
+  // against the server-recorded first save, so it cannot disagree with the
+  // cutoff; before the first save it has not started, so nothing ticks.
+  const qLimit = paper.test.perQuestionTiming ? question?.timeLimitSeconds ?? null : null;
+  const qFirstSeen = question?.firstSeenAt ? Math.floor(new Date(question.firstSeenAt).getTime() / 1000) : null;
+  const qRemaining = qLimit != null && qFirstSeen != null ? Math.max(0, qLimit - (nowSec - qFirstSeen)) : null;
+
+  // Informational: when the local countdown reaches zero, show the banner. The
+  // server remains the authority — a successful save clears it again.
+  useEffect(() => {
+    if (question && qRemaining === 0) {
+      setPerQTimeUp((prev) => (prev.has(question.id) ? prev : new Set(prev).add(question.id)));
+    }
+  }, [question, qRemaining]);
 
   return (
     <div className="min-h-full flex flex-col bg-surface">
@@ -271,13 +357,28 @@ export default function TakeTest() {
       )}
 
       <main className="flex-1 mx-auto w-full max-w-5xl px-4 py-6 grid lg:grid-cols-[1fr_180px] gap-6 items-start content-start">
-        <div className="card p-5 min-w-0">
-          <div className="flex items-start justify-between gap-4 mb-4">
+        <div className="card p-5 sm:p-7 min-w-0">
+          <div className="flex items-start justify-between gap-4 mb-5">
             <div>
-              <span className="text-xs font-medium text-ink-muted">
+              <span className="text-[13px] font-medium text-ink-muted">
                 Question {index + 1} of {paper.questions.length}
               </span>
               <span className="ml-2 badge">{question.marks} mark{question.marks === 1 ? '' : 's'}</span>
+              {qRemaining != null && (
+                <span
+                  className={`ml-2 font-mono text-xs tabular-nums px-2 py-0.5 rounded-md border ${
+                    qRemaining === 0 ? 'border-bad/40 bg-bad/[0.08] text-bad' : 'border-line bg-surface-sunken text-ink-muted'
+                  }`}
+                  role="timer"
+                >
+                  {formatDuration(qRemaining * 1000)} left on this question
+                </span>
+              )}
+              {qLimit != null && qRemaining == null && (
+                <span className="ml-2 text-xs text-ink-faint">
+                  {Math.round(qLimit / 60)} min for this question
+                </span>
+              )}
             </div>
             <button
               type="button"
@@ -290,10 +391,54 @@ export default function TakeTest() {
             </button>
           </div>
 
-          <ContentRenderer content={question.content} className="text-[15px]" />
+          <ContentRenderer content={question.content} className="text-base sm:text-[17px] leading-relaxed" />
 
-          <div className="mt-5">
+          <div className="mt-6">
+            {perQTimeUp.has(question.id) && (
+              <Alert tone="warn">
+                Time for this question has run out. Your saved answer still counts — move on and come back if the
+                paper's clock allows.
+              </Alert>
+            )}
             <AnswerInput question={question} value={answers[question.id] ?? null} onChange={(r) => setAnswer(question.id, r)} />
+          </div>
+
+          <div className="mt-4">
+            {flagNotice && <Alert tone={flagNotice.startsWith('Flagged') ? 'success' : 'warn'}>{flagNotice}</Alert>}
+            {!flagged.has(question.id) ? (
+              !flagFormOpen ? (
+                <button type="button" className="btn-ghost btn-sm text-bad border border-bad/20" onClick={() => setFlagFormOpen(true)}>
+                  Flag as inconsistent
+                </button>
+              ) : (
+                <div className="rounded-lg border border-line bg-surface-sunken p-3 space-y-2">
+                  <p className="text-xs font-medium">Flag this question</p>
+                  <select className="input text-xs" value={flagCategory} onChange={(e) => setFlagCategory(e.target.value)}>
+                    <option value="WRONG_ANSWER">Wrong answer key</option>
+                    <option value="TYPO">Typo / wording</option>
+                    <option value="UNCLEAR">Unclear / ambiguous</option>
+                    <option value="OUT_OF_SYLLABUS">Out of syllabus</option>
+                    <option value="OTHER">Other</option>
+                  </select>
+                  <textarea
+                    className="input text-xs"
+                    rows={2}
+                    placeholder="Describe the issue (optional, up to 2000 chars)"
+                    value={flagReason}
+                    onChange={(e) => setFlagReason(e.target.value)}
+                    maxLength={2000}
+                  />
+                  <div className="flex gap-2">
+                    <button type="button" className="btn-primary btn-sm" disabled={flagging} onClick={() => void flagQuestion()}>
+                      {flagging ? 'Flagging…' : 'Submit flag'}
+                    </button>
+                    <button type="button" className="btn-ghost btn-sm" onClick={() => setFlagFormOpen(false)}>Cancel</button>
+                  </div>
+                </div>
+              )
+            ) : (
+              <span className="text-xs text-bad border border-bad/20 rounded px-2 py-1 bg-bad/5">Flagged — thanks for reporting</span>
+            )}
           </div>
 
           <div className="flex items-center justify-between gap-3 mt-6 pt-4 border-t border-line">
@@ -428,13 +573,13 @@ function AnswerInput({
     case 'MCQ_SINGLE': {
       const selected = (value as { optionId?: string } | null)?.optionId;
       return (
-        <fieldset className="space-y-2">
+        <fieldset className="space-y-2.5">
           <legend className="sr-only">Choose one answer</legend>
           {question.options.map((option) => (
             <label
               key={option.id}
-              className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
-                selected === option.id ? 'border-series-1 bg-series-1/[0.05]' : 'border-line hover:bg-surface-sunken'
+              className={`flex items-start gap-3 p-3.5 rounded-lg border cursor-pointer transition-colors ${
+                selected === option.id ? 'border-series-1 bg-series-1/[0.05] ring-1 ring-series-1/30' : 'border-line hover:bg-surface-sunken'
               }`}
             >
               <input
@@ -442,11 +587,11 @@ function AnswerInput({
                 name={`q-${question.id}`}
                 checked={selected === option.id}
                 onChange={() => onChange({ optionId: option.id })}
-                className="mt-1 accent-series-1"
+                className="mt-1.5 accent-series-1 w-4 h-4"
               />
-              <span className="min-w-0 flex-1">
-                <span className="text-xs font-medium text-ink-faint mr-1.5">{option.id.toUpperCase()}.</span>
-                <BlocksRenderer blocks={option.blocks} className="inline [&>p]:my-0 [&>p]:inline" dense />
+              <span className="min-w-0 flex-1 text-[15px] leading-relaxed">
+                <span className="font-semibold text-ink-muted mr-1.5">{option.id.toUpperCase()}.</span>
+                <BlocksRenderer blocks={option.blocks} className="inline [&>p]:my-0 [&>p]:inline" />
               </span>
             </label>
           ))}
@@ -457,13 +602,13 @@ function AnswerInput({
     case 'MCQ_MULTI': {
       const selected = new Set(((value as { optionIds?: string[] } | null)?.optionIds) ?? []);
       return (
-        <fieldset className="space-y-2">
-          <legend className="text-xs text-ink-muted mb-2">Select all that apply.</legend>
+        <fieldset className="space-y-2.5">
+          <legend className="text-[13px] text-ink-muted mb-2">Select all that apply.</legend>
           {question.options.map((option) => (
             <label
               key={option.id}
-              className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${
-                selected.has(option.id) ? 'border-series-1 bg-series-1/[0.05]' : 'border-line hover:bg-surface-sunken'
+              className={`flex items-start gap-3 p-3.5 rounded-lg border cursor-pointer transition-colors ${
+                selected.has(option.id) ? 'border-series-1 bg-series-1/[0.05] ring-1 ring-series-1/30' : 'border-line hover:bg-surface-sunken'
               }`}
             >
               <input
@@ -475,11 +620,11 @@ function AnswerInput({
                   else next.add(option.id);
                   onChange(next.size ? { optionIds: [...next] } : null);
                 }}
-                className="mt-1 accent-series-1"
+                className="mt-1.5 accent-series-1 w-4 h-4"
               />
-              <span className="min-w-0 flex-1">
-                <span className="text-xs font-medium text-ink-faint mr-1.5">{option.id.toUpperCase()}.</span>
-                <BlocksRenderer blocks={option.blocks} className="inline [&>p]:my-0 [&>p]:inline" dense />
+              <span className="min-w-0 flex-1 text-[15px] leading-relaxed">
+                <span className="font-semibold text-ink-muted mr-1.5">{option.id.toUpperCase()}.</span>
+                <BlocksRenderer blocks={option.blocks} className="inline [&>p]:my-0 [&>p]:inline" />
               </span>
             </label>
           ))}

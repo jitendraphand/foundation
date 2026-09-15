@@ -200,6 +200,15 @@ export async function finalizeAttempt(attemptId: string, auto: boolean) {
   const breakdown = buildBreakdown(rows);
 
   const updated = await prisma.$transaction(async (tx) => {
+    // Serialize per test: every finalization of this paper updates the same
+    // Question rows (timesServed/observedP), and two students submitting at
+    // the same instant would take those row locks in differing orders and
+    // deadlock (40P01) — exactly what a whole class submitting together
+    // triggers. One lock on the Test row makes same-paper finalizations queue
+    // for the few milliseconds the statistics statements take; different
+    // papers share nothing and are unaffected.
+    await tx.$queryRaw`SELECT id FROM "Test" WHERE id = ${attempt.testId} FOR UPDATE`;
+
     // Claim the attempt. `status: 'IN_PROGRESS'` in the filter is the lock:
     // exactly one concurrent caller can match, and the rest see count 0.
     const claim = await tx.attempt.updateMany({
@@ -222,11 +231,12 @@ export async function finalizeAttempt(attemptId: string, auto: boolean) {
     // be fifty sequential round trips inside this transaction, and a class
     // submitting together queued behind every one of them.
     if (updates.length > 0) {
+      const ordered = [...updates].sort((a, b) => (a.id < b.id ? -1 : 1));
       await tx.$executeRaw`
         UPDATE "Answer" AS a
         SET "isCorrect" = v.is_correct, "marksAwarded" = v.marks
         FROM (VALUES ${Prisma.join(
-          updates.map((u) => Prisma.sql`(${u.id}, ${u.isCorrect}::boolean, ${u.marksAwarded}::double precision)`),
+          ordered.map((u) => Prisma.sql`(${u.id}, ${u.isCorrect}::boolean, ${u.marksAwarded}::double precision)`),
         )}) AS v(id, is_correct, marks)
         WHERE a.id = v.id`;
     }
@@ -236,7 +246,13 @@ export async function finalizeAttempt(attemptId: string, auto: boolean) {
     // No ::uuid cast on the id: Prisma maps `String @id @default(uuid())` to a
     // TEXT column unless @db.Uuid is declared, and Postgres has no
     // text = uuid operator, so casting here fails every submission.
-    const answered = rows.filter((r) => r.answered);
+    //
+    // Sorted by questionId: two students submitting at the same instant build
+    // their VALUES lists in attempt order, which differs between them. Postgres
+    // then takes the Question-row locks in a different order and the pair
+    // deadlocks (40P01) — exactly what a class submitting together triggers.
+    // One canonical order means every transaction locks in the same sequence.
+    const answered = rows.filter((r) => r.answered).sort((a, b) => (a.questionId < b.questionId ? -1 : 1));
     if (answered.length > 0) {
       await tx.$executeRaw`
         UPDATE "Question" AS q
@@ -331,13 +347,18 @@ export async function sweepExpiredAttempts(): Promise<number> {
     }
   }
 
+  // Finalise with bounded concurrency: sequential was 400×4 queries blocking
+  // the pool for 10-20s at sweep time. 5 concurrent workers cuts wall time ~5×
+  // while still respecting DB_POOL_SIZE (each finalize holds one transaction).
+  const ids = [...toClose];
+  const concurrency = 5;
   let done = 0;
-  for (const id of toClose) {
-    try {
-      await finalizeAttempt(id, true);
-      done++;
-    } catch (err) {
-      console.error('[sweep] could not finalise attempt', id, err);
+  for (let i = 0; i < ids.length; i += concurrency) {
+    const chunk = ids.slice(i, i + concurrency);
+    const results = await Promise.allSettled(chunk.map((id) => finalizeAttempt(id, true)));
+    for (const r of results) {
+      if (r.status === 'fulfilled') done++;
+      else console.error('[sweep] could not finalise attempt', r.reason);
     }
   }
   return done;

@@ -6,6 +6,7 @@ import { ALL_AXES, findWeakAreas, type Breakdown, type WeakArea } from '../../li
 import { describeAudience, inAudience } from '../../lib/audience.js';
 import { testsVisibleTo } from './tests.js';
 import { csvCell } from '../../lib/csv.js';
+import { seesEverything } from '../../lib/ownership.js';
 import {
   AXIS_FIELD,
   byClass,
@@ -39,6 +40,11 @@ const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
 
 /** "fraction_operations" reads as "fraction operations" in a sentence. */
 const humanTag = (key: string) => key.replace(/_/g, ' ');
+
+function ownerFilter(request: FastifyRequest): { createdById?: string } {
+  if (seesEverything(request as unknown as { user?: { sub: string; permissions: readonly string[] } })) return {};
+  return { createdById: request.user!.sub };
+}
 
 interface WeakStudent {
   student: { id: string; publicId: string; username: string; name: string; grade: string; division: string; rollNo: string };
@@ -74,13 +80,17 @@ export default async function adminAnalyticsRoutes(app: FastifyInstance) {
       })
       .parse(request.query);
 
+    const owner = ownerFilter(request);
     const filter: AttemptFilter = {
       kind: q.kind,
       since: new Date(Date.now() - q.days * 86_400_000),
       grade: q.grade,
       division: q.division,
+      ...owner,
     };
     const kindFilter = q.kind === 'ALL' ? {} : { kind: q.kind };
+    const testOwner = owner.createdById ? { createdById: owner.createdById } : {};
+    const questionOwner = owner.createdById ? { createdById: owner.createdById } : {};
 
     const [
       totalStudents, activeStudents, totalTests, publishedTests, questionCounts,
@@ -88,9 +98,9 @@ export default async function adminAnalyticsRoutes(app: FastifyInstance) {
     ] = await Promise.all([
       prisma.user.count({ where: { role: 'STUDENT', deletedAt: null } }),
       prisma.user.count({ where: { role: 'STUDENT', deletedAt: null, isActive: true } }),
-      prisma.test.count({ where: { deletedAt: null, ...kindFilter } }),
-      prisma.test.count({ where: { deletedAt: null, status: 'PUBLISHED', ...kindFilter } }),
-      prisma.question.groupBy({ by: ['status'], where: { deletedAt: null }, _count: { _all: true } }),
+      prisma.test.count({ where: { deletedAt: null, ...kindFilter, ...testOwner } }),
+      prisma.test.count({ where: { deletedAt: null, status: 'PUBLISHED', ...kindFilter, ...testOwner } }),
+      prisma.question.groupBy({ by: ['status'], where: { deletedAt: null, ...questionOwner }, _count: { _all: true } }),
       headline(filter),
       trendByDay(filter),
       byClass(filter),
@@ -156,12 +166,15 @@ export default async function adminAnalyticsRoutes(app: FastifyInstance) {
       })
       .parse(request.query);
 
+    const owner = ownerFilter(request);
     const filter: AttemptFilter = {
       kind: q.kind,
       since: new Date(Date.now() - q.days * 86_400_000),
       grade: q.grade,
       division: q.division,
+      ...owner,
     };
+    const questionOwner = owner.createdById ? { createdById: owner.createdById } : {};
 
     const [stats, classes, skills, hardest, ranked, drafts, unreleased] = await Promise.all([
       headline(filter),
@@ -169,7 +182,7 @@ export default async function adminAnalyticsRoutes(app: FastifyInstance) {
       tagSummaries(filter, 'skill', 0.6, 4),
       hardestQuestions(filter, 5),
       studentRows(filter, 1),
-      prisma.question.count({ where: { deletedAt: null, status: 'DRAFT' } }),
+      prisma.question.count({ where: { deletedAt: null, status: 'DRAFT', ...questionOwner } }),
       // Papers everybody has finished whose marks are still hidden. Nowhere
       // else says this, and it is the one item on the list where children are
       // actually waiting on somebody.
@@ -308,7 +321,8 @@ export default async function adminAnalyticsRoutes(app: FastifyInstance) {
       })
       .parse(request.query);
 
-    const filter: AttemptFilter = { kind: q.kind, grade: q.grade, division: q.division };
+    const owner = ownerFilter(request);
+    const filter: AttemptFilter = { kind: q.kind, grade: q.grade, division: q.division, ...owner };
 
     // The table itself, and each student's own worst tags, are two queries
     // rather than one per student: the second groups by student and tag in the
@@ -369,8 +383,11 @@ export default async function adminAnalyticsRoutes(app: FastifyInstance) {
     });
     if (!student) return reply.code(404).send({ error: 'Student not found.' });
 
+    const owner = ownerFilter(request);
+    const testOwnerFilter = owner.createdById ? { test: { createdById: owner.createdById } } : {};
+
     const attempts = await prisma.attempt.findMany({
-      where: { userId: id, status: { in: ['SUBMITTED', 'AUTO_SUBMITTED'] } },
+      where: { userId: id, status: { in: ['SUBMITTED', 'AUTO_SUBMITTED'] }, ...testOwnerFilter },
       orderBy: { submittedAt: 'asc' },
       // No breakdown: the tag mastery below is aggregated by the database, so
       // pulling every attempt's JSON here would be paying for it twice.
@@ -384,7 +401,7 @@ export default async function adminAnalyticsRoutes(app: FastifyInstance) {
     const regular = attempts.filter((a) => a.test.kind === 'REGULAR');
     const practice = attempts.filter((a) => a.test.kind === 'PRACTICE');
 
-    const merged = await tagTallies({ kind: 'REGULAR', userId: id }, ALL_AXES);
+    const merged = await tagTallies({ kind: 'REGULAR', userId: id, ...owner }, ALL_AXES);
     const weakAreas = findWeakAreas([merged], { minSample: 3, accuracyThreshold: 0.7, limit: 12 });
 
     // Which subjects and topics to seed a practice test with.
@@ -403,6 +420,52 @@ export default async function adminAnalyticsRoutes(app: FastifyInstance) {
       tagMastery: merged,
       weakAreas,
       suggestedFocus,
+    };
+  });
+
+  /** Single attempt detail for Correct/Wrong drill-down. */
+  app.get('/api/admin/analytics/attempts/:id', async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+
+    const attempt = await prisma.attempt.findUnique({
+      where: { id },
+      include: {
+        test: { select: { id: true, title: true, subject: true, createdById: true } },
+        answers: { include: { question: true } },
+      },
+    });
+    if (!attempt) return reply.code(404).send({ error: 'Attempt not found.' });
+
+    // Ownership: only creator of the test (or System Admin via viewAll) may see its attempts
+    const testVisible = await prisma.test.findFirst({
+      where: { id: attempt.testId, ...testsVisibleTo(request) },
+    });
+    if (!testVisible) return reply.code(404).send({ error: 'Attempt not found.' });
+
+    const questions = attempt.answers.map((a) => ({
+      questionId: a.questionId,
+      question: a.question,
+      response: a.response,
+      isCorrect: a.isCorrect,
+      marksAwarded: a.marksAwarded,
+      timeSpentMs: a.timeSpentMs,
+    }));
+
+    return {
+      attempt: {
+        id: attempt.id,
+        status: attempt.status,
+        score: attempt.score,
+        maxScore: attempt.maxScore,
+        percentage: attempt.percentage,
+        correctCount: attempt.correctCount,
+        incorrectCount: attempt.incorrectCount,
+        unansweredCount: attempt.unansweredCount,
+        submittedAt: attempt.submittedAt,
+        startedAt: attempt.startedAt,
+      },
+      test: attempt.test,
+      questions,
     };
   });
 
@@ -655,11 +718,13 @@ export default async function adminAnalyticsRoutes(app: FastifyInstance) {
       })
       .parse(request.query);
 
+    const owner = ownerFilter(request);
     const filter: AttemptFilter = {
       kind: q.kind,
       since: new Date(Date.now() - q.days * 86_400_000),
       grade: q.grade,
       division: q.division,
+      ...owner,
     };
 
     // Every tag anybody has actually been examined on, with the cohort figure
@@ -725,6 +790,8 @@ export default async function adminAnalyticsRoutes(app: FastifyInstance) {
   app.get('/api/admin/analytics/export.csv', async (request, reply) => {
     const q = z.object({ kind: z.enum(['REGULAR', 'PRACTICE', 'ALL']).default('ALL') }).parse(request.query);
     const kindFilter = q.kind === 'ALL' ? {} : { kind: q.kind };
+    // Scoped to the caller's own papers unless they hold content.viewAll / admins.manage.
+    const testOwner = ownerFilter(request);
 
     const header = [
       'username', 'first_name', 'last_name', 'grade', 'division', 'roll_no',
@@ -741,7 +808,7 @@ export default async function adminAnalyticsRoutes(app: FastifyInstance) {
       let cursor: string | undefined;
       for (;;) {
         const page = await prisma.attempt.findMany({
-          where: { status: { in: ['SUBMITTED', 'AUTO_SUBMITTED'] }, test: { ...kindFilter } },
+          where: { status: { in: ['SUBMITTED', 'AUTO_SUBMITTED'] }, test: { ...kindFilter, ...testOwner } },
           orderBy: { id: 'asc' },
           take: PAGE,
           ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),

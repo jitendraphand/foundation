@@ -217,7 +217,7 @@ function Participation() {
               {chosen.length ? `${chosen.length} paper${chosen.length === 1 ? '' : 's'} chosen` : `All ${tests.length} papers found`}
             </span>
             <div className="mt-1.5 flex flex-wrap gap-x-4 gap-y-1.5">
-              {tests.map((t) => (
+              {tests.slice(0, 12).map((t) => (
                 <label key={t.id} className="flex items-center gap-2 text-xs cursor-pointer">
                   <input
                     type="checkbox"
@@ -236,7 +236,11 @@ function Participation() {
                 </label>
               ))}
             </div>
-          </div>
+            {tests.length > 12 && (
+              <div className="text-[10px] text-ink-faint mt-1">
+                  • {tests.length - 12} more papers (use filters to find specific ones)
+                </div>
+            )}          </div>
         )}
       </Card>
 
@@ -271,7 +275,7 @@ function Participation() {
                       <th>Student</th>
                       <th>Class</th>
                       <th className="text-center">Still owing</th>
-                      {tests.map((t) => (
+                      {tests.slice(0, 12).map((t) => (
                         <th key={t.id} className="text-center whitespace-nowrap">
                           <Link to={`/admin/tests/${t.id}`} className="hover:text-series-1">{t.title}</Link>
                         </th>

@@ -66,8 +66,8 @@ export default function ResultView() {
 
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <div>
-          <h1 className="text-lg font-semibold">{data.test.title}</h1>
-          <p className="text-xs text-ink-muted mt-0.5">
+          <h1 className="text-2xl font-semibold tracking-tight">{data.test.title}</h1>
+          <p className="text-sm text-ink-muted mt-1">
             {data.test.subject} · Submitted {formatDate(data.attempt.submittedAt, true)}
             {data.test.kind === 'PRACTICE' && ' · Practice test'}
           </p>
@@ -98,7 +98,7 @@ export default function ResultView() {
       <Card title={data.test.showAnswersAfter ? 'Question review' : 'Your answers'} padded={false}>
         <ul className="divide-y divide-line">
           {data.questions.map((q, i) => (
-            <QuestionReview key={q.id} question={q} index={i} showAnswers={data.test.showAnswersAfter} />
+            <QuestionReview key={q.id} question={q} index={i} showAnswers={data.test.showAnswersAfter} testId={data.test.id} attemptId={data.attempt.id} />
           ))}
         </ul>
       </Card>
@@ -200,15 +200,35 @@ function BreakdownCharts({ breakdown }: { breakdown: Breakdown }) {
 
 // --- Per-question review ---------------------------------------------------
 
-function QuestionReview({ question, index, showAnswers }: { question: PaperQuestion; index: number; showAnswers: boolean }) {
+function QuestionReview({ question, index, showAnswers, testId, attemptId }: { question: PaperQuestion; index: number; showAnswers: boolean; testId: string; attemptId: string }) {
   const [open, setOpen] = useState(false);
+  const [flagOpen, setFlagOpen] = useState(false);
+  const [flagCategory, setFlagCategory] = useState('WRONG_ANSWER');
+  const [flagReason, setFlagReason] = useState('');
+  const [flagBusy, setFlagBusy] = useState(false);
+  const [flagDone, setFlagDone] = useState(false);
+  const [flagError, setFlagError] = useState<string | null>(null);
+
+  const flagQuestion = async () => {
+    setFlagBusy(true);
+    setFlagError(null);
+    try {
+      await api.post('/api/student/flags', { questionId: question.id, testId, attemptId, category: flagCategory, reason: flagReason.trim() || undefined });
+      setFlagDone(true);
+      setFlagOpen(false);
+    } catch (err) {
+      setFlagError(err instanceof ApiError ? err.message : 'Could not flag this question.');
+    } finally {
+      setFlagBusy(false);
+    }
+  };
 
   const answered = question.yourResponse !== null && question.yourResponse !== undefined;
   const tone = !answered ? 'neutral' : question.isCorrect ? 'good' : 'bad';
   const statusLabel = !answered ? 'Not answered' : question.isCorrect ? 'Correct' : 'Incorrect';
 
   return (
-    <li className="p-4">
+    <li className="p-4 sm:p-5">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -238,7 +258,7 @@ function QuestionReview({ question, index, showAnswers }: { question: PaperQuest
 
       {open && (
         <div className="mt-4 pl-0 sm:pl-4 sm:border-l-2 border-line">
-          <ContentRenderer content={question.content} />
+          <ContentRenderer content={question.content} className="text-[15px] leading-relaxed" />
 
           {question.options.length > 0 && (
             <ul className="mt-3 space-y-1.5">
@@ -283,6 +303,35 @@ function QuestionReview({ question, index, showAnswers }: { question: PaperQuest
           </div>
 
           <StepUp questionId={question.id} />
+
+          <div className="mt-3">
+            {flagDone ? (
+              <span className="text-xs text-bad border border-bad/20 rounded px-2 py-1 bg-bad/5">Flagged — thanks for reporting</span>
+            ) : !flagOpen ? (
+              <button type="button" className="btn-ghost btn-sm text-bad border border-bad/20" onClick={() => setFlagOpen(true)}>
+                Flag as inconsistent
+              </button>
+            ) : (
+              <div className="rounded-lg border border-line bg-surface-sunken p-3 space-y-2 max-w-md">
+                <p className="text-xs font-medium">Flag this question</p>
+                {flagError && <p className="text-xs text-bad">{flagError}</p>}
+                <select className="input text-xs" value={flagCategory} onChange={(e) => setFlagCategory(e.target.value)}>
+                  <option value="WRONG_ANSWER">Wrong answer key</option>
+                  <option value="TYPO">Typo / wording</option>
+                  <option value="UNCLEAR">Unclear / ambiguous</option>
+                  <option value="OUT_OF_SYLLABUS">Out of syllabus</option>
+                  <option value="OTHER">Other</option>
+                </select>
+                <textarea className="input text-xs" rows={2} placeholder="Describe the issue (optional)" value={flagReason} onChange={(e) => setFlagReason(e.target.value)} maxLength={2000} />
+                <div className="flex gap-2">
+                  <button type="button" className="btn-primary btn-sm" disabled={flagBusy} onClick={() => void flagQuestion()}>
+                    {flagBusy ? 'Flagging…' : 'Submit flag'}
+                  </button>
+                  <button type="button" className="btn-ghost btn-sm" onClick={() => setFlagOpen(false)}>Cancel</button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       )}
     </li>
