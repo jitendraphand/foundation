@@ -46,15 +46,45 @@ describe('saving an edited request', () => {
     assert.equal(result.maxOutputTokens, 20000);
   });
 
-  test('rewriting the prompt is refused', () => {
+  test('rewriting the prompt is refused, and says where the real prompts live', () => {
     const result = tuningFromRequestBody(
-      { ...baseline, messages: [{ role: 'user', content: 'hijack' }], model: 'other' },
+      { ...baseline, messages: [{ role: 'user', content: 'hijack' }] },
       baseline,
     );
     assert.equal(result.ok, false);
     if (result.ok) return;
     assert.match(result.error, /messages/);
-    assert.match(result.error, /model/);
+    assert.match(result.error, /Prompts/);
+  });
+
+  test('changing only the model switches the default model', () => {
+    const result = tuningFromRequestBody({ ...baseline, model: 'nvidia/other' }, baseline);
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal(result.defaultModel, 'nvidia/other');
+    // Everything else is kept as it was: the baseline's temperature stays.
+    assert.equal(result.tuning.temperature, 0.4);
+  });
+
+  test('an empty model name is refused', () => {
+    const result = tuningFromRequestBody({ ...baseline, model: '   ' }, baseline);
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.match(result.error, /model/i);
+  });
+
+  test('a temperature change alone is kept, with nothing else flagged', () => {
+    const result = tuningFromRequestBody({ ...baseline, temperature: 1 }, baseline);
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal(result.tuning.temperature, 1);
+    assert.equal(result.defaultModel, undefined);
+  });
+
+  test('stream_options is derived from the stream flag, so editing it is harmless', () => {
+    const edited = { ...baseline, stream_options: { include_usage: false } };
+    const result = tuningFromRequestBody(edited, baseline);
+    assert.equal(result.ok, true);
   });
 
   test('an extra field that is taken out does not linger', () => {

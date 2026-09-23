@@ -96,26 +96,42 @@ export function reservedKeysIn(extraBody: Record<string, unknown> | undefined): 
 /**
  * What an edited request body means as stored settings.
  *
- * The panel shows the whole request. `model`, `messages` and `stream_options`
- * are filled in for each run, so a change to those is refused rather than
- * stored. Everything else is kept: sampling fields as themselves, and any
- * other key as extra fields merged into later requests.
+ * The panel shows the whole request and the whole request is editable, with
+ * one honest exception. `model` is this credential's default model under a
+ * different name: changing it switches which model the next run calls.
+ * `stream_options` is recomputed from the `stream` flag on every call, so any
+ * edit to it is accepted and then simply derived again. Everything else is
+ * kept: sampling fields as themselves, and any other key as extra fields
+ * merged into later requests.
+ *
+ * `messages` is the exception. The panel shows stand-in prompts - the shape of
+ * the request is what is being examined, not thousand-word prompts that would
+ * bury it - while the real prompt is assembled per run from the Prompts
+ * settings and the run's template. Storing an edit to the stand-ins would look
+ * accepted and then never take effect, so it is refused with somewhere to go
+ * instead.
  */
 export function tuningFromRequestBody(
   edited: Record<string, unknown>,
   baseline: Record<string, unknown>,
   previous: ModelTuning = {},
-): { ok: true; tuning: ModelTuning; maxOutputTokens?: number } | { ok: false; error: string } {
-  const changed = ['model', 'messages', 'stream_options'].filter(
-    (key) => stableJson(edited[key]) !== stableJson(baseline[key]),
-  );
-  if (changed.length > 0) {
+): { ok: true; tuning: ModelTuning; maxOutputTokens?: number; defaultModel?: string } | { ok: false; error: string } {
+  if (stableJson(edited.messages) !== stableJson(baseline.messages)) {
     return {
       ok: false,
       error:
-        `The server sets ${changed.join(', ')} itself for each run. ` +
-        'Leave those as they are and save the other changes.',
+        'The server sets the messages itself for each run - what you see here are ' +
+        'stand-ins, so saving a change to them would do nothing. Edit the real prompts ' +
+        'under the Prompts tab instead, and save the other changes here.',
     };
+  }
+
+  let defaultModel: string | undefined;
+  if (stableJson(edited.model) !== stableJson(baseline.model)) {
+    if (typeof edited.model !== 'string' || edited.model.trim() === '' || edited.model.length > 200) {
+      return { ok: false, error: 'The model has to be a non-empty name, up to 200 characters.' };
+    }
+    defaultModel = edited.model.trim();
   }
 
   const tuning: ModelTuning = { ...previous };
@@ -184,7 +200,7 @@ export function tuningFromRequestBody(
   }
   tuning.extraBody = extra;
 
-  return { ok: true, tuning, maxOutputTokens };
+  return { ok: true, tuning, maxOutputTokens, defaultModel };
 }
 
 function tokenField(body: Record<string, unknown>): number | undefined {

@@ -443,7 +443,9 @@ function Providers() {
       return;
     }
     setRequestFor(credential.id);
-    if (requests[credential.id]) return;
+    // Always refetch: the save compares against a freshly built baseline, so
+    // editing a cached body after the credential changed elsewhere would
+    // refuse a model the administrator never touched.
     try {
       const preview = await api.get<RequestPreviewData>(`/api/admin/credentials/${credential.id}/request`);
       setRequests((p) => ({ ...p, [credential.id]: preview }));
@@ -1720,8 +1722,10 @@ function RequestPreview({
         <h4 className="text-xs font-semibold">What this credential sends</h4>
         <p className="text-[11px] text-ink-faint mt-0.5">
           The real request for <code>{preview.model}</code>, assembled by the same code that makes the call.
-          Edit it to match a vendor sample, then save. <code>model</code>, <code>messages</code> and{' '}
-          <code>stream_options</code> are filled in for each run and cannot be changed here.
+          Edit it to match a vendor sample, then save. Changing <code>model</code> switches this
+          credential&rsquo;s default model; the <code>messages</code> shown are stand-ins, so the real
+          prompts live under the Prompts tab. <code>stream_options</code> follows the{' '}
+          <code>stream</code> flag and is derived again on every call.
           {preview.streaming ? ' The reply is read as it arrives.' : ' Streaming is off for this credential.'}
         </p>
       </div>

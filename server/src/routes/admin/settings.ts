@@ -701,8 +701,10 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
    * Save an edited copy of that request.
    *
    * The body the panel shows is what the next call sends, apart from the
-   * prompt itself. model, messages and stream_options are filled in per run,
-   * so a change to those is refused. The rest is stored on the credential.
+   * prompt itself. A changed `model` becomes the credential's default model;
+   * the rest is stored on the credential. Only an edit to the stand-in
+   * `messages` is refused, because storing it would look accepted and then
+   * never take effect.
    */
   app.put('/api/admin/credentials/:id/request', async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
@@ -726,11 +728,17 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
 
     await prisma.apiCredential.update({
       where: { id },
-      data: { meta: meta as never },
+      data: {
+        meta: meta as never,
+        ...(derived.defaultModel !== undefined ? { defaultModel: derived.defaultModel } : {}),
+      },
     });
     await audit(request.user!.sub, 'credential.request', {
       entity: 'ApiCredential', entityId: id, ip: request.ip,
-      detail: { maxOutputTokens: derived.maxOutputTokens ?? null },
+      detail: {
+        maxOutputTokens: derived.maxOutputTokens ?? null,
+        model: derived.defaultModel ?? null,
+      },
     });
 
     const fresh = await prisma.apiCredential.findUniqueOrThrow({ where: { id } });

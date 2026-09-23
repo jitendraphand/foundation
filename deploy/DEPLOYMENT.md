@@ -429,9 +429,12 @@ replaced by a placeholder. Edit that JSON to match the sample — temperature,
 top_p, the reply size, and any extra fields — and **Save request**. The next
 call uses what you saved. **Try 2 questions** is how to see whether it worked.
 
-`model`, `messages` and `stream_options` are filled in for each run. Changing
-them is refused, so an edit cannot send a different prompt. Invalid JSON is
-refused with a reason. Nothing typed there is executed.
+`model` is this credential's default model under a different name: changing it
+switches which model the next run calls. `messages` is the one thing that
+cannot be edited here — what you see are stand-ins, and the real prompts live
+under the Prompts tab, so storing an edit would look accepted and then never
+take effect. Invalid JSON is refused with a reason. Nothing typed there is
+executed.
 
 A `curl` version of the same request is under the editor, so you can run it
 outside the system when a provider's support desk asks what you sent. It is
