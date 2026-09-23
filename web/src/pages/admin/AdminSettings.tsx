@@ -1725,7 +1725,9 @@ function RequestPreview({
           Edit it to match a vendor sample, then save. Changing <code>model</code> switches this
           credential&rsquo;s default model; the <code>messages</code> shown are stand-ins, so the real
           prompts live under the Prompts tab. <code>stream_options</code> follows the{' '}
-          <code>stream</code> flag and is derived again on every call.
+          <code>stream</code> flag and is derived again on every call. Whichever of{' '}
+          <code>max_tokens</code> and <code>max_completion_tokens</code> the body carries is the
+          one sent — rename it if the vendor&rsquo;s sample names the other.
           {preview.streaming ? ' The reply is read as it arrives.' : ' Streaming is off for this credential.'}
         </p>
       </div>

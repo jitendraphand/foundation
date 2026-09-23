@@ -375,22 +375,11 @@ export class LlmError extends Error {
 }
 
 /**
- * OpenAI's reasoning models (o1, o3, o4, and the gpt-5 reasoning line) reject
- * `max_tokens` in favour of `max_completion_tokens`, and reject any
- * temperature other than the default. Sending the usual parameters gets a 400
- * that reads like a bad API key, so detect them and adjust.
- */
-/**
  * Azure pins its API surface to a dated version. This one is the current
  * generally-available release; an admin whose resource is older can override
  * it per credential.
  */
 export const DEFAULT_AZURE_API_VERSION = '2024-10-21';
-
-function isReasoningModel(model: string): boolean {
-  const name = model.toLowerCase().split('/').pop() ?? '';
-  return /^(o\d|gpt-5)/.test(name);
-}
 
 /**
  * Models that write their working out before the answer.
@@ -478,13 +467,12 @@ export async function buildChatRequest(req: ChatRequest): Promise<BuiltRequest> 
       `?api-version=${encodeURIComponent(req.azure?.apiVersion ?? DEFAULT_AZURE_API_VERSION)}`
     : `${base}/chat/completions`;
 
-  const reasoning = isReasoningModel(req.model);
-  const tuning = req.tuning ?? {};
-
   // The administrator's extra fields go in first, so anything the server owns
   // below overwrites them rather than the other way round. safeExtraBody has
   // already removed model, messages and stream; see llm/tuning.ts.
-  const { safeExtraBody } = await import('./tuning.js');
+  const { safeExtraBody, isReasoningModel } = await import('./tuning.js');
+  const reasoning = isReasoningModel(req.model);
+  const tuning = req.tuning ?? {};
   let messages: unknown = req.messages;
   if (req.cacheSystemPrompt && Array.isArray(req.messages) && req.messages[0]?.role === 'system') {
     const sys = req.messages[0] as { role: string; content: string };
@@ -501,14 +489,18 @@ export async function buildChatRequest(req: ChatRequest): Promise<BuiltRequest> 
     messages,
   };
 
+  // The reply-size field follows the model unless the administrator named the
+  // other one in the request editor: some endpoints reject the field they did
+  // not document, and a 400 for the wrong field name reads like a bad key.
+  const tokenKey = tuning.tokenKey ?? (reasoning ? 'max_completion_tokens' : 'max_tokens');
   if (reasoning) {
-    body.max_completion_tokens = req.maxTokens ?? 8000;
+    body[tokenKey] = req.maxTokens ?? 8000;
     // A reasoning model omits temperature unless somebody set one on the
     // request. An explicit value is what they asked to send.
     if (tuning.temperature !== undefined) body.temperature = tuning.temperature;
   } else {
     body.temperature = tuning.temperature ?? req.temperature ?? 0.4;
-    body.max_tokens = req.maxTokens ?? 8000;
+    body[tokenKey] = req.maxTokens ?? 8000;
   }
   if (tuning.topP !== undefined) body.top_p = tuning.topP;
   if (tuning.seed !== undefined) body.seed = tuning.seed;

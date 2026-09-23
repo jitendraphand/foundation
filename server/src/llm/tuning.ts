@@ -48,6 +48,14 @@ export const modelTuningSchema = z.object({
   seed: z.number().int().optional(),
 
   /**
+   * Which reply-size field to send. The default follows the model: reasoning
+   * models take `max_completion_tokens`, everything else `max_tokens`. A
+   * vendor sample that names the other one is saying the endpoint wants it
+   * that way, so an explicit choice here wins and the preview shows it back.
+   */
+  tokenKey: z.enum(['max_tokens', 'max_completion_tokens']).optional(),
+
+  /**
    * Read the reply as it arrives rather than waiting for all of it.
    *
    * On by default, and the reason most stalls stop being mysterious: without
@@ -110,6 +118,12 @@ export function reservedKeysIn(extraBody: Record<string, unknown> | undefined): 
  * settings and the run's template. Storing an edit to the stand-ins would look
  * accepted and then never take effect, so it is refused with somewhere to go
  * instead.
+ *
+ * Whichever reply-size field the edited body carries (`max_tokens` or
+ * `max_completion_tokens`) becomes an explicit choice when it differs from
+ * what the model would get anyway, and is shown back on the next preview, so
+ * what you see is what the next call sends. A choice matching the default is
+ * not stored, so switching models later still flips the field automatically.
  */
 export function tuningFromRequestBody(
   edited: Record<string, unknown>,
@@ -183,6 +197,21 @@ export function tuningFromRequestBody(
     maxOutputTokens = editedMax;
   }
 
+  // The field name is a choice, not just the value: an endpoint whose sample
+  // says max_completion_tokens may reject max_tokens outright. Only a choice
+  // that differs from what the model would get anyway is stored, so switching
+  // models later still flips the key automatically unless the administrator
+  // said otherwise. Removing both fields clears the choice.
+  const editedKey =
+    typeof edited.max_completion_tokens === 'number'
+      ? 'max_completion_tokens'
+      : typeof edited.max_tokens === 'number'
+        ? 'max_tokens'
+        : undefined;
+  const defaultKey = isReasoningModel(String(edited.model)) ? 'max_completion_tokens' : 'max_tokens';
+  if (editedKey && editedKey !== defaultKey) tuning.tokenKey = editedKey;
+  else delete tuning.tokenKey;
+
   const skip = new Set([
     'model', 'messages', 'stream', 'stream_options',
     'temperature', 'top_p', 'seed', 'max_tokens', 'max_completion_tokens', 'response_format',
@@ -216,6 +245,19 @@ function stableJson(value: unknown): string {
     return `{${Object.keys(obj).sort().map((key) => `${JSON.stringify(key)}:${stableJson(obj[key])}`).join(',')}}`;
   }
   return JSON.stringify(value) ?? 'undefined';
+}
+
+/**
+ * Which reasoning models these parameters are shaped for.
+ *
+ * OpenAI's reasoning models (o1, o3, o4, and the gpt-5 reasoning line) reject
+ * `max_tokens` in favour of `max_completion_tokens`, and reject any
+ * temperature other than the default. Sending the usual parameters gets a 400
+ * that reads like a bad API key, so detect them and adjust.
+ */
+export function isReasoningModel(model: string): boolean {
+  const name = model.toLowerCase().split('/').pop() ?? '';
+  return /^(o\d|gpt-5)/.test(name);
 }
 
 /** extraBody with the server's own fields removed. */

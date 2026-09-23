@@ -430,7 +430,10 @@ top_p, the reply size, and any extra fields — and **Save request**. The next
 call uses what you saved. **Try 2 questions** is how to see whether it worked.
 
 `model` is this credential's default model under a different name: changing it
-switches which model the next run calls. `messages` is the one thing that
+switches which model the next run calls. The reply-size field works the same
+way round: reasoning models send `max_completion_tokens` and the rest send
+`max_tokens`, but renaming it to the one the vendor's sample uses sticks, for
+endpoints that reject the other name. `messages` is the one thing that
 cannot be edited here — what you see are stand-ins, and the real prompts live
 under the Prompts tab, so storing an edit would look accepted and then never
 take effect. Invalid JSON is refused with a reason. Nothing typed there is

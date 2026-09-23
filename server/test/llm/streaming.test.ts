@@ -202,4 +202,41 @@ describe('the request preview shown on the settings screen', () => {
     // the layer that decides what leaves the server.
     assert.match(String(built.headers.Authorization), /super-secret-key/);
   });
+
+  test('an explicit reply-size field is what goes on the wire', async () => {
+    const built = await buildChatRequest({
+      baseUrl: mock.baseUrl,
+      apiKey: 'k',
+      model: 'gpt-6-luna',
+      messages: [{ role: 'user', content: 'hello' }],
+      maxTokens: 100,
+      tuning: { tokenKey: 'max_completion_tokens' },
+    });
+    assert.equal(built.body.max_completion_tokens, 100);
+    assert.equal('max_tokens' in built.body, false);
+  });
+
+  test('without an explicit choice the model decides the field', async () => {
+    const plain = await buildChatRequest({
+      baseUrl: mock.baseUrl,
+      apiKey: 'k',
+      model: 'gpt-6-luna',
+      messages: [{ role: 'user', content: 'hello' }],
+      maxTokens: 100,
+      tuning: {},
+    });
+    assert.equal(plain.body.max_tokens, 100);
+    assert.equal('max_completion_tokens' in plain.body, false);
+
+    const reasoning = await buildChatRequest({
+      baseUrl: mock.baseUrl,
+      apiKey: 'k',
+      model: 'o3-mini',
+      messages: [{ role: 'user', content: 'hello' }],
+      maxTokens: 100,
+      tuning: {},
+    });
+    assert.equal(reasoning.body.max_completion_tokens, 100);
+    assert.equal('max_tokens' in reasoning.body, false);
+  });
 });

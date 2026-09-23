@@ -81,6 +81,32 @@ describe('saving an edited request', () => {
     assert.equal(result.defaultModel, undefined);
   });
 
+  test('renaming the reply-size field sticks when the endpoint wants the other name', () => {
+    const { max_tokens: _dropped, ...rest } = baseline;
+    const edited = { ...rest, max_completion_tokens: 100000 };
+    const result = tuningFromRequestBody(edited, baseline);
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal(result.tuning.tokenKey, 'max_completion_tokens');
+    assert.equal(result.maxOutputTokens, 100000);
+  });
+
+  test('leaving the default field alone stores no choice', () => {
+    const result = tuningFromRequestBody({ ...baseline, temperature: 0.9 }, baseline);
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal(result.tuning.tokenKey, undefined);
+  });
+
+  test('a reasoning model keeps its field without storing a choice', () => {
+    const { max_tokens: _dropped, ...rest } = baseline;
+    const reasoningBaseline = { ...rest, model: 'o3-mini', max_completion_tokens: 8000 };
+    const result = tuningFromRequestBody({ ...reasoningBaseline, temperature: 0.7 }, reasoningBaseline);
+    assert.equal(result.ok, true);
+    if (!result.ok) return;
+    assert.equal(result.tuning.tokenKey, undefined);
+  });
+
   test('stream_options is derived from the stream flag, so editing it is harmless', () => {
     const edited = { ...baseline, stream_options: { include_usage: false } };
     const result = tuningFromRequestBody(edited, baseline);
