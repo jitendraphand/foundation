@@ -86,7 +86,11 @@ function LoginForm({ onBack, onSignup }: { onBack: () => void; onSignup: () => v
     }
   };
 
+  // The reset modal lives outside the sign-in <form> (see below): nested
+  // <form> elements are invalid HTML and the modal's submit button can fall
+  // through to a native submission of the outer form.
   return (
+    <>
     <form onSubmit={submit} className="card p-6 space-y-4">
       <h2 className="text-sm font-semibold">Sign in</h2>
 
@@ -130,9 +134,13 @@ function LoginForm({ onBack, onSignup }: { onBack: () => void; onSignup: () => v
       <button type="button" className="text-xs text-ink-muted hover:text-ink w-full text-center" onClick={() => setResetting(true)}>
         Forgot password?
       </button>
-
-      {resetting && <ForgotPasswordModal onClose={() => setResetting(false)} />}
     </form>
+
+    {/* Outside the sign-in <form>: nested <form> elements are invalid HTML and
+        the modal's submit button can fall through to a native submission of the
+        outer form - a full-page reload with no request ever sent. */}
+    {resetting && <ForgotPasswordModal onClose={() => setResetting(false)} />}
+    </>
   );
 }
 
