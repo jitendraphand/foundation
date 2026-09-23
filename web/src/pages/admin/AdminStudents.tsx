@@ -270,7 +270,7 @@ function ManageStudents() {
       )}
 
       {editing && <EditUserModal user={editing} onClose={() => setEditing(null)} onSaved={async (msg) => { setEditing(null); if (msg) setNotice(msg); await load(); }} />}
-      {resetting && <ResetPasswordModal user={resetting} onClose={() => setResetting(null)} onDone={(msg) => { setResetting(null); setNotice(msg); }} />}
+      {resetting && <ResetPasswordModal user={resetting} onClose={() => setResetting(null)} onDone={(msg) => setNotice(msg)} />}
       {deleting && <DeleteUserModal user={deleting} onClose={() => setDeleting(null)} onDone={async (msg) => { setDeleting(null); setNotice(msg); await load(); }} />}
     </div>
   );
@@ -584,8 +584,11 @@ function ResetPasswordModal({ user, onClose, onDone }: { user: UserRow; onClose:
     setError(null);
     try {
       const res = await api.post<{ message: string; newPassword?: string }>(`/api/admin/users/${user.id}/reset-password`, {});
-      setTempPassword(res.newPassword ?? null);
+      // The new password is shown by this modal, so it must stay mounted:
+      // closing it here would leave only the notice behind.
       onDone(res.message);
+      if (res.newPassword) setTempPassword(res.newPassword);
+      else onClose();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not reset the password.');
     } finally {

@@ -137,7 +137,6 @@ export default function AdminPeople() {
           admin={resetting}
           onClose={() => setResetting(null)}
           onDone={async (message) => {
-            setResetting(null);
             setNotice(message);
             await load();
           }}
@@ -293,8 +292,11 @@ function ResetAdminPasswordModal({
     setError(null);
     try {
       const res = await api.post<{ message: string; newPassword?: string }>(`/api/admin/users/${admin.id}/reset-password`, {});
-      setTempPassword(res.newPassword ?? null);
+      // The new password is shown by this modal, so it must stay mounted:
+      // closing it here would leave only the notice behind.
       onDone(res.message);
+      if (res.newPassword) setTempPassword(res.newPassword);
+      else onClose();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not reset that password.');
     } finally {
