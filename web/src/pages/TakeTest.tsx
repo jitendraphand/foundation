@@ -253,6 +253,29 @@ export default function TakeTest() {
     [answers],
   );
 
+  // Everything above this line is hooks, and everything below is render: a
+  // useEffect once lived among the returns below, so the hook count changed
+  // the moment the paper loaded and React unmounted the whole page into a
+  // blank screen. Hooks stay unconditional; the returns stay after them.
+  const question = paper?.questions[index];
+  const lowTime = remainingMs < 60_000;
+  const proctored = paper?.test.proctoring?.enabled === true;
+
+  // Per-question countdown, only when the test enforces it. The clock reads
+  // against the server-recorded first save, so it cannot disagree with the
+  // cutoff; before the first save it has not started, so nothing ticks.
+  const qLimit = paper?.test.perQuestionTiming ? question?.timeLimitSeconds ?? null : null;
+  const qFirstSeen = question?.firstSeenAt ? Math.floor(new Date(question.firstSeenAt).getTime() / 1000) : null;
+  const qRemaining = qLimit != null && qFirstSeen != null ? Math.max(0, qLimit - (nowSec - qFirstSeen)) : null;
+
+  // Informational: when the local countdown reaches zero, show the banner. The
+  // server remains the authority — a successful save clears it again.
+  useEffect(() => {
+    if (question && qRemaining === 0) {
+      setPerQTimeUp((prev) => (prev.has(question.id) ? prev : new Set(prev).add(question.id)));
+    }
+  }, [question, qRemaining]);
+
   if (error) {
     return (
       <main className="min-h-full grid place-items-center p-4">
@@ -268,24 +291,18 @@ export default function TakeTest() {
 
   if (!paper) return <PageLoader label="Opening your test" />;
 
-  const question = paper.questions[index];
-  const lowTime = remainingMs < 60_000;
-  const proctored = paper.test.proctoring?.enabled === true;
-
-  // Per-question countdown, only when the test enforces it. The clock reads
-  // against the server-recorded first save, so it cannot disagree with the
-  // cutoff; before the first save it has not started, so nothing ticks.
-  const qLimit = paper.test.perQuestionTiming ? question?.timeLimitSeconds ?? null : null;
-  const qFirstSeen = question?.firstSeenAt ? Math.floor(new Date(question.firstSeenAt).getTime() / 1000) : null;
-  const qRemaining = qLimit != null && qFirstSeen != null ? Math.max(0, qLimit - (nowSec - qFirstSeen)) : null;
-
-  // Informational: when the local countdown reaches zero, show the banner. The
-  // server remains the authority — a successful save clears it again.
-  useEffect(() => {
-    if (question && qRemaining === 0) {
-      setPerQTimeUp((prev) => (prev.has(question.id) ? prev : new Set(prev).add(question.id)));
-    }
-  }, [question, qRemaining]);
+  if (!question) {
+    return (
+      <main className="min-h-full grid place-items-center p-4">
+        <div className="max-w-md w-full space-y-3">
+          <Alert tone="warn">This test has no questions to show. Ask your teacher to check its setup.</Alert>
+          <button type="button" className="btn-secondary w-full" onClick={() => navigate('/dashboard')}>
+            Back to dashboard
+          </button>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <div className="min-h-full flex flex-col bg-surface">
