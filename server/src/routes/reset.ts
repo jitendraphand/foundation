@@ -125,6 +125,35 @@ export default async function resetRoutes(app: FastifyInstance) {
     // lengthen rather than leak a failure.
     const finalPassword = policy.ok ? newPassword : `${newPassword}x9`;
 
+    // Deliver first. Saving the new password before the webhook answers used
+    // to lock the account onto a password that was never received — including
+    // when the webhook URL was the website, which answers 200.
+    let delivery: { sent: boolean; via: 'n8n' | 'log'; error?: string };
+    if (body.channel === 'email') {
+      const { subject, message } = formatResetEmail(user.username, finalPassword);
+      delivery = await sendEmail(user.email!, subject, message);
+    } else {
+      delivery = await sendWhatsapp(user.mobile!, formatResetMessage(user.username, finalPassword));
+    }
+
+    if (!delivery.sent) {
+      console.error(`[reset] ${body.channel} delivery failed for ${user.id}: ${delivery.error ?? 'unknown'}`);
+      await audit(null, 'auth.self_reset', {
+        entity: 'User', entityId: user.id, ip: request.ip,
+        detail: {
+          role: user.role,
+          channel: body.channel,
+          via: delivery.via,
+          sent: false,
+          error: delivery.error?.slice(0, 300),
+        },
+      });
+      const where = body.channel === 'email' ? 'email' : 'WhatsApp';
+      return reply.code(502).send({
+        error: `The ${where} message could not be delivered, so your password was not changed. Try again in a moment, or ask the office for help.`,
+      });
+    }
+
     await prisma.user.update({
       where: { id: user.id },
       data: {
@@ -137,27 +166,10 @@ export default async function resetRoutes(app: FastifyInstance) {
     });
     await revokeAllSessions(user.id, 'password_changed');
 
-    let delivery: { sent: boolean; via: 'n8n' | 'log'; error?: string };
-    if (body.channel === 'email') {
-      const { subject, message } = formatResetEmail(user.username, finalPassword);
-      delivery = await sendEmail(user.email!, subject, message);
-    } else {
-      delivery = await sendWhatsapp(user.mobile!, formatResetMessage(user.username, finalPassword));
-    }
-
     await audit(null, 'auth.self_reset', {
       entity: 'User', entityId: user.id, ip: request.ip,
-      detail: { role: user.role, channel: body.channel, via: delivery.via, sent: delivery.sent },
+      detail: { role: user.role, channel: body.channel, via: delivery.via, sent: true },
     });
-
-    if (!delivery.sent) {
-      // The password HAS been changed; the old one no longer works. Say so and
-      // point at the office rather than pretending nothing happened.
-      const where = body.channel === 'email' ? 'email message' : 'WhatsApp message';
-      return reply.code(502).send({
-        error: `Your password was reset but the ${where} could not be delivered. Ask the office to set a new one in person.`,
-      });
-    }
 
     if (body.channel === 'email') {
       return {

@@ -32,6 +32,12 @@
 		reverse_proxy api:4000
 	}
 
+	# Same compatibility path as the production Caddyfile: a Production URL
+	# copied while n8n still advertised /n8n/ on the app host.
+	handle_path /n8n/* {
+		reverse_proxy n8n:5678
+	}
+
 	handle {
 		reverse_proxy web:80
 	}

@@ -144,7 +144,16 @@ services:
       GENERIC_TIMEZONE: "Asia/Kolkata"
       DB_TYPE: "sqlite"
       N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-change_me_n8n_key_32chars_min}
-      WEBHOOK_URL: https://${PUBLIC_HOST}/n8n/
+      # Caddy exposes n8n on its own hostname, not under the app's /n8n path.
+      # n8n copies this into every Webhook node's Production URL. The previous
+      # value, https://<the app>/n8n/, made that URL hit the website, which
+      # answers 200 — so an email reset looked sent and nothing was delivered.
+      # N8N_WEBHOOK_URL is what current n8n reads; WEBHOOK_URL is the old name.
+      N8N_HOST: n8n.${PUBLIC_HOST}
+      N8N_PROTOCOL: https
+      N8N_PROXY_HOPS: "1"
+      N8N_WEBHOOK_URL: https://n8n.${PUBLIC_HOST}/
+      WEBHOOK_URL: https://n8n.${PUBLIC_HOST}/
     volumes:
       - n8n_data:/home/node/.n8n
 

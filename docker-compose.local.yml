@@ -28,3 +28,12 @@ services:
   n8n:
     environment:
       N8N_SECURE_COOKIE: "false"
+      # The base file points n8n at https://n8n.<PUBLIC_HOST>/. A laptop trial
+      # has no certificate there, so the editor must advertise the plain-HTTP
+      # hostname Caddyfile.local actually serves. Otherwise the Production URL
+      # an administrator copies is the website, and email resets never arrive.
+      N8N_HOST: n8n.localhost
+      N8N_PROTOCOL: http
+      N8N_PROXY_HOPS: "1"
+      N8N_WEBHOOK_URL: http://n8n.localhost/
+      WEBHOOK_URL: http://n8n.localhost/

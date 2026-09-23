@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, ApiError } from '../../lib/api';
-import { Alert, Badge, Card, EmptyState, Modal, PageLoader, Spinner, formatDate } from '../../components/ui';
+import { Alert, Badge, Card, ConfirmDelete, EmptyState, Modal, PageLoader, Spinner, formatDate } from '../../components/ui';
 
 interface Backup {
   id: string;
@@ -28,6 +28,9 @@ export default function AdminBackups() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<Backup | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [showRestore, setShowRestore] = useState(false);
   const [restoring, setRestoring] = useState<string | null>(null);
   const [restoreConfirm, setRestoreConfirm] = useState('');
@@ -69,12 +72,18 @@ export default function AdminBackups() {
     }
   };
 
-  const remove = async (backup: Backup) => {
+  const remove = async () => {
+    if (!pendingDelete) return;
+    setDeleteBusy(true);
+    setDeleteError(null);
     try {
-      await api.delete(`/api/admin/backups/${backup.id}`);
+      await api.delete(`/api/admin/backups/${pendingDelete.id}`);
+      setPendingDelete(null);
       await load();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not delete that archive.');
+      setDeleteError(err instanceof ApiError ? err.message : 'Could not delete that archive.');
+    } finally {
+      setDeleteBusy(false);
     }
   };
 
@@ -227,7 +236,7 @@ export default function AdminBackups() {
                         ) : (
                           <Badge>pruned</Badge>
                         )}
-                        <button type="button" className="btn-ghost btn-sm text-bad" onClick={() => remove(backup)}>Delete</button>
+                        <button type="button" className="btn-ghost btn-sm text-bad" onClick={() => { setDeleteError(null); setPendingDelete(backup); }}>Delete</button>
                       </td>
                     </tr>
                   );
@@ -296,6 +305,17 @@ export default function AdminBackups() {
           </p>
         </div>
       </Modal>
+
+      <ConfirmDelete
+        open={!!pendingDelete}
+        title={pendingDelete ? `Delete ${pendingDelete.filename}?` : 'Delete this backup?'}
+        busy={deleteBusy}
+        error={deleteError}
+        onClose={() => setPendingDelete(null)}
+        onConfirm={() => void remove()}
+      >
+        <p>The archive is removed from this server. A copy you already downloaded is not affected. This cannot be undone.</p>
+      </ConfirmDelete>
     </div>
   );
 }

@@ -26,6 +26,14 @@
 		reverse_proxy api:4000
 	}
 
+	# n8n used to advertise its webhooks at https://<this host>/n8n/webhook/...
+	# which is the website, so a copied Production URL never reached a
+	# workflow. Keep that path working for URLs already saved in Settings.
+	# handle_path strips /n8n before proxying; n8n listens at /webhook/.
+	handle_path /n8n/* {
+		reverse_proxy n8n:5678
+	}
+
 	handle {
 		reverse_proxy web:80
 	}

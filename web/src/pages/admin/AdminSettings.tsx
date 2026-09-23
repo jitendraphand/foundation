@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError } from '../../lib/api';
-import { Alert, Badge, Card, EmptyState, Field, Modal, PageLoader, Pagination, Spinner, Tabs, formatDate } from '../../components/ui';
+import { Alert, Badge, Card, ConfirmDelete, EmptyState, Field, Modal, PageLoader, Pagination, Spinner, Tabs, formatDate } from '../../components/ui';
 import type { Tag } from '../../lib/types';
 
 type SettingsTab = 'school' | 'providers' | 'prompts' | 'tags' | 'classes' | 'curriculum' | 'n8n' | 'audit';
@@ -151,8 +151,10 @@ interface Credential {
     projectId?: string;
     apiVersion?: string;
     useAsFallback?: boolean;
-    /** Hidden from the Set test screen when false. */
+    /** Hidden from the Set test screen when false, unless this is the default. */
     visible?: boolean;
+    /** The credential Set test uses. At most one credential has this set. */
+    isDefault?: boolean;
     /** An administrator's explicit ceiling on one reply's length. */
     maxOutputTokens?: number;
     /** What each model was observed to refuse above, learned from a refusal. */
@@ -265,7 +267,6 @@ function Providers() {
   const [testing, setTesting] = useState<string | null>(null);
   const [health, setHealth] = useState<HealthRow[] | null>(null);
   const [checking, setChecking] = useState(false);
-  const [tuningFor, setTuningFor] = useState<string | null>(null);
   const [trialling, setTrialling] = useState<string | null>(null);
   const [trials, setTrials] = useState<Record<string, TrialResult | null>>({});
   const [requestFor, setRequestFor] = useState<string | null>(null);
@@ -404,6 +405,16 @@ function Providers() {
     }
   };
 
+  const setDefault = async (credential: Credential) => {
+    setError(null);
+    try {
+      await api.patch(`/api/admin/credentials/${credential.id}`, { isDefault: true });
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not set the default provider.');
+    }
+  };
+
   const setVisible = async (credential: Credential, visible: boolean) => {
     try {
       await api.patch(`/api/admin/credentials/${credential.id}`, { visible });
@@ -414,6 +425,9 @@ function Providers() {
   };
 
   const [editing, setEditing] = useState<Credential | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<Credential | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   /**
    * Fetch and show the real request body for one credential.
@@ -441,23 +455,24 @@ function Providers() {
     }
   };
 
-  const saveTuning = async (credential: Credential, tuning: ModelTuning) => {
-    setError(null);
-    try {
-      await api.patch(`/api/admin/credentials/${credential.id}`, { tuning });
-      setTuningFor(null);
-      await load();
-    } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not save those settings.');
-    }
+  const saveRequest = async (credential: Credential, body: Record<string, unknown>) => {
+    const res = await api.put<{ preview: RequestPreviewData }>(`/api/admin/credentials/${credential.id}/request`, { body });
+    setRequests((p) => ({ ...p, [credential.id]: res.preview }));
+    await load();
   };
 
-  const remove = async (credential: Credential) => {
+  const remove = async () => {
+    if (!pendingDelete) return;
+    setDeleteBusy(true);
+    setDeleteError(null);
     try {
-      await api.delete(`/api/admin/credentials/${credential.id}`);
+      await api.delete(`/api/admin/credentials/${pendingDelete.id}`);
+      setPendingDelete(null);
       await load();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not delete that credential.');
+      setDeleteError(err instanceof ApiError ? err.message : 'Could not delete that credential.');
+    } finally {
+      setDeleteBusy(false);
     }
   };
 
@@ -481,6 +496,9 @@ function Providers() {
           />
         ) : (
           <div className="scroll-x">
+            <p className="px-4 pt-3 pb-1 text-xs text-ink-muted">
+              Set test uses the default credential and its default model, and does not ask which provider to use. Until one is marked, it uses the first credential enabled for text.
+            </p>
             <table className="table-base">
               <thead>
                 <tr>
@@ -488,6 +506,7 @@ function Providers() {
                   <th>Provider</th>
                   <th>Key</th>
                   <th>Default model</th>
+                  <th className="text-center">Default</th>
                   <th className="text-center">Used for</th>
                   <th className="text-center">Fallback</th>
                   <th className="text-center">Visible</th>
@@ -503,6 +522,22 @@ function Providers() {
                     <td className="text-ink-muted">{describeProvider(credential, providers)}</td>
                     <td className="font-mono text-xs text-ink-faint">{credential.keyHint}</td>
                     <td className="font-mono text-xs text-ink-muted">{credential.defaultModel ?? '—'}</td>
+                    <td className="text-center">
+                      <input
+                        type="radio"
+                        name="default-credential"
+                        className="accent-series-1"
+                        checked={credential.meta?.isDefault === true}
+                        disabled={!credential.isActive || !credential.capabilities.text}
+                        onChange={() => void setDefault(credential)}
+                        aria-label={`Use ${credential.label} as the default for Set test`}
+                        title={
+                          credential.capabilities.text
+                            ? 'Set test uses this credential and its default model.'
+                            : 'Enable Text before making this the default. Set test writes questions with it.'
+                        }
+                      />
+                    </td>
                     <td>
                       <div className="flex items-center justify-center gap-3">
                         <label className="flex items-center gap-1.5 text-xs cursor-pointer">
@@ -551,7 +586,7 @@ function Providers() {
                         checked={credential.meta?.visible !== false}
                         onChange={(e) => void setVisible(credential, e.target.checked)}
                         aria-label={`Show ${credential.label} on Set test screen`}
-                        title="When off, this credential is hidden from the Set test screen. Only visible LLMs are offered when generating questions."
+                        title="When off, Set test skips this credential unless it is the default."
                       />
                     </td>
                     <td>
@@ -597,18 +632,11 @@ function Providers() {
                       <button
                         type="button"
                         className="btn-ghost btn-sm"
-                        onClick={() => setTuningFor(tuningFor === credential.id ? null : credential.id)}
-                      >
-                        {tuningFor === credential.id ? 'Close' : 'Model settings'}
-                      </button>
-                      <button
-                        type="button"
-                        className="btn-ghost btn-sm"
                         onClick={() => void showRequest(credential)}
                       >
                         {requestFor === credential.id ? 'Close' : 'Show the request'}
                       </button>
-                      <button type="button" className="btn-ghost btn-sm text-bad" onClick={() => remove(credential)}>Delete</button>
+                      <button type="button" className="btn-ghost btn-sm text-bad" onClick={() => { setDeleteError(null); setPendingDelete(credential); }}>Delete</button>
                     </td>
                   </tr>
                 ))
@@ -620,21 +648,8 @@ function Providers() {
                     if (trial) {
                       extras.push(
                         <tr key={`${credential.id}-trial`}>
-                          <td colSpan={10} className="bg-surface-sunken">
+                          <td colSpan={11} className="bg-surface-sunken">
                             <TrialReport result={trial} onDismiss={() => setTrials((p) => ({ ...p, [credential.id]: null }))} />
-                          </td>
-                        </tr>,
-                      );
-                    }
-                    if (tuningFor === credential.id) {
-                      extras.push(
-                        <tr key={`${credential.id}-tuning`}>
-                          <td colSpan={10} className="bg-surface-sunken">
-                            <ModelSettings
-                              credential={credential}
-                              onCancel={() => setTuningFor(null)}
-                              onSave={(tuning) => void saveTuning(credential, tuning)}
-                            />
                           </td>
                         </tr>,
                       );
@@ -642,8 +657,11 @@ function Providers() {
                     if (requestFor === credential.id) {
                       extras.push(
                         <tr key={`${credential.id}-request`}>
-                          <td colSpan={10} className="bg-surface-sunken">
-                            <RequestPreview preview={requests[credential.id] ?? null} />
+                          <td colSpan={11} className="bg-surface-sunken">
+                            <RequestPreview
+                              preview={requests[credential.id] ?? null}
+                              onSave={(body) => saveRequest(credential, body)}
+                            />
                           </td>
                         </tr>,
                       );
@@ -730,6 +748,20 @@ function Providers() {
           }}
         />
       )}
+
+      <ConfirmDelete
+        open={!!pendingDelete}
+        title={pendingDelete ? `Delete ${pendingDelete.label}?` : 'Delete this provider?'}
+        busy={deleteBusy}
+        error={deleteError}
+        onClose={() => setPendingDelete(null)}
+        onConfirm={() => void remove()}
+      >
+        <p>
+          The saved key is removed. Set test, step-up and picture generation that use this credential will stop until
+          another one is chosen. This cannot be undone.
+        </p>
+      </ConfirmDelete>
     </div>
   );
 }
@@ -1623,7 +1655,22 @@ interface RequestPreviewData {
  * The key is never in it. This is the panel most likely to be screenshotted
  * into a support thread.
  */
-function RequestPreview({ preview }: { preview: RequestPreviewData | null }) {
+function RequestPreview({
+  preview,
+  onSave,
+}: {
+  preview: RequestPreviewData | null;
+  onSave: (body: Record<string, unknown>) => Promise<void>;
+}) {
+  const [text, setText] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (preview?.shown && preview.body) setText(JSON.stringify(preview.body, null, 2));
+  }, [preview]);
+
   if (!preview) {
     return <div className="p-3"><Spinner label="Building the request" /></div>;
   }
@@ -1642,23 +1689,63 @@ function RequestPreview({ preview }: { preview: RequestPreviewData | null }) {
     `  -d '${JSON.stringify(preview.body)}'`,
   ].join('\n');
 
+  const save = async () => {
+    setError(null);
+    setNotice(null);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch (err) {
+      setError(`That is not valid JSON: ${err instanceof Error ? err.message : 'check the brackets and commas.'}`);
+      return;
+    }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      setError('That has to be a JSON object — it should start with { and end with }.');
+      return;
+    }
+    setBusy(true);
+    try {
+      await onSave(parsed as Record<string, unknown>);
+      setNotice('Saved. The request below is what the next call will send.');
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not save that request.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <div className="p-3 space-y-3">
       <div>
         <h4 className="text-xs font-semibold">What this credential sends</h4>
         <p className="text-[11px] text-ink-faint mt-0.5">
           The real request for <code>{preview.model}</code>, assembled by the same code that makes the call.
-          Compare it with the vendor&rsquo;s sample; anything that differs can be set under <strong>Model settings</strong>.
+          Edit it to match a vendor sample, then save. <code>model</code>, <code>messages</code> and{' '}
+          <code>stream_options</code> are filled in for each run and cannot be changed here.
           {preview.streaming ? ' The reply is read as it arrives.' : ' Streaming is off for this credential.'}
         </p>
       </div>
 
+      {error && <Alert tone="error">{error}</Alert>}
+      {notice && <Alert tone="success">{notice}</Alert>}
+
       <label className="block">
         <span className="text-[11px] font-medium text-ink-muted">Request body</span>
-        <pre className="mt-1 max-h-64 overflow-auto rounded-lg border border-line bg-white p-2 text-[11px] whitespace-pre-wrap break-words">
-          {JSON.stringify(preview.body, null, 2)}
-        </pre>
+        <textarea
+          className="mt-1 w-full max-h-80 min-h-48 overflow-auto rounded-lg border border-line bg-white p-2 text-[11px] font-mono"
+          spellCheck={false}
+          value={text}
+          onChange={(e) => { setText(e.target.value); setError(null); setNotice(null); }}
+          aria-label="Request body"
+        />
       </label>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <button type="button" className="btn-primary btn-sm" onClick={() => void save()} disabled={busy}>
+          {busy ? <Spinner label="Saving" /> : 'Save request'}
+        </button>
+        <span className="text-[11px] text-ink-faint">Then press <strong>Try 2 questions</strong> to see whether it worked.</span>
+      </div>
 
       <details className="text-xs">
         <summary className="cursor-pointer text-ink-muted">As a curl command, to try it outside the system</summary>
@@ -1669,145 +1756,6 @@ function RequestPreview({ preview }: { preview: RequestPreviewData | null }) {
           Your key is not shown here — put it in place of <code>&lt;your API key&gt;</code> if you run this.
         </p>
       </details>
-    </div>
-  );
-}
-
-/**
- * The per-model settings.
- *
- * Every vendor hands out a slightly different code sample per model - NVIDIA's
- * differ by sampling defaults, by an `extra_body` carrying `enable_thinking`
- * and a reasoning budget, and by whether the reply has to be read out of
- * `reasoning_content`. None of that is a different protocol, so none of it
- * needs different code: it is four settings and a JSON object.
- *
- * The extra fields box takes JSON, never code. Nothing typed here is executed;
- * it is parsed and merged into the request body, and the fields the server owns
- * are refused rather than silently dropped.
- */
-function ModelSettings({
-  credential, onCancel, onSave,
-}: {
-  credential: Credential;
-  onCancel: () => void;
-  onSave: (tuning: ModelTuning) => void;
-}) {
-  const saved = credential.meta?.tuning ?? {};
-  const [thinking, setThinking] = useState<'auto' | 'yes' | 'no'>(saved.thinking ?? 'auto');
-  const [jsonMode, setJsonMode] = useState<'auto' | 'on' | 'off'>(saved.jsonMode ?? 'auto');
-  const [stream, setStream] = useState(saved.stream !== false);
-  const [temperature, setTemperature] = useState(saved.temperature?.toString() ?? '');
-  const [topP, setTopP] = useState(saved.topP?.toString() ?? '');
-  const [seed, setSeed] = useState(saved.seed?.toString() ?? '');
-  const [extra, setExtra] = useState(saved.extraBody ? JSON.stringify(saved.extraBody, null, 2) : '');
-  const [jsonError, setJsonError] = useState<string | null>(null);
-
-  const num = (raw: string) => (raw.trim() === '' ? undefined : Number(raw));
-
-  const submit = () => {
-    let extraBody: Record<string, unknown> | undefined;
-    if (extra.trim() !== '') {
-      try {
-        const parsed = JSON.parse(extra);
-        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-          setJsonError('That has to be a JSON object — it should start with { and end with }.');
-          return;
-        }
-        extraBody = parsed as Record<string, unknown>;
-      } catch (err) {
-        setJsonError(`That is not valid JSON: ${err instanceof Error ? err.message : 'check the brackets and commas.'}`);
-        return;
-      }
-    }
-    setJsonError(null);
-    onSave({
-      ...(extraBody ? { extraBody } : {}),
-      ...(num(temperature) !== undefined ? { temperature: num(temperature) } : {}),
-      ...(num(topP) !== undefined ? { topP: num(topP) } : {}),
-      ...(num(seed) !== undefined ? { seed: num(seed) } : {}),
-      stream,
-      thinking,
-      jsonMode,
-    });
-  };
-
-  const field = 'input text-xs w-28 tabular-nums';
-
-  return (
-    <div className="p-3 space-y-3">
-      <div>
-        <h4 className="text-xs font-semibold">Model settings for {credential.label}</h4>
-        <p className="text-[11px] text-ink-faint mt-0.5">
-          These are the things a vendor&rsquo;s per-model code sample differs by. Set them here and any model works
-          without a code change.
-        </p>
-      </div>
-
-      <div className="flex flex-wrap items-end gap-3">
-        <label className="text-[11px] text-ink-muted">
-          <span className="block mb-1">Thinking model</span>
-          <select className="input text-xs w-32" value={thinking} onChange={(e) => setThinking(e.target.value as typeof thinking)}>
-            <option value="auto">Work it out</option>
-            <option value="yes">Yes</option>
-            <option value="no">No</option>
-          </select>
-        </label>
-        <label className="text-[11px] text-ink-muted">
-          <span className="block mb-1">JSON mode</span>
-          <select className="input text-xs w-32" value={jsonMode} onChange={(e) => setJsonMode(e.target.value as typeof jsonMode)}>
-            <option value="auto">As the provider</option>
-            <option value="on">Always ask</option>
-            <option value="off">Never ask</option>
-          </select>
-        </label>
-        <label className="text-[11px] text-ink-muted">
-          <span className="block mb-1">Temperature</span>
-          <input className={field} value={temperature} onChange={(e) => setTemperature(e.target.value)} placeholder="default" />
-        </label>
-        <label className="text-[11px] text-ink-muted">
-          <span className="block mb-1">Top P</span>
-          <input className={field} value={topP} onChange={(e) => setTopP(e.target.value)} placeholder="default" />
-        </label>
-        <label className="text-[11px] text-ink-muted">
-          <span className="block mb-1">Seed</span>
-          <input className={field} value={seed} onChange={(e) => setSeed(e.target.value)} placeholder="none" />
-        </label>
-        <label className="flex items-center gap-2 text-[11px] text-ink-muted pb-2">
-          <input type="checkbox" className="accent-series-1" checked={stream} onChange={(e) => setStream(e.target.checked)} />
-          Read the reply as it arrives
-        </label>
-      </div>
-
-      <label className="block">
-        <span className="text-[11px] font-medium text-ink-muted">
-          Extra request fields — JSON, copied from the vendor&rsquo;s <code>extra_body</code>
-        </span>
-        <textarea
-          className="w-full rounded-lg border border-line bg-white p-2 text-xs font-mono"
-          rows={4}
-          spellCheck={false}
-          value={extra}
-          onChange={(e) => { setExtra(e.target.value); setJsonError(null); }}
-          placeholder={'{\n  "chat_template_kwargs": { "enable_thinking": true },\n  "reasoning_budget": 16384\n}'}
-        />
-        {jsonError
-          ? <p className="mt-1 text-[11px] text-bad">{jsonError}</p>
-          : (
-            <p className="mt-1 text-[11px] text-ink-faint">
-              Merged into every request to this credential. Data only — nothing here is ever run as code, and the
-              model, the messages and the streaming flag are set by the server.
-            </p>
-          )}
-      </label>
-
-      <div className="flex flex-wrap items-center gap-2">
-        <button type="button" className="btn-primary btn-sm" onClick={submit}>Save settings</button>
-        <button type="button" className="btn-ghost btn-sm" onClick={onCancel}>Cancel</button>
-        <span className="text-[11px] text-ink-faint">
-          Then press <strong>Try 2 questions</strong> to see whether it worked.
-        </span>
-      </div>
     </div>
   );
 }
@@ -1942,6 +1890,9 @@ function Classes() {
   const [data, setData] = useState<{ grades: SchoolClass[]; divisions: SchoolClass[] } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<SchoolClass | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -1960,16 +1911,21 @@ function Classes() {
     await load();
   };
 
-  const remove = async (row: SchoolClass) => {
-    setError(null);
+  const remove = async () => {
+    if (!pendingDelete) return;
+    setDeleteBusy(true);
+    setDeleteError(null);
     try {
-      const res = await api.delete<{ message: string }>(`/api/admin/classes/${row.id}`);
+      const res = await api.delete<{ message: string }>(`/api/admin/classes/${pendingDelete.id}`);
       setNotice(res.message);
+      setPendingDelete(null);
       await load();
     } catch (err) {
       // The refusal explains itself - who is still in it, and what to do
       // instead - so it is shown as-is.
-      setError(err instanceof ApiError ? err.message : 'Could not delete that.');
+      setDeleteError(err instanceof ApiError ? err.message : 'Could not delete that.');
+    } finally {
+      setDeleteBusy(false);
     }
   };
 
@@ -2014,9 +1970,7 @@ function Classes() {
                     />
                     Offered at signup
                   </label>
-                  {/* Refused server-side the moment anybody is in it, with a
-                      message naming how many - so no confirmation here. */}
-                  <button type="button" className="btn-ghost btn-sm text-bad" onClick={() => void remove(row)}>
+                  <button type="button" className="btn-ghost btn-sm text-bad" onClick={() => { setDeleteError(null); setPendingDelete(row); }}>
                     Delete
                   </button>
                 </div>
@@ -2027,6 +1981,20 @@ function Classes() {
         </Card>
       ))}
       </div>
+
+      <ConfirmDelete
+        open={!!pendingDelete}
+        title={pendingDelete ? `Delete ${pendingDelete.label}?` : 'Delete this class?'}
+        busy={deleteBusy}
+        error={deleteError}
+        onClose={() => setPendingDelete(null)}
+        onConfirm={() => void remove()}
+      >
+        <p>
+          A grade or division that still has students cannot be deleted. If it is empty, it disappears from signup
+          and from the class lists.
+        </p>
+      </ConfirmDelete>
     </div>
   );
 }
@@ -2111,6 +2079,9 @@ function Curriculum() {
   const [notice, setNotice] = useState<string | null>(null);
   const [label, setLabel] = useState('');
   const [busy, setBusy] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<CurriculumNodeRow | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -2149,13 +2120,19 @@ function Curriculum() {
     }
   };
 
-  const retire = async (node: CurriculumNodeRow) => {
+  const retire = async () => {
+    if (!pendingDelete) return;
+    setDeleteBusy(true);
+    setDeleteError(null);
     try {
-      await api.delete(`/api/admin/curriculum/${node.id}`);
-      setNotice(`"${node.label}" hidden from the dropdown. Existing questions keep their subject.`);
+      await api.delete(`/api/admin/curriculum/${pendingDelete.id}`);
+      setNotice(`"${pendingDelete.label}" hidden from the dropdown. Existing questions keep their subject.`);
+      setPendingDelete(null);
       await load();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not remove the subject.');
+      setDeleteError(err instanceof ApiError ? err.message : 'Could not remove the subject.');
+    } finally {
+      setDeleteBusy(false);
     }
   };
 
@@ -2191,12 +2168,24 @@ function Curriculum() {
             {subjects.map((s) => (
               <li key={s.id} className="py-2 flex items-center justify-between gap-3">
                 <span className="text-sm font-medium">{s.label}</span>
-                <button type="button" className="btn-ghost btn-sm text-bad" onClick={() => void retire(s)}>Remove</button>
+                <button type="button" className="btn-ghost btn-sm text-bad" onClick={() => { setDeleteError(null); setPendingDelete(s); }}>Remove</button>
               </li>
             ))}
           </ul>
         )}
       </Card>
+
+      <ConfirmDelete
+        open={!!pendingDelete}
+        title={pendingDelete ? `Remove ${pendingDelete.label}?` : 'Remove this subject?'}
+        busy={deleteBusy}
+        error={deleteError}
+        actionLabel="Remove"
+        onClose={() => setPendingDelete(null)}
+        onConfirm={() => void retire()}
+      >
+        <p>It disappears from the Set test dropdown. Questions already filed under it keep the subject.</p>
+      </ConfirmDelete>
     </div>
   );
 }

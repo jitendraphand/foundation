@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, ApiError } from '../../lib/api';
-import { Alert, Badge, Card, EmptyState, Field, Modal, PageLoader, Pagination, formatDate } from '../../components/ui';
+import { Alert, Badge, Card, ConfirmDelete, EmptyState, Field, Modal, PageLoader, Pagination, formatDate } from '../../components/ui';
 import { WindowEditor, describeWindowValue, type WindowPreset, type WindowValue } from '../../components/WindowEditor';
 import { DEFAULT_EXAM_RULES, ExamRulesEditor, rulesToBody, type ExamRules } from '../../components/ExamRules';
 
@@ -37,6 +37,9 @@ export default function AdminTests() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<TestRow | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [kind, setKind] = useState<'REGULAR' | 'PRACTICE' | ''>('');
   const [page, setPage] = useState(1);
   const [creating, setCreating] = useState(false);
@@ -85,14 +88,19 @@ export default function AdminTests() {
     }
   };
 
-  const removeTest = async (test: TestRow) => {
-    if (!confirm(`Delete "${test.title}"? This will delete the test and all ${test._count.attempts} attempt(s) and answers permanently. This cannot be undone.`)) return;
+  const removeTest = async () => {
+    if (!pendingDelete) return;
+    setDeleteBusy(true);
+    setDeleteError(null);
     try {
-      const res = await api.delete<{ message?: string }>(`/api/admin/tests/${test.id}`);
+      const res = await api.delete<{ message?: string }>(`/api/admin/tests/${pendingDelete.id}`);
       setNotice(res.message ?? 'Test deleted.');
+      setPendingDelete(null);
       await load();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not delete test.');
+      setDeleteError(err instanceof ApiError ? err.message : 'Could not delete test.');
+    } finally {
+      setDeleteBusy(false);
     }
   };
 
@@ -216,7 +224,7 @@ export default function AdminTests() {
                           {test.resultsReleased ? 'Withdraw results' : 'Release results'}
                         </button>
                       )}
-                      <button type="button" className="btn-ghost btn-sm text-bad" onClick={() => void removeTest(test)}>
+                      <button type="button" className="btn-ghost btn-sm text-bad" onClick={() => { setDeleteError(null); setPendingDelete(test); }}>
                         Delete
                       </button>
                     </td>
@@ -230,6 +238,21 @@ export default function AdminTests() {
       )}
 
       {creating && <CreateTestModal onClose={() => setCreating(false)} onCreated={load} />}
+
+      <ConfirmDelete
+        open={!!pendingDelete}
+        title={pendingDelete ? `Delete ${pendingDelete.title}?` : 'Delete this test?'}
+        busy={deleteBusy}
+        error={deleteError}
+        onClose={() => setPendingDelete(null)}
+        onConfirm={() => void removeTest()}
+      >
+        <p>
+          This deletes the test
+          {pendingDelete ? ` and all ${pendingDelete._count.attempts} attempt${pendingDelete._count.attempts === 1 ? '' : 's'}` : ''}{' '}
+          and their answers. It cannot be undone.
+        </p>
+      </ConfirmDelete>
     </div>
   );
 }

@@ -21,6 +21,7 @@ describe('password reset over email', { skip: skipWithoutDatabase }, () => {
   let api: TestApi;
   let received: Array<{ to: string; subject: string; message: string }>;
   let server: http.Server;
+  let webhookBase: string;
 
   before(async () => {
     prisma = await testDatabase();
@@ -31,6 +32,17 @@ describe('password reset over email', { skip: skipWithoutDatabase }, () => {
       let raw = '';
       req.on('data', (chunk) => (raw += chunk));
       req.on('end', () => {
+        // The website used to answer the mis-routed webhook like this: 200 and HTML.
+        if (req.url?.startsWith('/webhook/email-reset-html')) {
+          res.writeHead(200, { 'content-type': 'text/html' });
+          res.end('<!doctype html><html><body>Foundation</body></html>');
+          return;
+        }
+        if (req.url?.startsWith('/webhook/email-reset-fail')) {
+          res.writeHead(500, { 'content-type': 'application/json' });
+          res.end('{"message":"smtp down"}');
+          return;
+        }
         try { received.push(JSON.parse(raw)); } catch { /* ignore */ }
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end('{}');
@@ -38,7 +50,8 @@ describe('password reset over email', { skip: skipWithoutDatabase }, () => {
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
     const port = (server.address() as AddressInfo).port;
-    process.env.N8N_EMAIL_WEBHOOK_URL = `http://127.0.0.1:${port}/webhook/email-reset`;
+    webhookBase = `http://127.0.0.1:${port}`;
+    process.env.N8N_EMAIL_WEBHOOK_URL = `${webhookBase}/webhook/email-reset`;
   });
   after(async () => {
     delete process.env.N8N_EMAIL_WEBHOOK_URL;
@@ -91,6 +104,46 @@ describe('password reset over email', { skip: skipWithoutDatabase }, () => {
     const after = await prisma.user.findUniqueOrThrow({ where: { id: student.id } });
     assert.notEqual(after.passwordHash, before.passwordHash);
     assert.equal(after.mustChangePassword, true);
+  });
+
+  test('a delivery failure leaves the password unchanged', async () => {
+    const student = await studentWithEmail('pupil.reset@example.com');
+    const before = await prisma.user.findUniqueOrThrow({ where: { id: student.id } });
+    const saved = process.env.N8N_EMAIL_WEBHOOK_URL;
+    process.env.N8N_EMAIL_WEBHOOK_URL = `${webhookBase}/webhook/email-reset-fail`;
+    try {
+      const res = await anonymous(api.app).post('/api/reset/request', {
+        ...identityOf(student),
+        channel: 'email',
+      });
+      assert.equal(res.status, 502);
+      assert.match((res.body as { error: string }).error, /not changed/);
+
+      const after = await prisma.user.findUniqueOrThrow({ where: { id: student.id } });
+      assert.equal(after.passwordHash, before.passwordHash);
+      assert.equal(after.mustChangePassword, before.mustChangePassword);
+      assert.equal(received.length, 0);
+    } finally {
+      process.env.N8N_EMAIL_WEBHOOK_URL = saved;
+    }
+  });
+
+  test('a 200 from the website is not treated as a sent email', async () => {
+    const student = await studentWithEmail('pupil.reset@example.com');
+    const before = await prisma.user.findUniqueOrThrow({ where: { id: student.id } });
+    const saved = process.env.N8N_EMAIL_WEBHOOK_URL;
+    process.env.N8N_EMAIL_WEBHOOK_URL = `${webhookBase}/webhook/email-reset-html`;
+    try {
+      const res = await anonymous(api.app).post('/api/reset/request', {
+        ...identityOf(student),
+        channel: 'email',
+      });
+      assert.equal(res.status, 502);
+      const after = await prisma.user.findUniqueOrThrow({ where: { id: student.id } });
+      assert.equal(after.passwordHash, before.passwordHash);
+    } finally {
+      process.env.N8N_EMAIL_WEBHOOK_URL = saved;
+    }
   });
 
   test('email channel is refused when no address is on file', async () => {

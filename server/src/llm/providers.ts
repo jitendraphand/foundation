@@ -38,8 +38,9 @@ export interface ProviderDef {
    *
    * Not a suggestion: OCI rejects the whole call with 400 when maxTokens is
    * over its limit, so asking for more is not merely wasteful, it fails. Left
-   * undefined where the ceiling is high enough that our own 32k cap binds
-   * first.
+   * undefined where we have not been told a number. Callers then keep the
+   * completion inside 32k tokens and ask for ten questions. An administrator's
+   * reply limit, including one above 32k, replaces both.
    *
    * It also decides how many questions fit in one call - see planBatches -
    * because clamping the request without shrinking the batch just moves the
@@ -502,6 +503,9 @@ export async function buildChatRequest(req: ChatRequest): Promise<BuiltRequest> 
 
   if (reasoning) {
     body.max_completion_tokens = req.maxTokens ?? 8000;
+    // A reasoning model omits temperature unless somebody set one on the
+    // request. An explicit value is what they asked to send.
+    if (tuning.temperature !== undefined) body.temperature = tuning.temperature;
   } else {
     body.temperature = tuning.temperature ?? req.temperature ?? 0.4;
     body.max_tokens = req.maxTokens ?? 8000;

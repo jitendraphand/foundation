@@ -13,7 +13,7 @@ import { capabilitiesOf, imageProblem, imageSupportOf } from '../../llm/capabili
 import { callParamsFor, packIamSecret } from '../../llm/credentials.js';
 import { buildChatRequest } from '../../llm/providers.js';
 import { resolveCeiling } from '../../llm/limits.js';
-import { modelTuningSchema, reservedKeysIn } from '../../llm/tuning.js';
+import { modelTuningSchema, reservedKeysIn, tuningFromRequestBody, tuningOf } from '../../llm/tuning.js';
 import { trialGeneration } from '../../llm/generate.js';
 import { DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_TEMPLATE } from '../../llm/prompts.js';
 import { COMMON_TIMEZONES, WINDOW_PRESETS, isValidTimezone, zonedNow, formatMinute } from '../../lib/availability.js';
@@ -202,6 +202,93 @@ function buildOciFields(body: {
   };
 }
 
+function metaRecord(meta: unknown): Record<string, unknown> {
+  return meta && typeof meta === 'object' && !Array.isArray(meta) ? { ...(meta as object) } : {};
+}
+
+function isDefaultCredential(meta: unknown): boolean {
+  return metaRecord(meta).isDefault === true;
+}
+
+/** One default at a time. The flag lives in meta, next to visible and fallback. */
+async function clearOtherDefaults(keepId: string) {
+  const rows = await prisma.apiCredential.findMany({
+    where: { NOT: { id: keepId } },
+    select: { id: true, meta: true },
+  });
+  for (const row of rows) {
+    if (!isDefaultCredential(row.meta)) continue;
+    const meta = metaRecord(row.meta);
+    meta.isDefault = false;
+    await prisma.apiCredential.update({ where: { id: row.id }, data: { meta: meta as never } });
+  }
+}
+
+/** After the default is removed, the oldest remaining text credential takes its place. */
+async function promoteDefault() {
+  const rows = await prisma.apiCredential.findMany({
+    where: { isActive: true },
+    orderBy: { createdAt: 'asc' },
+    select: { id: true, provider: true, meta: true },
+  });
+  const next = rows.find((row) => capabilitiesOf(row).text && !isDefaultCredential(row.meta));
+  if (!next) return;
+  const meta = metaRecord(next.meta);
+  meta.isDefault = true;
+  await prisma.apiCredential.update({ where: { id: next.id }, data: { meta: meta as never } });
+}
+
+type StoredCredential = NonNullable<Awaited<ReturnType<typeof prisma.apiCredential.findUnique>>>;
+
+/**
+ * The request body the settings panel shows. Stand-in prompts, never the key.
+ */
+async function requestPreview(credential: StoredCredential, modelOverride?: string) {
+  const model = modelOverride || credential.defaultModel || PROVIDERS[credential.provider]?.suggestedModels[0];
+  if (!model) return { error: 'Choose a model first.' } as const;
+
+  const provider = PROVIDERS[credential.provider];
+  if (provider?.dialect && provider.dialect !== 'openai' && provider.dialect !== 'azure') {
+    return {
+      model,
+      shown: false as const,
+      // Bedrock, Vertex and Oracle are signed and shaped differently, and a
+      // preview built for the OpenAI shape would be a lie about all three.
+      note: `${provider.label} does not use the OpenAI request shape — it has its own protocol and signing, so there is no body to edit.`,
+    };
+  }
+
+  const call = await callParamsFor(credential);
+  const built = await buildChatRequest({
+    ...call,
+    model,
+    // Stand-ins rather than the real prompts: the shape of the request is
+    // what is being examined, and the system prompt is thousands of words
+    // that would bury it.
+    messages: [
+      { role: 'system', content: '<the question-writing system prompt>' },
+      { role: 'user', content: '<the request for this run>' },
+    ],
+    jsonMode: provider?.supportsJsonMode ?? false,
+    maxTokens: resolveCeiling(credential, model),
+  });
+
+  return {
+    model,
+    shown: true as const,
+    url: built.url,
+    // Never the key. A screenshot of this pasted into a support thread must
+    // not leak a credential.
+    headers: Object.fromEntries(
+      Object.entries(built.headers).map(([k, v]) =>
+        /^authorization$/i.test(k) || /^api-key$/i.test(k) ? [k, '<your API key>'] : [k, v],
+      ),
+    ),
+    body: built.body,
+    streaming: built.streaming,
+  };
+}
+
 export default async function adminSettingsRoutes(app: FastifyInstance) {
   // --- LLM API credentials -------------------------------------------------
 
@@ -305,9 +392,14 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
 
     const secret = bedrock?.secret ?? body.apiKey;
 
+    const existingDefaults = await prisma.apiCredential.findMany({ select: { meta: true } });
+    const alreadyHasDefault = existingDefaults.some((row) => isDefaultCredential(row.meta));
     const initialMeta: Record<string, unknown> = {
       ...(bedrock ? (bedrock.meta as object) : derivedMeta ? (derivedMeta as object) : {}),
       visible: true,
+      // The first text credential is the one Set test uses, so a school with
+      // one key does not have to mark it before generating.
+      ...(!alreadyHasDefault ? { isDefault: true } : {}),
     };
     const credential = await prisma.apiCredential.create({
       data: {
@@ -343,6 +435,11 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
         isActive: z.boolean().optional(),
         /** Whether this credential is shown on the Set test screen. Null/true = visible. */
         visible: z.boolean().optional(),
+        /**
+         * The credential Set test uses, and the only one. One at a time: setting
+         * it clears the flag on every other credential.
+         */
+        isDefault: z.boolean().optional(),
         /** Offer this credential when the chosen one will not answer. */
         useAsFallback: z.boolean().optional(),
         /**
@@ -445,6 +542,33 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
       metaChanged = true;
     }
 
+    if (body.isDefault === true) {
+      const text = capabilitiesOf({ provider: existing.provider, meta: meta as never }).text;
+      if (!text) {
+        return reply.code(400).send({
+          error: 'The default provider has to be enabled for text. Set test writes questions with it.',
+        });
+      }
+      await clearOtherDefaults(id);
+      meta.isDefault = true;
+      metaChanged = true;
+    } else if (body.isDefault === false) {
+      meta.isDefault = false;
+      metaChanged = true;
+    }
+
+    // Turning text off, or deactivating the default, would leave Set test
+    // pointed at a credential that cannot write questions. Another text
+    // credential takes the flag once this save has landed.
+    let handOffDefault = false;
+    const stillDefault = meta.isDefault === true || (body.isDefault === undefined && isDefaultCredential(existing.meta));
+    const textOff = !capabilitiesOf({ provider: existing.provider, meta: meta as never }).text;
+    if (stillDefault && (textOff || body.isActive === false)) {
+      meta.isDefault = false;
+      metaChanged = true;
+      handOffDefault = true;
+    }
+
     // Rotating a Bedrock key rebuilds its region and auth mode, which are also
     // in meta - so they are merged in here rather than assigned as a whole new
     // meta object. Assigning would silently drop the fallback flag and every
@@ -473,13 +597,18 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
       select: { id: true, provider: true, label: true, baseUrl: true, keyHint: true, defaultModel: true, isActive: true, meta: true },
     });
 
+    if (handOffDefault) await promoteDefault();
+
     await audit(request.user!.sub, 'credential.update', { entity: 'ApiCredential', entityId: id, ip: request.ip });
     return { ok: true, credential, warning: keyProblem.warning };
   });
 
   app.delete('/api/admin/credentials/:id', async (request) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const existing = await prisma.apiCredential.findUnique({ where: { id }, select: { meta: true } });
     await prisma.apiCredential.delete({ where: { id } });
+    // Set test always has a default while any text credential remains.
+    if (existing && isDefaultCredential(existing.meta)) await promoteDefault();
     await audit(request.user!.sub, 'credential.delete', { entity: 'ApiCredential', entityId: id, ip: request.ip });
     return { ok: true };
   });
@@ -544,20 +673,17 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
   });
 
   /**
-   * The exact request this credential would send.
+   * The exact request this credential would send, and the place that request
+   * is edited.
    *
-   * Vendors publish a different code sample per model, and the question an
-   * administrator is really asking when they read one is "what does mine do
-   * differently?". Describing our request in prose cannot answer that; showing
-   * it can. This is assembled by buildChatRequest, the same function the real
-   * call uses, so what is displayed is what would be sent.
+   * Vendors publish a different code sample per model. Showing the body this
+   * system actually builds is the comparison, and saving an edited body is how
+   * a sample's extra fields, temperature or reply size become the next call.
+   * Assembled by buildChatRequest, the same function the real call uses.
    *
-   * Between this and Model settings, everything a vendor sample varies by is
-   * visible and adjustable from the browser. What is deliberately *not* offered
-   * is running code typed into this screen: it would execute inside the API,
-   * with the database, the key encryption and the network in reach, which turns
-   * one phished administrator password into the whole school's records. The
-   * request body is data, so it is editable; the code that sends it is not.
+   * What is deliberately not offered is running code typed into this screen:
+   * it would execute inside the API, with the database, the key encryption and
+   * the network in reach. The request body is data. The code that sends it is not.
    */
   app.get('/api/admin/credentials/:id/request', async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
@@ -566,50 +692,50 @@ export default async function adminSettingsRoutes(app: FastifyInstance) {
     const credential = await prisma.apiCredential.findUnique({ where: { id } });
     if (!credential) return reply.code(404).send({ error: 'Credential not found.' });
 
-    const model = query.model || credential.defaultModel || PROVIDERS[credential.provider]?.suggestedModels[0];
-    if (!model) return reply.code(400).send({ error: 'Choose a model first.' });
+    const preview = await requestPreview(credential, query.model);
+    if ('error' in preview) return reply.code(400).send({ error: preview.error });
+    return preview;
+  });
 
-    const provider = PROVIDERS[credential.provider];
-    if (provider?.dialect && provider.dialect !== 'openai' && provider.dialect !== 'azure') {
-      return {
-        model,
-        shown: false,
-        // Bedrock, Vertex and Oracle are signed and shaped differently, and a
-        // preview built for the OpenAI shape would be a lie about all three.
-        note: `${provider.label} does not use the OpenAI request shape - it has its own protocol and signing, `
-          + 'so there is no equivalent body to show. Model settings still apply where the provider accepts them.',
-      };
+  /**
+   * Save an edited copy of that request.
+   *
+   * The body the panel shows is what the next call sends, apart from the
+   * prompt itself. model, messages and stream_options are filled in per run,
+   * so a change to those is refused. The rest is stored on the credential.
+   */
+  app.put('/api/admin/credentials/:id/request', async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const payload = z.object({ body: z.record(z.unknown()) }).parse(request.body);
+
+    const credential = await prisma.apiCredential.findUnique({ where: { id } });
+    if (!credential) return reply.code(404).send({ error: 'Credential not found.' });
+
+    const current = await requestPreview(credential);
+    if ('error' in current) return reply.code(400).send({ error: current.error });
+    if (!current.shown || !current.body) {
+      return reply.code(400).send({ error: current.note ?? 'This provider has no editable request body.' });
     }
 
-    const call = await callParamsFor(credential);
-    const built = await buildChatRequest({
-      ...call,
-      model,
-      // Stand-ins rather than the real prompts: the shape of the request is
-      // what is being examined, and the system prompt is thousands of words
-      // that would bury it.
-      messages: [
-        { role: 'system', content: '<the question-writing system prompt>' },
-        { role: 'user', content: '<the request for this run>' },
-      ],
-      jsonMode: provider?.supportsJsonMode ?? false,
-      maxTokens: resolveCeiling(credential, model),
+    const derived = tuningFromRequestBody(payload.body, current.body, tuningOf(credential));
+    if (!derived.ok) return reply.code(400).send({ error: derived.error });
+
+    const meta: Record<string, unknown> = { ...((credential.meta ?? {}) as object) };
+    meta.tuning = derived.tuning;
+    if (derived.maxOutputTokens !== undefined) meta.maxOutputTokens = derived.maxOutputTokens;
+
+    await prisma.apiCredential.update({
+      where: { id },
+      data: { meta: meta as never },
+    });
+    await audit(request.user!.sub, 'credential.request', {
+      entity: 'ApiCredential', entityId: id, ip: request.ip,
+      detail: { maxOutputTokens: derived.maxOutputTokens ?? null },
     });
 
-    return {
-      model,
-      shown: true,
-      url: built.url,
-      // Never the key. The point is the shape of the request, and a screenshot
-      // of this pasted into a support thread must not leak a credential.
-      headers: Object.fromEntries(
-        Object.entries(built.headers).map(([k, v]) =>
-          /^authorization$/i.test(k) || /^api-key$/i.test(k) ? [k, '<your API key>'] : [k, v],
-        ),
-      ),
-      body: built.body,
-      streaming: built.streaming,
-    };
+    const fresh = await prisma.apiCredential.findUniqueOrThrow({ where: { id } });
+    const preview = await requestPreview(fresh);
+    return { ok: true, preview };
   });
 
   /**

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError } from '../../lib/api';
-import { Alert, Badge, Card, EmptyState, Modal, PageLoader, Tabs, formatDate, humanizeTag } from '../../components/ui';
+import { Alert, Badge, Card, ConfirmDelete, EmptyState, Modal, PageLoader, Tabs, formatDate, humanizeTag } from '../../components/ui';
 import { AccuracyMeter, BarChart, DataTable, LineChart, StatTile } from '../../components/charts';
 import { ContentRenderer } from '../../renderers/BlockRenderer';
 import type { Breakdown, ResultRow, WeakArea } from '../../lib/types';
@@ -44,6 +44,8 @@ export default function AdminStudentDetail() {
   const [notice, setNotice] = useState<string | null>(null);
   const [tab, setTab] = useState<'regular' | 'practice'>('regular');
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [pendingAttempt, setPendingAttempt] = useState<{ attemptId: string; title: string } | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const load = async () => {
     try {
@@ -59,15 +61,17 @@ export default function AdminStudentDetail() {
     void load();
   }, [studentId]);
 
-  const deleteAttempt = async (attemptId: string) => {
-    if (!confirm('Delete this attempt? This cannot be undone.')) return;
-    setDeleting(attemptId);
+  const deleteAttempt = async () => {
+    if (!pendingAttempt) return;
+    setDeleting(pendingAttempt.attemptId);
+    setDeleteError(null);
     try {
-      await api.delete(`/api/admin/attempts/${attemptId}`);
+      await api.delete(`/api/admin/attempts/${pendingAttempt.attemptId}`);
       setNotice('Attempt deleted.');
+      setPendingAttempt(null);
       await load();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not delete attempt.');
+      setDeleteError(err instanceof ApiError ? err.message : 'Could not delete attempt.');
     } finally {
       setDeleting(null);
     }
@@ -247,7 +251,7 @@ export default function AdminStudentDetail() {
                         <button type="button" className="tabular-nums text-ink-faint hover:underline disabled:opacity-40" disabled={r.unansweredCount === 0} onClick={() => void openDetail(r.attemptId, 'skipped')}>{r.unansweredCount}</button>
                       </td>
                       <td className="text-right">
-                        <button type="button" className="btn-ghost btn-sm text-bad" disabled={deleting === r.attemptId} onClick={() => void deleteAttempt(r.attemptId)}>
+                        <button type="button" className="btn-ghost btn-sm text-bad" disabled={deleting === r.attemptId} onClick={() => { setDeleteError(null); setPendingAttempt({ attemptId: r.attemptId, title: r.title }); }}>
                           {deleting === r.attemptId ? 'Deleting…' : 'Delete'}
                         </button>
                       </td>
@@ -307,6 +311,16 @@ export default function AdminStudentDetail() {
           )}
         </>
       )}
+      <ConfirmDelete
+        open={!!pendingAttempt}
+        title={pendingAttempt ? `Delete the attempt on ${pendingAttempt.title}?` : 'Delete this attempt?'}
+        busy={!!pendingAttempt && deleting === pendingAttempt.attemptId}
+        error={deleteError}
+        onClose={() => setPendingAttempt(null)}
+        onConfirm={() => void deleteAttempt()}
+      >
+        <p>The attempt and its answers are removed. This cannot be undone.</p>
+      </ConfirmDelete>
     </div>
   );
 }

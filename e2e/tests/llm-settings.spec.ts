@@ -41,21 +41,25 @@ test('a credential can be added and given a vendor\'s per-model settings', async
   await page.getByRole('tab', { name: 'LLM providers' }).click();
   await expect(page.getByText(LABEL).first()).toBeVisible({ timeout: 20_000 });
 
-  // --- the settings a vendor's sample varies by -----------------------------
+  // --- the fields a vendor's sample varies by, edited on the request itself --
   const row = page.locator('tr', { hasText: LABEL }).first();
-  await row.getByRole('button', { name: 'Model settings' }).click();
-  await expect(page.getByText(`Model settings for ${LABEL}`)).toBeVisible({ timeout: 15_000 });
+  await row.getByRole('button', { name: 'Show the request' }).click();
+  const panel = page.locator('td', { hasText: 'What this credential sends' }).first();
+  await expect(panel).toBeVisible({ timeout: 15_000 });
 
-  await page.getByLabel('Thinking model').selectOption('yes');
-  await page.getByLabel('Temperature').fill('1');
-  await page.getByLabel('Top P').fill('0.95');
-  await page.getByLabel('Seed').fill('42');
-  // Copied from build.nvidia.com's extra_body for this model.
-  await page.locator('textarea').first()
-    .fill('{"chat_template_kwargs":{"enable_thinking":true},"reasoning_budget":16384}');
-  await page.getByRole('button', { name: 'Save settings' }).click();
+  const box = panel.getByLabel('Request body');
+  const body = JSON.parse(await box.inputValue());
+  body.temperature = 1;
+  body.top_p = 0.95;
+  body.seed = 42;
+  body.chat_template_kwargs = { enable_thinking: true };
+  body.reasoning_budget = 16384;
+  await box.fill(JSON.stringify(body, null, 2));
+  await panel.getByRole('button', { name: 'Save request' }).click();
 
-  await expect(page.getByText(`Model settings for ${LABEL}`)).toBeHidden({ timeout: 15_000 });
+  await expect(panel.getByText('Saved.')).toBeVisible({ timeout: 15_000 });
+  await expect(panel).toContainText('chat_template_kwargs');
+  await expect(panel).toContainText('16384');
   expect(problems).toEqual([]);
 });
 
@@ -65,18 +69,25 @@ test('invalid JSON is refused with a reason, and so is anything the server owns'
   await expect(page.getByText(LABEL).first()).toBeVisible({ timeout: 20_000 });
 
   const row = page.locator('tr', { hasText: LABEL }).first();
-  await row.getByRole('button', { name: 'Model settings' }).click();
-  await expect(page.getByText(`Model settings for ${LABEL}`)).toBeVisible({ timeout: 15_000 });
+  await row.getByRole('button', { name: 'Show the request' }).click();
+  const panel = page.locator('td', { hasText: 'What this credential sends' }).first();
+  const box = panel.getByLabel('Request body');
+  await expect(box).toBeVisible({ timeout: 15_000 });
 
-  await page.locator('textarea').first().fill('{not json');
-  await page.getByRole('button', { name: 'Save settings' }).click();
-  await expect(page.getByText(/that is not valid JSON/i)).toBeVisible({ timeout: 10_000 });
+  await box.fill('{not json');
+  await panel.getByRole('button', { name: 'Save request' }).click();
+  await expect(panel.getByText(/that is not valid JSON/i)).toBeVisible({ timeout: 10_000 });
 
-  // A setting must never be able to send the request somewhere else, and the
-  // refusal has to say so rather than dropping the field in silence.
-  await page.locator('textarea').first().fill('{"messages":"hijack","model":"other"}');
-  await page.getByRole('button', { name: 'Save settings' }).click();
-  await expect(page.getByText(/cannot include/i)).toBeVisible({ timeout: 15_000 });
+  // Rewriting the prompt must not be stored in silence. The server fills
+  // model and messages in for each run. Re-open so the box holds real JSON.
+  await row.getByRole('button', { name: 'Close' }).click();
+  await row.getByRole('button', { name: 'Show the request' }).click();
+  const fresh = JSON.parse(await box.inputValue());
+  fresh.messages = [{ role: 'user', content: 'hijack' }];
+  fresh.model = 'other';
+  await box.fill(JSON.stringify(fresh, null, 2));
+  await panel.getByRole('button', { name: 'Save request' }).click();
+  await expect(panel.getByText(/the server sets/i)).toBeVisible({ timeout: 15_000 });
 });
 
 test('the request preview shows what would be sent, and never the key', async ({ page }) => {

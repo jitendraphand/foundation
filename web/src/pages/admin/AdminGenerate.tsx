@@ -7,9 +7,9 @@ import type { Tag } from '../../lib/types';
 /**
  * "Set test" - the generation screen.
  *
- * The admin controls the provider, the model, the full system prompt, the
- * difficulty/cognitive mix and the exact user prompt. Nothing is hidden: the
- * prompt preview shows byte-for-byte what will be sent.
+ * Which provider writes the questions is chosen in Settings, as the default
+ * credential. This screen does not ask, and it does not name the provider or
+ * the model. The prompt preview still shows byte-for-byte what will be sent.
  */
 
 interface Credential {
@@ -21,6 +21,8 @@ interface Credential {
   defaultModel: string | null;
   effectiveMaxTokens?: number | null;
   maxOutputTokens?: number | null;
+  /** The credential Settings marked for Set test. */
+  isDefault?: boolean;
 }
 
 interface Template {
@@ -119,7 +121,7 @@ export default function AdminGenerate() {
         setCtx(data);
         const kind = practiceFor ? 'PRACTICE' : 'REGULAR';
         const template = data.templates.find((t) => t.isDefault && t.kind === kind) ?? data.templates[0];
-        const credential = data.credentials[0];
+        const credential = data.credentials.find((c) => c.isDefault) ?? data.credentials[0];
         const subjects = data.curriculum.filter((n) => n.level === 'SUBJECT');
         const defaultSubject = seedSubject || subjects[0]?.label || '';
         setForm((f) => ({
@@ -135,7 +137,6 @@ export default function AdminGenerate() {
   }, [practiceFor, seedSubject]);
 
   const credential = ctx?.credentials.find((c) => c.id === form.credentialId);
-  const provider = ctx?.providers.find((p) => p.id === credential?.provider);
 
   const [pipeline, setPipeline] = useState<{ mode: string; cheapCredentialId?: string | null; cacheSystemPrompt?: boolean; tokensPerQuestion?: number | null } | null>(null);
   useEffect(() => {
@@ -144,13 +145,14 @@ export default function AdminGenerate() {
       .catch(() => undefined);
   }, []);
 
-  // Turns/batches: derived from the selected credential's max output tokens.
-  // Uses pipeline tokensPerQuestion if configured, otherwise 1400 (adaptive on server may be lower, so hint is conservative).
+  // Same arithmetic as questionsPerCall on the server. No reply limit means
+  // ten per call. A reply limit is used in full: 200000 tokens at 1500 each
+  // is one call for a hundred questions, not ten calls of ten.
   const perCall = useMemo(() => {
     const ceiling = (credential as Credential | undefined)?.effectiveMaxTokens ?? (credential as Credential | undefined)?.maxOutputTokens ?? null;
     const tpq = pipeline?.tokensPerQuestion ?? 1400;
     if (!ceiling || ceiling <= 0) return 10;
-    return Math.max(1, Math.min(10, Math.floor((ceiling * 0.9) / tpq)));
+    return Math.max(1, Math.floor((ceiling * 0.9) / tpq));
   }, [credential, pipeline]);
   const turnCount = useMemo(() => {
     const base = Math.ceil(form.count / perCall);
@@ -270,7 +272,7 @@ export default function AdminGenerate() {
     return (
       <Card title="Set test">
         <Alert tone="warn">
-          No visible LLM provider is available. Add an API key in <strong>Settings → LLM providers</strong> and make sure at least one is marked <strong>Visible</strong> and enabled for Text.
+          No provider is available for questions. Add an API key in <strong>Settings → LLM providers</strong>, mark it as the default, and enable it for Text.
         </Alert>
         <button type="button" className="btn-primary btn-sm mt-3" onClick={() => navigate('/admin/settings')}>
           Go to settings
@@ -352,39 +354,11 @@ export default function AdminGenerate() {
         </Card>
       )}
 
-      <Card title="Provider">
-        <div className="grid sm:grid-cols-2 gap-4">
-          <Field label="API credential">
-            <select
-              className="input"
-              value={form.credentialId}
-              onChange={(e) => {
-                const next = ctx.credentials.find((c) => c.id === e.target.value);
-                setForm((f) => ({ ...f, credentialId: e.target.value, model: next?.defaultModel ?? '' }));
-              }}
-            >
-              {ctx.credentials.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.label} ({c.provider} · {c.keyHint})
-                </option>
-              ))}
-            </select>
-          </Field>
-
-          <Field label="Model" hint={provider?.supportsJsonMode ? 'This provider supports strict JSON mode.' : 'Strict JSON is enforced by validation and retry.'}>
-            <input
-              className="input font-mono text-xs"
-              value={form.model}
-              onChange={(e) => setForm((f) => ({ ...f, model: e.target.value }))}
-              list="model-suggestions"
-              placeholder="provider/model-name"
-            />
-            <datalist id="model-suggestions">
-              {provider?.suggestedModels.map((m) => <option key={m} value={m} />)}
-            </datalist>
-          </Field>
-        </div>
-      </Card>
+      {!form.model && (
+        <Alert tone="warn">
+          The default provider has no model set. Choose its default model in <strong>Settings → LLM providers</strong>.
+        </Alert>
+      )}
 
       <Card title="Test content">
         <div className="space-y-4">
@@ -425,11 +399,14 @@ export default function AdminGenerate() {
               hint={
                 (() => {
                   const tpq = pipeline?.tokensPerQuestion ?? 1400;
+                  const limit = credential?.effectiveMaxTokens;
                   const base = turnCount > 1
-                    ? `Asked for in ${turnCount} turn${turnCount === 1 ? '' : 's'} of at most ${perCall} — allow a few minutes.${credential?.effectiveMaxTokens ? ` (limit ${credential.effectiveMaxTokens} tokens, ~${tpq} tok/Q → ${perCall}/turn)` : ''}`
+                    ? `Asked for in ${turnCount} turns of at most ${perCall} — allow a few minutes.${limit ? ` (limit ${limit} tokens, ~${tpq} tok/Q → ${perCall}/turn)` : ''}`
                     : perCall < 10
-                      ? `At most ${perCall} per turn due to the ${credential?.effectiveMaxTokens} token limit (~${tpq} tok/Q).`
-                      : undefined;
+                      ? `At most ${perCall} per turn due to the ${limit ?? 'output'} token limit (~${tpq} tok/Q).`
+                      : limit
+                        ? `One call (limit ${limit} tokens, ~${tpq} tok/Q).`
+                        : undefined;
                   const extra = !pipeline?.tokensPerQuestion ? ' Actual often 600–1000, adaptive after 3 runs will reduce turns.' : '';
                   const pipe = pipeline?.mode && pipeline.mode !== 'single' ? ` Pipeline ${pipeline.mode} (2 calls per batch).` : '';
                   return base ? base + extra + pipe : extra ? 'Actual often less than estimate — adaptive will optimize.' : undefined;
@@ -748,7 +725,6 @@ function RecentRuns({ refreshKey }: { refreshKey: string }) {
                   — {run.questionsAccepted ?? 0} of {run.questionsRequested} accepted
                 </span>
               </span>
-              <span className="text-[11px] text-ink-faint font-mono truncate">{run.model}</span>
               <span className="text-[11px] text-ink-faint ml-auto whitespace-nowrap">
                 {formatDate(run.createdAt, true)}
               </span>

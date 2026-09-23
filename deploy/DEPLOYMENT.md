@@ -416,59 +416,26 @@ The line also shows how long it took, how long until the first words appeared,
 whether the reply streamed, and how many tokens the reply used — which is what
 tells you whether a model is affordable at fifty questions a run.
 
-### Model settings: when a model needs something different
+### Editing the request, when a model needs something different
 
 Vendors hand out a per-model code sample, and the samples differ. NVIDIA's, for
 instance, differ by sampling defaults, by an `extra_body` carrying
 `chat_template_kwargs: {enable_thinking: true}` and a reasoning budget, and by
 whether the answer has to be read out of `reasoning_content`.
 
-None of that is a different protocol, so none of it needs different code, and
-none of it should mean waiting for a new release when a model appears. It is
-settings, and they live on the credential: **Admin → Settings → LLM providers →
-Model settings**.
+None of that is a different protocol. **Admin → Settings → LLM providers →
+Show the request** prints the exact JSON this system would send, with the key
+replaced by a placeholder. Edit that JSON to match the sample — temperature,
+top_p, the reply size, and any extra fields — and **Save request**. The next
+call uses what you saved. **Try 2 questions** is how to see whether it worked.
 
-| Setting | Default | When to touch it |
-|---|---|---|
-| **Thinking model** | Work it out | Whether the reply carries separate working. The guess reads the model id and is usually right; override it when a new model is not recognised, or to switch thinking off on a model that offers the choice. |
-| **JSON mode** | As the provider | Whether to ask for a JSON object. Force it **on** for an OpenAI-compatible endpoint that supports it but is not recognised as doing so; **off** for one that errors when asked. |
-| **Temperature**, **Top P**, **Seed** | the provider's own | Copy from the vendor's sample. A seed makes a run repeatable, which is mostly useful when reporting a problem. |
-| **Read the reply as it arrives** | on | Turn off only for an endpoint that cannot stream. You lose the silence alarm described above. |
-| **Extra request fields** | empty | Anything else from the sample's `extra_body`, as JSON. Merged into every request on this credential. |
+`model`, `messages` and `stream_options` are filled in for each run. Changing
+them is refused, so an edit cannot send a different prompt. Invalid JSON is
+refused with a reason. Nothing typed there is executed.
 
-The extra fields box takes **JSON, never code**. Nothing typed there is
-executed; it is parsed and merged into the request body. Invalid JSON is refused
-with a reason before it can be saved, and the fields the server owns — `model`,
-`messages`, `stream`, `stream_options` — are refused rather than quietly
-dropped, so a setting can never redirect a request somewhere else.
-
-So the NVIDIA sample that reads
-
-```python
-extra_body={"chat_template_kwargs": {"enable_thinking": True}, "reasoning_budget": 16384},
-temperature=1, top_p=0.95
-```
-
-becomes: Temperature `1`, Top P `0.95`, and in the extra fields box
-
-```json
-{ "chat_template_kwargs": { "enable_thinking": true }, "reasoning_budget": 16384 }
-```
-
-Save, then press **Try 2 questions**.
-
-### Seeing the request, and why you cannot edit the code
-
-**Show the request** on any credential row prints the exact JSON this system
-would send for that model, with your key replaced by a placeholder — and a
-`curl` version of the same thing, so you can run it outside the system when a
-provider's support desk asks what you sent.
-
-That panel exists to answer the question behind "why is the code different for
-every model". Put a vendor's sample next to it and every difference is visible,
-and every difference that matters is a **Model settings** field. It is built by
-the same function that makes the real call, so it cannot drift into describing
-a request we do not actually send.
+A `curl` version of the same request is under the editor, so you can run it
+outside the system when a provider's support desk asks what you sent. It is
+built by the same function that makes the real call.
 
 What is deliberately not offered is a box for typing code that the server then
 runs. It is worth being plain about why, because it sounds like the more
@@ -904,7 +871,7 @@ should reach a phone.
 |---|---|
 | HTTP Method | `POST` |
 | Path | `whatsapp-reset` |
-| Response Mode | **Immediately** — anything else makes the API wait |
+| Response | **When Last Node Finishes** — the API waits (up to 20 seconds) and only then changes the password. "Immediately" answers before WhatsApp has accepted the message, so a failure looks like a success |
 
 **Node 2 — WhatsApp Business Cloud** (or HTTP Request to the Graph API). It
 receives `{ to, message, from }`:
@@ -921,8 +888,7 @@ and never reaches Foundation.
 
 A second, independent workflow — name it `email-reset`, same shape:
 
-**Node 1 — Webhook.** Method `POST`, path `email-reset`, Response Mode
-**Immediately**. It receives `{ to, subject, message, from }`.
+**Node 1 — Webhook.** Method `POST`, path `email-reset`, response **When Last Node Finishes** (same reason as WhatsApp: the password is changed only after this call succeeds, and the API waits up to 20 seconds). It receives `{ to, subject, message, from }`.
 
 **Node 2 — Email Send** (or Gmail / SMTP / SES / HTTP Request — any email
 node):
@@ -1000,10 +966,12 @@ audited. Mobile numbers stay System-Administrator-only.
 | Gmail returns 535 | Regular password instead of an App Password | Enable 2FA, create an App Password, use that |
 | `Too many requests` at the Foundation side | Reset is rate limited to 5 per 15 minutes per IP | Wait, or `docker compose restart api` to clear |
 
-The reset itself is never lost to a delivery failure: the password has already
-been changed and the old one no longer works. Without n8n the reset still
-works but delivery is logged on the server (`[whatsapp] to 91…` or `[email] to
-…` in the API logs) and the office sets passwords in person as before.
+A delivery failure does not change the password: the sign-in screen says the
+message could not be sent, and the old password still works. The API log has
+the reason (`[reset] email delivery failed …`). Without a webhook configured
+at all, the reset still works but delivery is logged on the server
+(`[whatsapp] to 91…` or `[email] to …`) and the office reads the new password
+from that log.
 
 #### Step-up tests
 
@@ -1672,8 +1640,8 @@ tokens, which a model can satisfy while being quite unable to write a question.
 Press **Try 2 questions** on that credential — it runs the real prompt and says
 which of the four things went wrong. Most often it is a thinking model spending
 its whole budget on working out and never starting the answer, which the report
-names outright and which is fixed by raising the **Reply limit** or setting
-**Model settings → Thinking model → No**. See [Checking a model before you rely
+names outright and which is fixed by raising the **Reply limit** on that
+credential. See [Checking a model before you rely
 on it](#checking-a-model-before-you-rely-on-it).
 
 **"Could not decrypt stored API key"** — `ENCRYPTION_KEY` in `.env` changed.

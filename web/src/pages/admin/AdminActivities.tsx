@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, ApiError } from '../../lib/api';
-import { Alert, Badge, Card, EmptyState, Field, Modal, PageLoader, Pagination, formatDate } from '../../components/ui';
+import { Alert, Badge, Card, ConfirmDelete, EmptyState, Field, Modal, PageLoader, Pagination, formatDate } from '../../components/ui';
 import { BlocksRenderer } from '../../renderers/BlockRenderer';
 import { CARD_ACCENTS, type CardAccent } from '../../lib/types';
 import type {
@@ -37,6 +37,9 @@ export default function AdminActivities() {
   const [page, setPage] = useState(1);
   const [editing, setEditing] = useState<AdminActivity | 'new' | null>(null);
   const [viewing, setViewing] = useState<AdminActivity | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<AdminActivity | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -74,15 +77,19 @@ export default function AdminActivities() {
     }
   };
 
-  const remove = async (activity: AdminActivity) => {
-    if (!confirm(`Delete "${activity.title}"? Students will no longer see it.`)) return;
-    setError(null);
+  const remove = async () => {
+    if (!pendingDelete) return;
+    setDeleteBusy(true);
+    setDeleteError(null);
     try {
-      const res = await api.delete<{ mode: string; message?: string }>(`/api/admin/activities/${activity.id}`);
+      const res = await api.delete<{ mode: string; message?: string }>(`/api/admin/activities/${pendingDelete.id}`);
       setNotice(res.message ?? 'Activity deleted.');
+      setPendingDelete(null);
       await load();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not delete the activity.');
+      setDeleteError(err instanceof ApiError ? err.message : 'Could not delete the activity.');
+    } finally {
+      setDeleteBusy(false);
     }
   };
 
@@ -198,7 +205,7 @@ export default function AdminActivities() {
                       <button type="button" className="btn-ghost btn-sm" onClick={() => setViewing(a)}>
                         Who
                       </button>
-                      <button type="button" className="btn-ghost btn-sm text-bad" onClick={() => void remove(a)}>
+                      <button type="button" className="btn-ghost btn-sm text-bad" onClick={() => { setDeleteError(null); setPendingDelete(a); }}>
                         Delete
                       </button>
                     </td>
@@ -224,6 +231,17 @@ export default function AdminActivities() {
       )}
 
       {viewing && <CompletionsModal activity={viewing} onClose={() => setViewing(null)} onChanged={() => void load()} />}
+
+      <ConfirmDelete
+        open={!!pendingDelete}
+        title={pendingDelete ? `Delete ${pendingDelete.title}?` : 'Delete this activity?'}
+        busy={deleteBusy}
+        error={deleteError}
+        onClose={() => setPendingDelete(null)}
+        onConfirm={() => void remove()}
+      >
+        <p>Students will no longer see this activity. This cannot be undone.</p>
+      </ConfirmDelete>
     </div>
   );
 }

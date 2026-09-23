@@ -35,9 +35,9 @@ const generateSchema = z.object({
     topic: z.string().max(200).optional(),
     subtopic: z.string().max(200).optional(),
     grade: z.string().max(20).optional(),
-    // Split into batches of ten behind the scenes; see planBatches, so what
-    // one reply can hold is no longer the limit. The remaining bound is
-    // patience - a large run is many sequential calls - not the format.
+    // Split only when one reply cannot hold them; see questionsPerCall. A
+    // reply limit of 200000 tokens at 1500 each is one call for a hundred
+    // questions. The remaining bound is patience, not a fixed batch of ten.
     count: z.number().int().min(1).max(500),
     marksPerQuestion: z.number().min(0.25).max(100).default(1),
     difficultyMix: z.record(z.number().int().min(0)).optional(),
@@ -182,21 +182,30 @@ export default async function adminQuestionRoutes(app: FastifyInstance) {
       }),
     ]);
 
-    // A credential kept only for drawing pictures has no business in the
-    // "which model writes the questions" dropdown; see llm/capabilities.ts.
-    // Visibility is controlled in Settings > LLM providers — only credentials
-    // marked visible are offered on the Set test screen.
+    // A credential kept only for drawing pictures has no business writing
+    // questions; see llm/capabilities.ts. Set test uses the one marked
+    // default and does not offer a choice. A hidden credential is still
+    // usable when it is that default.
     const credentials = allCredentials
       .filter((c) => capabilitiesOf(c).text)
-      .filter((c) => (c.meta as { visible?: boolean } | null)?.visible !== false)
+      .filter((c) => {
+        const flags = c.meta as { visible?: boolean; isDefault?: boolean } | null;
+        return flags?.isDefault === true || flags?.visible !== false;
+      })
       .map(({ meta, ...rest }) => {
-        const m = meta as { maxOutputTokens?: number; tokenCeilings?: Record<string, number> } | null;
+        const m = meta as { maxOutputTokens?: number; tokenCeilings?: Record<string, number>; isDefault?: boolean } | null;
         const model = (rest as { defaultModel: string | null }).defaultModel ?? '';
         const ceiling = resolveCeiling({ provider: rest.provider, meta: meta as never }, model)
           ?? (m?.maxOutputTokens && m.maxOutputTokens > 0 ? m.maxOutputTokens : undefined)
           ?? PROVIDERS[rest.provider]?.maxOutputTokens;
-        return { ...rest, effectiveMaxTokens: ceiling ?? null, maxOutputTokens: m?.maxOutputTokens ?? null };
-      });
+        return {
+          ...rest,
+          effectiveMaxTokens: ceiling ?? null,
+          maxOutputTokens: m?.maxOutputTokens ?? null,
+          isDefault: m?.isDefault === true,
+        };
+      })
+      .sort((a, b) => Number(b.isDefault) - Number(a.isDefault));
 
     return {
       tags: {

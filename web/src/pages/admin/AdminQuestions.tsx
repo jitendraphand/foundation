@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { api, ApiError } from '../../lib/api';
-import { Alert, Badge, Card, EmptyState, Field, Modal, PageLoader, Pagination, Spinner, humanizeTag } from '../../components/ui';
+import { Alert, Badge, Card, ConfirmDelete, EmptyState, Field, Modal, PageLoader, Pagination, Spinner, humanizeTag } from '../../components/ui';
 import { ContentRenderer, BlocksRenderer } from '../../renderers/BlockRenderer';
 import type { BankQuestion, Block, ImagePrompt, Tag } from '../../lib/types';
 
@@ -64,6 +64,9 @@ export default function AdminQuestions() {
   const runId = params.get('generationRunId') ?? '';
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
+  const [pendingDelete, setPendingDelete] = useState<string[] | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -112,14 +115,11 @@ export default function AdminQuestions() {
    * that is the only list where an admin has already decided the question is
    * no good; anywhere else this would be a slip waiting to happen.
    */
-  const removeForGood = async (ids: string[]) => {
+  const removeForGood = async () => {
+    const ids = pendingDelete ?? [];
     if (ids.length === 0) return;
-    const plural = ids.length === 1 ? '' : 's';
-    if (!window.confirm(
-      `Permanently delete ${ids.length} question${plural}? This cannot be undone. ` +
-      'Any that students have already answered will be kept instead, so released results stay explainable.',
-    )) return;
-
+    setDeleteBusy(true);
+    setDeleteError(null);
     try {
       const results = await Promise.all(ids.map((id) => api.delete<{ mode: string }>(`/api/admin/questions/${id}`)));
       const hard = results.filter((r) => r.mode === 'hard').length;
@@ -129,9 +129,12 @@ export default function AdminQuestions() {
           (soft ? ` ${soft} had already been answered, so ${soft === 1 ? 'it was' : 'they were'} retired instead.` : ''),
       );
       setSelected(new Set());
+      setPendingDelete(null);
       await load();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not delete those questions.');
+      setDeleteError(err instanceof ApiError ? err.message : 'Could not delete those questions.');
+    } finally {
+      setDeleteBusy(false);
     }
   };
 
@@ -282,7 +285,7 @@ export default function AdminQuestions() {
               </button>
             )}
             {bucket === 'REJECTED' && (
-              <button type="button" className="btn-secondary btn-sm text-bad" onClick={() => void removeForGood([...selected])}>
+              <button type="button" className="btn-secondary btn-sm text-bad" onClick={() => { setDeleteError(null); setPendingDelete([...selected]); }}>
                 Delete for good
               </button>
             )}
@@ -369,6 +372,20 @@ export default function AdminQuestions() {
           }}
         />
       )}
+
+      <ConfirmDelete
+        open={!!pendingDelete}
+        title={`Delete ${pendingDelete?.length ?? 0} question${pendingDelete?.length === 1 ? '' : 's'} for good?`}
+        busy={deleteBusy}
+        error={deleteError}
+        onClose={() => setPendingDelete(null)}
+        onConfirm={() => void removeForGood()}
+      >
+        <p>
+          This cannot be undone. Any question students have already answered is kept instead, so released results stay
+          explainable.
+        </p>
+      </ConfirmDelete>
     </div>
   );
 }
@@ -880,6 +897,7 @@ function FigurePanel({ question, onChanged }: { question: BankQuestion; onChange
   const [busy, setBusy] = useState<'redraw' | 'replace' | 'save' | null>(null);
   const [candidate, setCandidate] = useState<{ block: Block; usedLabel: string; usedModel: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [confirmReplace, setConfirmReplace] = useState(false);
 
   if (!figure) return null;
   const spec = figure.type === 'svg' || figure.type === 'mermaid' ? figure.spec : undefined;
@@ -919,11 +937,11 @@ function FigurePanel({ question, onChanged }: { question: BankQuestion; onChange
   // Destructive on purpose, and said plainly: the figure goes before anything
   // replaces it, so there is never a moment where both exist.
   const toPicture = async () => {
-    if (!window.confirm('Delete this figure and ask for a generated picture instead? The drawing is removed straight away.')) return;
     setBusy('replace');
     setError(null);
     try {
       await api.post(`/api/admin/questions/${question.id}/figure/to-picture`, { index });
+      setConfirmReplace(false);
       setOpen(false);
       onChanged();
     } catch (err) {
@@ -1005,9 +1023,20 @@ function FigurePanel({ question, onChanged }: { question: BankQuestion; onChange
           <button type="button" className="btn-primary btn-sm" onClick={() => void redraw()} disabled={busy !== null}>
             {busy === 'redraw' ? <Spinner label="Drawing" /> : 'Draw it again'}
           </button>
-          <button type="button" className="btn-secondary btn-sm" onClick={() => void toPicture()} disabled={busy !== null}>
+          <button type="button" className="btn-secondary btn-sm" onClick={() => setConfirmReplace(true)} disabled={busy !== null}>
             {busy === 'replace' ? <Spinner label="Removing" /> : 'Delete it and use a generated picture'}
           </button>
+          <ConfirmDelete
+            open={confirmReplace}
+            title="Delete this figure?"
+            busy={busy === 'replace'}
+            error={null}
+            actionLabel="Delete the figure"
+            onClose={() => setConfirmReplace(false)}
+            onConfirm={() => void toPicture()}
+          >
+            <p>The drawing is removed straight away and the question asks for a generated picture instead.</p>
+          </ConfirmDelete>
         </div>
       )}
     </div>

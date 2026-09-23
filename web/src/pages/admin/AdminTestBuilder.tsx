@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api, ApiError } from '../../lib/api';
-import { Alert, Badge, Card, EmptyState, Field, PageLoader, Tabs, formatDate, humanizeTag } from '../../components/ui';
+import { Alert, Badge, Card, ConfirmDelete, EmptyState, Field, PageLoader, Tabs, formatDate, humanizeTag } from '../../components/ui';
 
 class BuilderErrorBoundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean; error: string | null }> {
   state = { hasError: false, error: null as string | null };
@@ -76,6 +76,8 @@ export default function AdminTestBuilder() {
   const [newTitle, setNewTitle] = useState('');
   const [renameBusy, setRenameBusy] = useState(false);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -139,15 +141,14 @@ export default function AdminTestBuilder() {
   };
 
   const removeTest = async () => {
-    if (!confirm(`Delete "${test.title}"? This will delete the test and all ${test._count.attempts} attempt(s) and answers permanently. This cannot be undone.`)) return;
     setDeleteBusy(true);
-    setError(null);
+    setDeleteError(null);
     try {
       const res = await api.delete<{ message?: string }>(`/api/admin/tests/${test.id}`);
       setNotice(res.message ?? 'Test deleted.');
       navigate('/admin/tests');
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not delete test.');
+      setDeleteError(err instanceof ApiError ? err.message : 'Could not delete test.');
     } finally {
       setDeleteBusy(false);
     }
@@ -169,8 +170,8 @@ export default function AdminTestBuilder() {
             <div className="flex items-center gap-2 mt-1">
               <h1 className="text-lg font-semibold">{test.title}</h1>
               <button type="button" className="btn-ghost btn-sm" onClick={() => { setNewTitle(test.title); setRenaming(true); }}>Rename</button>
-              <button type="button" className="btn-ghost btn-sm text-bad" disabled={deleteBusy} onClick={() => void removeTest()}>
-                {deleteBusy ? 'Deleting…' : 'Delete'}
+              <button type="button" className="btn-ghost btn-sm text-bad" disabled={deleteBusy} onClick={() => { setDeleteError(null); setConfirmingDelete(true); }}>
+                Delete
               </button>
             </div>
           )}
@@ -257,6 +258,20 @@ export default function AdminTestBuilder() {
         onChange={setTab}
       />
 
+      <ConfirmDelete
+        open={confirmingDelete}
+        title={`Delete ${test.title}?`}
+        busy={deleteBusy}
+        error={deleteError}
+        onClose={() => setConfirmingDelete(false)}
+        onConfirm={() => void removeTest()}
+      >
+        <p>
+          This deletes the test and all {test._count.attempts} attempt{test._count.attempts === 1 ? '' : 's'} and their
+          answers. It cannot be undone.
+        </p>
+      </ConfirmDelete>
+
       {tab === 'questions' ? (
         <QuestionPicker test={test} locked={locked} onChanged={load} />
       ) : tab === 'results' ? (
@@ -282,6 +297,8 @@ function FlaggedQuestions({ testId, onCountChange }: { testId: string; onCountCh
   }> | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [pendingFlag, setPendingFlag] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [filter, setFilter] = useState<'OPEN' | 'RESOLVED' | 'DISMISSED' | ''>('');
 
   const load = useCallback(async () => {
@@ -317,14 +334,16 @@ function FlaggedQuestions({ testId, onCountChange }: { testId: string; onCountCh
     }
   };
 
-  const remove = async (id: string) => {
-    if (!confirm('Delete this flag?')) return;
-    setBusy(id);
+  const remove = async () => {
+    if (!pendingFlag) return;
+    setBusy(pendingFlag);
+    setDeleteError(null);
     try {
-      await api.delete(`/api/admin/flags/${id}`);
+      await api.delete(`/api/admin/flags/${pendingFlag}`);
+      setPendingFlag(null);
       await load();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not delete flag.');
+      setDeleteError(err instanceof ApiError ? err.message : 'Could not delete flag.');
     } finally {
       setBusy(null);
     }
@@ -394,13 +413,23 @@ function FlaggedQuestions({ testId, onCountChange }: { testId: string; onCountCh
                   </button>
                 </>
               )}
-              <button type="button" className="btn-ghost btn-sm text-bad" disabled={busy === flag.id} onClick={() => void remove(flag.id)}>
+              <button type="button" className="btn-ghost btn-sm text-bad" disabled={busy === flag.id} onClick={() => { setDeleteError(null); setPendingFlag(flag.id); }}>
                 Delete flag
               </button>
             </div>
           </Card>
         ))}
       </div>
+      <ConfirmDelete
+        open={!!pendingFlag}
+        title="Delete this flag?"
+        busy={busy === pendingFlag}
+        error={deleteError}
+        onClose={() => setPendingFlag(null)}
+        onConfirm={() => void remove()}
+      >
+        <p>The student’s report of a problem with this question is removed. The question itself stays.</p>
+      </ConfirmDelete>
     </div>
   );
 }
@@ -727,7 +756,9 @@ function TestResults({ testId }: { testId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [deleting, setDeleting] = useState<string | null>(null);
-  const [purgeConfirm, setPurgeConfirm] = useState(false);
+  const [pendingAttempt, setPendingAttempt] = useState<string | null>(null);
+  const [purgeOpen, setPurgeOpen] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -743,33 +774,32 @@ function TestResults({ testId }: { testId: string }) {
     void load();
   }, [load]);
 
-  const deleteAttempt = async (attemptId: string) => {
-    if (!confirm('Delete this attempt? The student will be able to retake if attempts remain. This cannot be undone.')) return;
-    setDeleting(attemptId);
+  const deleteAttempt = async () => {
+    if (!pendingAttempt) return;
+    setDeleting(pendingAttempt);
+    setDeleteError(null);
     try {
-      await api.delete(`/api/admin/attempts/${attemptId}`);
+      await api.delete(`/api/admin/attempts/${pendingAttempt}`);
       setNotice('Attempt deleted.');
+      setPendingAttempt(null);
       await load();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not delete attempt.');
+      setDeleteError(err instanceof ApiError ? err.message : 'Could not delete attempt.');
     } finally {
       setDeleting(null);
     }
   };
 
   const purgeAll = async () => {
-    if (!purgeConfirm) {
-      setPurgeConfirm(true);
-      return;
-    }
     setDeleting('purge');
+    setDeleteError(null);
     try {
       const res = await api.delete<{ deleted: number; message: string }>(`/api/admin/tests/${testId}/attempts`, { confirm: 'DELETE' });
       setNotice(res.message);
-      setPurgeConfirm(false);
+      setPurgeOpen(false);
       await load();
     } catch (err) {
-      setError(err instanceof ApiError ? err.message : 'Could not purge test data.');
+      setDeleteError(err instanceof ApiError ? err.message : 'Could not purge test data.');
     } finally {
       setDeleting(null);
     }
@@ -813,19 +843,9 @@ function TestResults({ testId }: { testId: string }) {
 
       {data.attempts.length > 0 && (
         <div className="flex justify-end">
-          {!purgeConfirm ? (
-            <button type="button" className="btn-ghost btn-sm text-bad" onClick={() => setPurgeConfirm(true)}>
-              Delete all test data
-            </button>
-          ) : (
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-bad">This will delete all {data.attempts.length} attempt(s) and answers for this test. Cannot be undone.</span>
-              <button type="button" className="btn-primary btn-sm bg-bad text-white" disabled={deleting === 'purge'} onClick={() => void purgeAll()}>
-                {deleting === 'purge' ? 'Deleting…' : 'Confirm delete all'}
-              </button>
-              <button type="button" className="btn-secondary btn-sm" onClick={() => setPurgeConfirm(false)}>Cancel</button>
-            </div>
-          )}
+          <button type="button" className="btn-ghost btn-sm text-bad" onClick={() => { setDeleteError(null); setPurgeOpen(true); }}>
+            Delete all test data
+          </button>
         </div>
       )}
 
@@ -897,7 +917,7 @@ function TestResults({ testId }: { testId: string }) {
                       type="button"
                       className="btn-ghost btn-sm text-bad"
                       disabled={deleting === attempt.id}
-                      onClick={() => void deleteAttempt(attempt.id)}
+                      onClick={() => { setDeleteError(null); setPendingAttempt(attempt.id); }}
                     >
                       {deleting === attempt.id ? 'Deleting…' : 'Delete'}
                     </button>
@@ -910,6 +930,32 @@ function TestResults({ testId }: { testId: string }) {
       </Card>
 
       <StillToSit testId={testId} />
+
+      <ConfirmDelete
+        open={!!pendingAttempt}
+        title="Delete this attempt?"
+        busy={deleting === pendingAttempt}
+        error={deleteError}
+        onClose={() => setPendingAttempt(null)}
+        onConfirm={() => void deleteAttempt()}
+      >
+        <p>The attempt and its answers are removed. The student can sit again if attempts remain. This cannot be undone.</p>
+      </ConfirmDelete>
+
+      <ConfirmDelete
+        open={purgeOpen}
+        title="Delete all test data?"
+        busy={deleting === 'purge'}
+        error={deleteError}
+        actionLabel="Delete all"
+        onClose={() => setPurgeOpen(false)}
+        onConfirm={() => void purgeAll()}
+      >
+        <p>
+          This deletes all {data.attempts.length} attempt{data.attempts.length === 1 ? '' : 's'} and their answers for
+          this test. The paper itself stays. This cannot be undone.
+        </p>
+      </ConfirmDelete>
     </div>
   );
 }

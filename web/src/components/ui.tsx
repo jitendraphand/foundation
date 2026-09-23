@@ -1,4 +1,4 @@
-import { Children, Fragment, cloneElement, isValidElement, useEffect, useId, useRef } from 'react';
+import { Children, Fragment, cloneElement, isValidElement, useEffect, useId, useRef, useState } from 'react';
 import type { ReactElement, ReactNode } from 'react';
 
 export function Spinner({ label = 'Loading' }: { label?: string }) {
@@ -227,6 +227,68 @@ export function Modal({
         <div className="p-4">{children}</div>
       </div>
     </div>
+  );
+}
+
+/**
+ * A delete that takes two deliberate steps.
+ *
+ * Opening this is the first. The word DELETE has to be typed before the
+ * button will run, so a mis-click — or Enter on a browser prompt — cannot
+ * remove a test, an attempt, or a provider.
+ */
+export function ConfirmDelete({
+  open,
+  title,
+  children,
+  busy,
+  error,
+  actionLabel = 'Delete',
+  onClose,
+  onConfirm,
+}: {
+  open: boolean;
+  title: string;
+  children: React.ReactNode;
+  busy?: boolean;
+  error?: string | null;
+  actionLabel?: string;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const [typed, setTyped] = useState('');
+
+  useEffect(() => {
+    if (open) setTyped('');
+  }, [open]);
+
+  const ready = typed === 'DELETE';
+
+  return (
+    <Modal open={open} onClose={busy ? () => undefined : onClose} title={title}>
+      <div className="space-y-4">
+        {error && <Alert tone="error">{error}</Alert>}
+        <div className="text-sm text-ink-muted space-y-2">{children}</div>
+        <Field label="Type DELETE to confirm" required>
+          <input
+            className="input font-mono"
+            value={typed}
+            onChange={(e) => setTyped(e.target.value)}
+            autoComplete="off"
+            autoFocus
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && ready && !busy) onConfirm();
+            }}
+          />
+        </Field>
+        <div className="flex justify-end gap-2">
+          <button type="button" className="btn-secondary" onClick={onClose} disabled={busy}>Cancel</button>
+          <button type="button" className="btn-danger" onClick={onConfirm} disabled={busy || !ready}>
+            {busy ? 'Deleting…' : actionLabel}
+          </button>
+        </div>
+      </div>
+    </Modal>
   );
 }
 

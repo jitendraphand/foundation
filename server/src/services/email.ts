@@ -1,4 +1,5 @@
 import { prisma } from '../db.js';
+import { postWebhook } from './n8n-delivery.js';
 
 export interface EmailPayload {
   to: string;
@@ -42,21 +43,7 @@ export async function sendEmail(to: string, subject: string, message: string): P
   }
 
   if (webhookUrl) {
-    try {
-      const res = await fetch(webhookUrl, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ to: normalized, subject, message, from: 'Foundation' }),
-        signal: AbortSignal.timeout(8000),
-      });
-      if (!res.ok) {
-        const txt = await res.text().catch(() => '');
-        return { sent: false, via: 'n8n', error: `n8n ${res.status}: ${txt.slice(0, 300)}` };
-      }
-      return { sent: true, via: 'n8n' };
-    } catch (e) {
-      return { sent: false, via: 'n8n', error: e instanceof Error ? e.message : String(e) };
-    }
+    return postWebhook(webhookUrl, { to: normalized, subject, message, from: 'Foundation' });
   }
 
   // Fallback: log (no n8n configured). In production, admin should configure n8n.

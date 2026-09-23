@@ -439,17 +439,17 @@ async function loadValidTags(): Promise<ValidTags> {
 }
 
 /**
- * How many questions to ask for in a single call to the model.
+ * How many questions to ask for when nobody has said how long a reply may be.
  *
- * Not a matter of taste: a batch has to fit in the model's output budget, and
- * a question with worked explanations and diagram source runs to well over a
- * thousand tokens. Ask for forty in one go and the reply is truncated
- * mid-JSON, which surfaces as "the model did not return questions in the
- * required format" - which is true, but blames the wrong thing.
- *
- * Ten is comfortable for every provider here. Larger requests are split.
+ * A batch has to fit in the output budget. With no ceiling on file, ten is
+ * what we ask for, and the completion itself stays inside 32k tokens. An
+ * administrator's reply limit replaces this: 200000 tokens at 1500 each holds
+ * a hundred questions, and that run is one call.
  */
 const QUESTIONS_PER_CALL = 10;
+
+/** Applied only when neither the credential nor the provider names a ceiling. */
+const DEFAULT_OUTPUT_CAP = 32_000;
 
 /**
  * A one-line summary of a question, used to tell a later batch what has
@@ -466,27 +466,34 @@ function firstLineOf(question: { content?: { blocks?: Array<Record<string, unkno
  * How many questions one call may ask for, given what the provider will let us
  * request as a completion.
  *
- * Ten is comfortable where the ceiling is generous. Oracle Cloud caps a
- * completion at 4096 tokens and rejects anything larger outright, which at
- * ~1400 tokens a question is two - so on OCI a run is more, smaller calls
- * rather than one that fails.
+ * The reply limit is the whole constraint. Oracle Cloud caps a completion at
+ * 4096 tokens and rejects anything larger outright, which at ~1400 tokens a
+ * question is two calls. A credential whose reply limit is 200000, at 1500
+ * tokens a question, holds a hundred in one call. Cutting that back to ten
+ * would spend ten round-trips the budget had already paid for.
  *
- * Clamping the token request alone would be worse than useless: the call would
- * succeed and the reply would be cut off mid-JSON, turning a clear 400 into
- * "the model did not return questions in the required format", which blames
- * the model for our arithmetic.
+ * With no limit known, the fallback is ten. Clamping the token request alone
+ * would be worse than useless: the call would succeed and the reply would be
+ * cut off mid-JSON, turning a clear 400 into "the model did not return
+ * questions in the required format", which blames the model for our arithmetic.
  */
 export function questionsPerCall(tokensPerQuestion: number, maxOutputTokens?: number): number {
-  if (!maxOutputTokens) return QUESTIONS_PER_CALL;
+  if (!maxOutputTokens || maxOutputTokens <= 0) return QUESTIONS_PER_CALL;
   // A little headroom for the JSON envelope around the questions themselves.
   const usable = Math.floor(maxOutputTokens * 0.9);
-  return Math.max(1, Math.min(QUESTIONS_PER_CALL, Math.floor(usable / tokensPerQuestion)));
+  return Math.max(1, Math.floor(usable / Math.max(1, tokensPerQuestion)));
 }
 
-/** The completion size to ask for, never above what the provider accepts. */
+/**
+ * The completion size to ask for, never above what this call is allowed.
+ *
+ * The allowance is the credential's reply limit when one is set, including a
+ * limit above 32k. 32k is only the stand-in for "nobody has said".
+ */
 export function tokenBudget(tokensPerQuestion: number, count: number, maxOutputTokens?: number): number {
   const wanted = tokensPerQuestion * Math.max(1, count);
-  return Math.min(wanted, maxOutputTokens ?? 32_000, 32_000);
+  const cap = maxOutputTokens && maxOutputTokens > 0 ? maxOutputTokens : DEFAULT_OUTPUT_CAP;
+  return Math.min(wanted, cap);
 }
 
 /** Splits a total into batches of at most QUESTIONS_PER_CALL. */

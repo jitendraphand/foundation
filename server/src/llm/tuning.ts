@@ -93,6 +93,115 @@ export function reservedKeysIn(extraBody: Record<string, unknown> | undefined): 
   return Object.keys(extraBody ?? {}).filter((k) => RESERVED.has(k));
 }
 
+/**
+ * What an edited request body means as stored settings.
+ *
+ * The panel shows the whole request. `model`, `messages` and `stream_options`
+ * are filled in for each run, so a change to those is refused rather than
+ * stored. Everything else is kept: sampling fields as themselves, and any
+ * other key as extra fields merged into later requests.
+ */
+export function tuningFromRequestBody(
+  edited: Record<string, unknown>,
+  baseline: Record<string, unknown>,
+  previous: ModelTuning = {},
+): { ok: true; tuning: ModelTuning; maxOutputTokens?: number } | { ok: false; error: string } {
+  const changed = ['model', 'messages', 'stream_options'].filter(
+    (key) => stableJson(edited[key]) !== stableJson(baseline[key]),
+  );
+  if (changed.length > 0) {
+    return {
+      ok: false,
+      error:
+        `The server sets ${changed.join(', ')} itself for each run. ` +
+        'Leave those as they are and save the other changes.',
+    };
+  }
+
+  const tuning: ModelTuning = { ...previous };
+
+  if ('temperature' in edited) {
+    if (typeof edited.temperature !== 'number' || edited.temperature < 0 || edited.temperature > 2) {
+      return { ok: false, error: 'Temperature has to be a number from 0 to 2.' };
+    }
+    tuning.temperature = edited.temperature;
+  } else {
+    delete tuning.temperature;
+  }
+
+  if ('top_p' in edited) {
+    if (typeof edited.top_p !== 'number' || edited.top_p < 0 || edited.top_p > 1) {
+      return { ok: false, error: 'Top P has to be a number from 0 to 1.' };
+    }
+    tuning.topP = edited.top_p;
+  } else {
+    delete tuning.topP;
+  }
+
+  if ('seed' in edited) {
+    if (typeof edited.seed !== 'number' || !Number.isInteger(edited.seed)) {
+      return { ok: false, error: 'Seed has to be a whole number.' };
+    }
+    tuning.seed = edited.seed;
+  } else {
+    delete tuning.seed;
+  }
+
+  if (edited.stream === false) tuning.stream = false;
+  else if (edited.stream === true) tuning.stream = true;
+
+  const formatChanged = stableJson(edited.response_format) !== stableJson(baseline.response_format);
+  if (formatChanged) {
+    if (edited.response_format == null) tuning.jsonMode = 'off';
+    else if (stableJson(edited.response_format) === stableJson({ type: 'json_object' })) tuning.jsonMode = 'on';
+    else tuning.jsonMode = 'off';
+  }
+
+  const editedMax = tokenField(edited);
+  const baseMax = tokenField(baseline);
+  let maxOutputTokens: number | undefined;
+  if (editedMax !== undefined && editedMax !== baseMax) {
+    if (editedMax < 256 || editedMax > 200_000) {
+      return { ok: false, error: 'A reply limit has to be between 256 and 200000 tokens.' };
+    }
+    maxOutputTokens = editedMax;
+  }
+
+  const skip = new Set([
+    'model', 'messages', 'stream', 'stream_options',
+    'temperature', 'top_p', 'seed', 'max_tokens', 'max_completion_tokens', 'response_format',
+  ]);
+  const extra: Record<string, unknown> = {};
+  if (
+    formatChanged &&
+    edited.response_format != null &&
+    stableJson(edited.response_format) !== stableJson({ type: 'json_object' })
+  ) {
+    extra.response_format = edited.response_format;
+  }
+  for (const [key, value] of Object.entries(edited)) {
+    if (!skip.has(key)) extra[key] = value;
+  }
+  tuning.extraBody = extra;
+
+  return { ok: true, tuning, maxOutputTokens };
+}
+
+function tokenField(body: Record<string, unknown>): number | undefined {
+  if (typeof body.max_completion_tokens === 'number') return body.max_completion_tokens;
+  if (typeof body.max_tokens === 'number') return body.max_tokens;
+  return undefined;
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    return `{${Object.keys(obj).sort().map((key) => `${JSON.stringify(key)}:${stableJson(obj[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'undefined';
+}
+
 /** extraBody with the server's own fields removed. */
 export function safeExtraBody(extraBody: Record<string, unknown> | undefined): Record<string, unknown> {
   const out: Record<string, unknown> = {};

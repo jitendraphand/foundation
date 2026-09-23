@@ -680,18 +680,16 @@ function DeleteUserModal({ user, onClose, onDone }: { user: UserRow; onClose: ()
         </p>
 
         <label className="flex items-start gap-2 text-sm">
-          <input type="checkbox" className="accent-bad mt-0.5" checked={hard} onChange={(e) => setHard(e.target.checked)} />
+          <input type="checkbox" className="accent-bad mt-0.5" checked={hard} onChange={(e) => { setHard(e.target.checked); setConfirm(''); }} />
           <span className="text-ink-muted">
             Permanently erase everything, including all {user._count.attempts} of their test results. This cannot be
             undone.
           </span>
         </label>
 
-        {hard && (
-          <Field label={`Type ${user.username} to confirm`} required>
-            <input className="input font-mono" value={confirm} onChange={(e) => setConfirm(e.target.value)} />
-          </Field>
-        )}
+        <Field label={hard ? `Type ${user.username} to confirm` : 'Type DELETE to confirm'} required>
+          <input className="input font-mono" value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="off" />
+        </Field>
 
         <div className="flex justify-end gap-2">
           <button type="button" className="btn-secondary" onClick={onClose}>Cancel</button>
@@ -699,7 +697,7 @@ function DeleteUserModal({ user, onClose, onDone }: { user: UserRow; onClose: ()
             type="button"
             className="btn-danger"
             onClick={remove}
-            disabled={busy || (hard && confirm !== user.username)}
+            disabled={busy || confirm !== (hard ? user.username : 'DELETE')}
           >
             {busy ? 'Deleting…' : hard ? 'Permanently delete' : 'Delete'}
           </button>
